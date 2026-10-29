@@ -1,7 +1,7 @@
 name: Build Windows exe
 
 # Builds Snapshots.exe on a Windows machine at GitHub.
-#   - Push a tag like v0.1.0 to publish the exe on the repository's Releases page.
+#   - Push a tag like v0.3.0 to publish the exe on the repository's Releases page.
 #   - Or open the Actions tab, pick this workflow and press "Run workflow";
 #     the exe is then attached to the run as a download.
 on:
@@ -34,7 +34,7 @@ jobs:
       - name: Build exe
         run: pyinstaller --noconfirm --clean snapshots.spec
 
-      - name: Smoke test the built exe
+      - name: Smoke test the built exe (server only)
         shell: pwsh
         run: |
           # Start the real exe on a tiny library and check it works end to end.
@@ -78,7 +78,7 @@ jobs:
           }
           Get-Process -Name Snapshots -ErrorAction SilentlyContinue | Stop-Process -Force
           Write-Host '--- exe output ---'
-          Get-Content smoke.out.log, smoke.err.log -ErrorAction SilentlyContinue
+          Get-Content smoke.out.log, smoke.err.log, (Join-Path $data 'snapshots.log') -ErrorAction SilentlyContinue
 
           if (-not $up)                  { throw 'The exe did not start.' }
           if (-not $status)              { throw 'The exe did not index the test photo.' }
@@ -88,6 +88,62 @@ jobs:
           if ($thumb.StatusCode -ne 200) { throw 'Thumbnails are not being made.' }
           if ($anon -ne 401)             { throw 'The library was visible without logging in.' }
           Write-Host "Smoke test passed: $($status.photos) photo indexed, login required, HEIC support present."
+
+      - name: Smoke test the app window
+        shell: pwsh
+        run: |
+          # Start the exe the way a double-click does: no options, so it opens its own window.
+          $lib  = Join-Path $env:RUNNER_TEMP 'win-lib'
+          $data = Join-Path $env:RUNNER_TEMP 'win-data'
+          $conf = Join-Path $env:RUNNER_TEMP 'win.toml'
+          New-Item -ItemType Directory -Force $lib | Out-Null
+          python -c "from PIL import Image; Image.new('RGB', (64, 64), (10, 120, 160)).save(r'$lib\a.jpg')"
+          [IO.File]::WriteAllText($conf, "faces = false`nplaces = false`nscan_interval_minutes = 0`n")
+
+          # A program with no console window has "GUI" (2) as its subsystem, a console program has 3.
+          $bytes = [IO.File]::ReadAllBytes((Resolve-Path 'dist\Snapshots.exe'))
+          $subsystem = [BitConverter]::ToUInt16($bytes, [BitConverter]::ToInt32($bytes, 0x3C) + 24 + 68)
+
+          Start-Process -FilePath 'dist\Snapshots.exe' -ArgumentList @('--library', $lib, '--data', $data, '--config', $conf, '--port', '8798')
+          $base = 'http://127.0.0.1:8798'
+          $up = $false
+          for ($i = 0; $i -lt 90 -and -not $up; $i++) {
+            Start-Sleep -Seconds 1
+            try { Invoke-RestMethod "$base/api/health" | Out-Null; $up = $true } catch { }
+          }
+
+          # The exe is two processes (a launcher and the program); the window belongs to one of them.
+          $win = $null
+          for ($i = 0; $i -lt 60 -and -not $win; $i++) {
+            $win = Get-Process -Name Snapshots -ErrorAction SilentlyContinue |
+                     Where-Object { $_.MainWindowTitle -eq 'Snapshots' } | Select-Object -First 1
+            if (-not $win) { Start-Sleep -Seconds 1 }
+          }
+
+          $closed = $false
+          if ($win) {
+            Start-Sleep -Seconds 3                      # let the page load
+            [void]$win.CloseMainWindow()                # the person closes the window...
+            for ($i = 0; $i -lt 45 -and -not $closed; $i++) {
+              Start-Sleep -Seconds 1
+              $closed = -not (Get-Process -Name Snapshots -ErrorAction SilentlyContinue)
+            }
+          }
+          $stillServing = $false
+          try { Invoke-RestMethod "$base/api/health" -TimeoutSec 3 | Out-Null; $stillServing = $true } catch { }
+          $storage = Test-Path (Join-Path $data 'webview')
+
+          Get-Process -Name Snapshots -ErrorAction SilentlyContinue | Stop-Process -Force
+          Write-Host '--- exe log ---'
+          Get-Content (Join-Path $data 'snapshots.log') -ErrorAction SilentlyContinue
+
+          if ($subsystem -ne 2)  { throw "Snapshots.exe still opens a console window (subsystem $subsystem)." }
+          if (-not $up)          { throw 'The exe did not start.' }
+          if (-not $win)         { throw 'The app window did not appear.' }
+          if (-not $closed)      { throw 'Closing the window did not stop Snapshots.' }
+          if ($stillServing)     { throw 'The server was still running after the window was closed.' }
+          if (-not $storage)     { throw 'The window did not create its storage folder (the login would not be remembered).' }
+          Write-Host 'Window smoke test passed: own window, no console, closing it stops Snapshots.'
 
       - uses: actions/upload-artifact@v4
         with:

@@ -1,5 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 # Build with:  pyinstaller --noconfirm snapshots.spec      (or just run build.bat)
+import importlib.util
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_all, collect_submodules
@@ -15,6 +16,11 @@ heif_datas, heif_binaries, heif_hidden = collect_all("pillow_heif")
 datas += heif_datas
 binaries += heif_binaries
 hiddenimports += heif_hidden
+
+# The app window: pywebview draws it with Microsoft's WebView2 through pythonnet. PyInstaller has
+# hooks for all three; the Windows-only parts are named here so a missing one fails loudly.
+if importlib.util.find_spec("webview") is not None:
+    hiddenimports += ["webview.platforms.winforms", "webview.platforms.edgechromium", "clr"]
 
 icon = "assets/icon.ico" if Path("assets/icon.ico").exists() else None
 
@@ -39,7 +45,7 @@ exe = EXE(
     [],
     name="Snapshots",
     icon=icon,
-    console=True,  # keeps a window open that shows what is happening; closing it stops the server
+    console=False,  # a normal Windows program: no black window. Output goes to snapshots.log
     upx=False,
     runtime_tmpdir=None,
 )

@@ -3,7 +3,7 @@
     python -m snapshots --library "D:\\Photos"
 
 The same code is the Snapshots.exe: double-click it and it asks for your photo folder the
-first time, remembers it, and opens your browser.
+first time, remembers it, and opens Snapshots in its own window.
 """
 
 import argparse
@@ -16,7 +16,7 @@ from pathlib import Path
 
 import uvicorn
 
-from . import __version__
+from . import __version__, shell
 from .app import create_app
 from .config import load_config, save_library_path
 
@@ -44,16 +44,23 @@ def pick_folder() -> Path | None:
 
 
 def pause_if_frozen() -> None:
-    """A double-clicked exe closes its window when it exits. Wait so the message can be read."""
-    if FROZEN:
+    """A double-clicked console exe closes its window when it exits. Wait so the message can be read."""
+    if FROZEN and shell.console == "own":
         try:
             input("\nPress Enter to close this window...")
         except (EOFError, KeyboardInterrupt, OSError):
             pass
 
 
+def notify(message: str, error: bool = False) -> None:
+    """Tell the person something: printed, and shown in a message box when there is no console."""
+    print(message, file=sys.stderr if error else sys.stdout)
+    if shell.console == "none":
+        shell.show_message(message, error=error)
+
+
 def fail(message: str, code: int = 2) -> int:
-    print(message, file=sys.stderr)
+    notify(message, error=True)
     pause_if_frozen()
     return code
 
@@ -72,6 +79,95 @@ def open_browser_when_ready(url: str, host: str, port: int, timeout: float = 30)
     webbrowser.open(url)
 
 
+def choose_ui(args, frozen: bool) -> str:
+    """How to show Snapshots: "window" (its own app window), "browser", or "none" (server only)."""
+    if args.no_browser:
+        return "none"
+    if args.open:
+        return "browser"
+    if args.window or frozen:
+        return "window"
+    return "none"
+
+
+def start_server(cfg) -> tuple[uvicorn.Server, threading.Thread]:
+    """Run the web server on a background thread (the app window needs the main thread)."""
+    server = uvicorn.Server(uvicorn.Config(create_app(cfg), host=cfg.host, port=cfg.port, log_level="info"))
+
+    def run() -> None:
+        try:
+            server.run()
+        except SystemExit:  # uvicorn's way of saying it could not start, e.g. the port is taken
+            pass
+
+    thread = threading.Thread(target=run, name="snapshots-server", daemon=True)
+    thread.start()
+    return server, thread
+
+
+def wait_until_up(server: uvicorn.Server, thread: threading.Thread, timeout: float = 60) -> bool:
+    """True once the server accepts connections; False if it stopped (e.g. the port is taken)."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if server.started:
+            return True
+        if not thread.is_alive():
+            return False
+        time.sleep(0.05)
+    return False
+
+
+def stop_server(server: uvicorn.Server, thread: threading.Thread) -> None:
+    server.should_exit = True
+    thread.join(timeout=20)
+
+
+def serve_with_ui(cfg, mode: str, url: str, check_host: str) -> int:
+    """Run the server on a thread and show the interface; returns when the person is done."""
+    window_url = f"http://{'127.0.0.1' if cfg.host in ('0.0.0.0', 'localhost', '127.0.0.1') else cfg.host}:{cfg.port}"
+    server, thread = start_server(cfg)
+    if not wait_until_up(server, thread):
+        if shell.snapshots_running(check_host, cfg.port):
+            # Double-clicked twice: just open another view of the copy that is already running.
+            print("Snapshots is already running; showing it.")
+            if mode == "window":
+                try:
+                    shell.run_window(window_url, cfg.data_dir / "webview")
+                    return 0
+                except Exception as exc:
+                    print(f"Could not open the app window ({exc}).")
+            webbrowser.open(url)
+            return 0
+        return fail(
+            f"Snapshots could not start on port {cfg.port}.\n"
+            "Is it already running? Close the other Snapshots window, or use --port 8081.",
+            code=1,
+        )
+
+    try:
+        if mode == "window":
+            try:
+                shell.run_window(window_url, cfg.data_dir / "webview", thread)
+                if thread.is_alive():
+                    return 0  # window closed by the person: normal exit (the server stops below)
+                return fail("Snapshots stopped unexpectedly. See snapshots.log in the data folder.", code=1)
+            except Exception as exc:
+                print(f"Could not open the app window ({exc}). Opening your browser instead.")
+        webbrowser.open(url)
+        if shell.console == "none":
+            # No console to press Ctrl+C in, so this message is the way to stop Snapshots.
+            shell.show_message("Snapshots is open in your browser.\n\n"
+                               "Leave this message open while you use it. Press OK to stop Snapshots.")
+        else:
+            while thread.is_alive():
+                thread.join(0.5)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stop_server(server, thread)
+    return 0
+
+
 def reset_password(cfg, username: str, read_password=None) -> int:
     """For when the only administrator has forgotten their password."""
     from datetime import datetime
@@ -79,7 +175,7 @@ def reset_password(cfg, username: str, read_password=None) -> int:
 
     from . import auth, db
 
-    read_password = read_password or getpass
+    read_password = read_password or (shell.ask_password if shell.console == "none" else getpass)
     problem = auth.validate_username(username)
     if problem:
         return fail(problem)
@@ -96,18 +192,20 @@ def reset_password(cfg, username: str, read_password=None) -> int:
         if row:
             conn.execute("UPDATE users SET pw_hash = ? WHERE id = ?", (auth.hash_password(first), row["id"]))
             auth.end_all_sessions(conn, row["id"])
-            print(f"Password changed for {username}. Other devices have been logged out.")
+            notify(f"Password changed for {username}. Other devices have been logged out.")
         else:
             conn.execute(
                 "INSERT INTO users (username, pw_hash, is_admin, created_at) VALUES (?, ?, 1, ?)",
                 (username.strip(), auth.hash_password(first), datetime.now().isoformat(timespec="seconds")),
             )
-            print(f"Created administrator account {username}.")
+            notify(f"Created administrator account {username}.")
     pause_if_frozen()
     return 0
 
 
 def main(argv=None) -> int:
+    if sys.stdout is None or sys.stderr is None:  # the exe has no console window
+        shell.console = shell.prepare_streams(sys.argv[1:] if argv is None else argv)
     for stream in (sys.stdout, sys.stderr):  # odd characters in folder names must not crash printing
         try:
             stream.reconfigure(errors="replace")
@@ -124,8 +222,10 @@ def main(argv=None) -> int:
     p.add_argument("--no-index", action="store_true", help="Do not scan the library on start")
     p.add_argument("--reset-password", metavar="USER",
                    help="Set a new password for an account (creates it as an administrator if missing), then exit")
-    p.add_argument("--open", action="store_true", help="Open the browser on start (always on in the exe)")
-    p.add_argument("--no-browser", action="store_true", help="Do not open the browser on start")
+    p.add_argument("--window", action="store_true", help="Show Snapshots in its own window (the exe's default)")
+    p.add_argument("--open", "--browser", dest="open", action="store_true",
+                   help="Open Snapshots in your web browser instead of its own window")
+    p.add_argument("--no-browser", action="store_true", help="Do not open a window or browser on start")
     p.add_argument("--version", action="version", version=f"snapshots {__version__}")
     args = p.parse_args(argv)
 
@@ -140,6 +240,9 @@ def main(argv=None) -> int:
         )
     except (OSError, ValueError) as exc:
         return fail(f"Config error: {exc}")
+
+    if shell.console == "none":
+        shell.log_to_file(cfg.data_dir)  # nowhere else to print to
 
     if args.reset_password:
         return reset_password(cfg, args.reset_password)
@@ -163,14 +266,29 @@ def main(argv=None) -> int:
 
     local = "localhost" if cfg.host in ("127.0.0.1", "0.0.0.0", "localhost") else cfg.host
     url = f"http://{local}:{cfg.port}"
+    check_host = "127.0.0.1" if cfg.host in ("0.0.0.0", "localhost") else cfg.host
+
+    mode = choose_ui(args, FROZEN)
+    if mode == "window" and not shell.window_available():
+        print("The app window needs Microsoft Edge WebView2, which was not found. Using your browser instead.")
+        mode = "browser"
+
     print(f"Snapshots {__version__}")
     print(f"  Library : {cfg.library_path}")
     print(f"  Data    : {cfg.data_dir}")
     print(f"  Open    : {url}")
-    print("  Close this window to stop Snapshots.\n" if FROZEN else "  Press Ctrl+C to stop.\n")
+    if shell.console != "none":
+        if mode == "window":
+            print("  Close the Snapshots window to stop it.\n")
+        elif FROZEN and shell.console == "own":
+            print("  Close this window to stop Snapshots.\n")
+        else:
+            print("  Press Ctrl+C to stop.\n")
 
-    if (FROZEN or args.open) and not args.no_browser:
-        check_host = "127.0.0.1" if cfg.host in ("0.0.0.0", "localhost") else cfg.host
+    if mode == "window" or (mode == "browser" and shell.console == "none"):
+        return serve_with_ui(cfg, mode, url, check_host)
+
+    if mode == "browser":
         threading.Thread(
             target=open_browser_when_ready, args=(url, check_host, cfg.port), daemon=True
         ).start()
@@ -183,7 +301,7 @@ def main(argv=None) -> int:
         if exc.code not in (0, None):
             return fail(
                 f"Snapshots could not start on port {cfg.port}.\n"
-                "Is it already running? Close the other window, or use --port 8081.",
+                "Is it already running? Close the other Snapshots window, or use --port 8081.",
                 code=1,
             )
     return 0

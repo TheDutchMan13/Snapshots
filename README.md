@@ -2,11 +2,11 @@
 
 Snapshots is a self-hosted photo and video library for Windows. Your originals stay on your own drive, and the app indexes them locally for browsing, search, people and places. You can reach your library from your phone over Tailscale, with no cloud account or subscription required.
 
-> **Status:** early development (v0.2). Browsing, search, accounts, albums, favourites, trash, people and places all work. Automatic backup from a phone is not built yet, see [Roadmap](#roadmap).
+> **Status:** early development (v0.3). Browsing, search, accounts, albums, favourites, trash, people and places all work. Automatic backup from a phone is not built yet, see [Roadmap](#roadmap).
 
 ## What works today
 
-- Runs natively on Windows, with no Docker or WSL, packaged as a single `Snapshots.exe`
+- Runs natively on Windows, with no Docker or WSL, packaged as a single `Snapshots.exe` that opens in its own app window (no browser tab, no black console window)
 - **Keeps itself up to date:** rescans the library every 15 minutes (adjustable), and photos you move or rename keep their albums, favourites and faces
 - **Accounts:** everyone logs in. The first account is the administrator, who can add accounts for the family
 - **Albums** shared by everyone, **favourites** for each person, and a **trash** you can restore from
@@ -25,7 +25,7 @@ Snapshots is a self-hosted photo and video library for Windows. Your originals s
 ## Requirements
 
 - Windows 10 or 11
-- To run the exe: nothing else
+- To run the exe: nothing else. The app window uses Microsoft Edge WebView2, which comes with Windows 11 and current Windows 10. If a PC doesn't have it, Snapshots opens in your browser instead
 - To run from source or build the exe yourself: [Python 3.11 or newer](https://www.python.org/downloads/)
 - Optional: [ffmpeg](https://ffmpeg.org/download.html) on your `PATH`, for video thumbnails, dates and positions
 
@@ -33,10 +33,10 @@ Snapshots is a self-hosted photo and video library for Windows. Your originals s
 
 1. Get `Snapshots.exe` (see [Building the exe](#building-the-exe)) and put it anywhere, for example `C:\Snapshots`.
 2. Double-click it. The first time, it asks which folder holds your photos.
-3. Your browser opens on Snapshots. Create the first account: it becomes the administrator.
-4. The black window shows what Snapshots is doing, and **closing it stops Snapshots**.
+3. Snapshots opens in its own window. Create the first account: it becomes the administrator.
+4. **Closing the window stops Snapshots.** You stay logged in next time you open it. What Snapshots has been doing is written to `snapshots.log` in the data folder (`%LOCALAPPDATA%\Snapshots`), which helps if something goes wrong.
 
-Next time you double-click, it goes straight in. To pick a different photo folder, run `Snapshots.exe --change-library` from a terminal. Your choice is remembered in `%LOCALAPPDATA%\Snapshots\config.toml`.
+Next time you double-click, it goes straight in. Double-clicking while it is already running just shows the running copy. To pick a different photo folder, run `Snapshots.exe --change-library` from a terminal. Your choice is remembered in `%LOCALAPPDATA%\Snapshots\config.toml`.
 
 Windows may warn "Windows protected your PC" the first time, because the exe isn't code-signed. Choose **More info**, then **Run anyway**.
 
@@ -50,8 +50,10 @@ cd Snapshots
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
-python -m snapshots --library "D:\Photos" --open
+python -m snapshots --library "D:\Photos" --window
 ```
+
+Use `--open` instead of `--window` to open your web browser.
 
 The first scan starts automatically, and photos appear as they are found.
 
@@ -75,7 +77,9 @@ Copy `config.example.toml` to `config.toml` and edit it, or use command-line opt
 | | `min_faces_per_person` | `3` | Smaller unnamed groups are not listed on the People page |
 | | `places` | `true` | Turn GPS positions into town names |
 | `--reset-password NAME` | | | Set a new password for an account, then exit |
-| `--open` / `--no-browser` | | exe opens it, source doesn't | Open or don't open the browser on start |
+| `--window` | | exe: on, source: off | Show Snapshots in its own window |
+| `--open` / `--browser` | | off | Use your web browser instead of the app window |
+| `--no-browser` | | | Open nothing: just run the server |
 
 ## People and places
 
@@ -112,7 +116,7 @@ If Windows Security removes the exe after a build (programs made with PyInstalle
 
 ## Upgrading
 
-Replace the exe (or pull the new code) and start it again. Your database is upgraded automatically the first time. Version 0.2 adds accounts, so after upgrading from 0.1 you'll be asked to create the administrator account.
+Replace the exe (or pull the new code) and start it again. Your database is upgraded automatically the first time. Version 0.2 added accounts, so after upgrading from 0.1 you'll be asked to create the administrator account. Version 0.3 only changes how Snapshots opens (its own window instead of a browser tab); your accounts, albums and photos are untouched. You will need to log in once more, because the app window keeps its own login separate from your browser.
 
 ## Roadmap
 
@@ -121,6 +125,7 @@ Replace the exe (or pull the new code) and start it again. Your database is upgr
 - [x] Face detection and grouping
 - [x] Search by place
 - [x] Automatic rescans
+- [x] Its own app window
 - [ ] Android app with automatic backup
 - [ ] Map view (could use offline map tiles)
 - [ ] Search by what is in a photo
@@ -143,12 +148,13 @@ The tests build small libraries of generated images, so they don't touch your ph
 | `snapshots/faces.py` | Finds faces and groups them into people |
 | `snapshots/places.py` | Offline nearest-town lookup from GeoNames |
 | `snapshots/auth.py` | Passwords, sessions and login throttling |
+| `snapshots/shell.py` | The app window, and logging and message boxes for the exe (which has no console) |
 | `snapshots/media.py` | Reads dates, positions and camera info, makes thumbnails |
 | `snapshots/db.py` | SQLite schema, upgrades, search and paging |
 | `snapshots/app.py`, `routes_*.py` | Web server and JSON API |
 | `snapshots/static/` | The web interface (plain HTML, CSS and JavaScript, no build step) |
 | `snapshots.spec`, `build.bat` | Build recipe for `Snapshots.exe` |
-| `.github/workflows/build-exe.yml` | Builds and tests the exe on GitHub |
+| `.github/workflows/build-exe.yml` | Builds the exe on GitHub, then starts it and checks the window opens and closes properly |
 
 Contributions are welcome. Please open an issue before starting a large change so we can discuss the approach.
 
