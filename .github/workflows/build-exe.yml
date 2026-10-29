@@ -1,0 +1,102 @@
+name: Build Windows exe
+
+# Builds Snapshots.exe on a Windows machine at GitHub.
+#   - Push a tag like v0.1.0 to publish the exe on the repository's Releases page.
+#   - Or open the Actions tab, pick this workflow and press "Run workflow";
+#     the exe is then attached to the run as a download.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write   # lets the last step attach the exe to a release
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install
+        run: python -m pip install -r requirements-dev.txt pyinstaller
+
+      - name: Tests
+        run: python -m pytest -q
+
+      - name: Build exe
+        run: pyinstaller --noconfirm --clean snapshots.spec
+
+      - name: Smoke test the built exe
+        shell: pwsh
+        run: |
+          # Start the real exe on a tiny library and check it works end to end.
+          $lib  = Join-Path $env:RUNNER_TEMP 'smoke-lib'
+          $data = Join-Path $env:RUNNER_TEMP 'smoke-data'
+          $conf = Join-Path $env:RUNNER_TEMP 'smoke.toml'
+          New-Item -ItemType Directory -Force $lib | Out-Null
+          python -c "from PIL import Image; Image.new('RGB', (64, 64), (10, 120, 160)).save(r'$lib\a.jpg')"
+          # No downloads in the smoke test: faces and places are checked by the Python tests.
+          [IO.File]::WriteAllText($conf, "faces = false`nplaces = false`nscan_interval_minutes = 0`n")
+
+          $p = Start-Process -FilePath 'dist\Snapshots.exe' -PassThru `
+                 -ArgumentList @('--library', $lib, '--data', $data, '--config', $conf, '--port', '8799', '--no-browser') `
+                 -RedirectStandardOutput smoke.out.log -RedirectStandardError smoke.err.log
+
+          $base = 'http://127.0.0.1:8799'
+          $web = New-Object Microsoft.PowerShell.Commands.WebRequestSession
+          $hdr = @{ 'X-Snapshots-Request' = '1' }
+          $up = $false
+          for ($i = 0; $i -lt 90 -and -not $up; $i++) {
+            Start-Sleep -Seconds 1
+            try { Invoke-RestMethod "$base/api/health" | Out-Null; $up = $true } catch { }
+          }
+          $status = $null
+          if ($up) {
+            $body = @{ username = 'ci'; password = 'smoke test 123' } | ConvertTo-Json
+            Invoke-RestMethod -Method Post "$base/api/auth/setup" -Body $body -ContentType 'application/json' `
+              -Headers $hdr -WebSession $web | Out-Null
+            for ($i = 0; $i -lt 60; $i++) {
+              $s = Invoke-RestMethod "$base/api/status" -WebSession $web
+              if ($s.photos -ge 1 -and -not $s.scan.running) { $status = $s; break }
+              Start-Sleep -Seconds 1
+            }
+          }
+          if ($status) {
+            $login = Invoke-WebRequest "$base/login" -UseBasicParsing
+            $page  = Invoke-WebRequest "$base/" -UseBasicParsing
+            $js    = Invoke-WebRequest "$base/static/app.js" -UseBasicParsing
+            $thumb = Invoke-WebRequest "$base/api/assets/1/thumb" -UseBasicParsing -WebSession $web
+            $anon  = try { Invoke-WebRequest "$base/api/status" -UseBasicParsing; 200 } catch { $_.Exception.Response.StatusCode.value__ }
+          }
+          Get-Process -Name Snapshots -ErrorAction SilentlyContinue | Stop-Process -Force
+          Write-Host '--- exe output ---'
+          Get-Content smoke.out.log, smoke.err.log -ErrorAction SilentlyContinue
+
+          if (-not $up)                  { throw 'The exe did not start.' }
+          if (-not $status)              { throw 'The exe did not index the test photo.' }
+          if (-not $status.heif)         { throw 'HEIC support is missing from the exe.' }
+          if ($login.StatusCode -ne 200 -or $page.Content -notmatch 'Snapshots') { throw 'The web pages are not served.' }
+          if ($js.StatusCode    -ne 200) { throw 'Bundled web files are missing from the exe.' }
+          if ($thumb.StatusCode -ne 200) { throw 'Thumbnails are not being made.' }
+          if ($anon -ne 401)             { throw 'The library was visible without logging in.' }
+          Write-Host "Smoke test passed: $($status.photos) photo indexed, login required, HEIC support present."
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Snapshots-windows
+          path: dist/Snapshots.exe
+          if-no-files-found: error
+
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/Snapshots.exe

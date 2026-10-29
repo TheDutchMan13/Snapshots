@@ -1,0 +1,45 @@
+# -*- mode: python ; coding: utf-8 -*-
+# Build with:  pyinstaller --noconfirm snapshots.spec      (or just run build.bat)
+from pathlib import Path
+
+from PyInstaller.utils.hooks import collect_all, collect_submodules
+
+datas = [("snapshots/static", "snapshots/static")]  # the web interface
+binaries = []
+hiddenimports = collect_submodules("uvicorn") + ["multipart", "python_multipart"]
+# The face models are not bundled: they are downloaded on first use. OpenCV and NumPy are found by
+# PyInstaller's own hooks.
+
+# pillow-heif ships native codec libraries that PyInstaller will not find by itself.
+heif_datas, heif_binaries, heif_hidden = collect_all("pillow_heif")
+datas += heif_datas
+binaries += heif_binaries
+hiddenimports += heif_hidden
+
+icon = "assets/icon.ico" if Path("assets/icon.ico").exists() else None
+
+a = Analysis(
+    ["run_snapshots.py"],
+    pathex=["."],
+    binaries=binaries,
+    datas=datas,
+    hiddenimports=hiddenimports,
+    hookspath=[],
+    runtime_hooks=[],
+    excludes=["pytest", "httpx"],
+    noarchive=False,
+)
+pyz = PYZ(a.pure)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    a.binaries,
+    a.datas,
+    [],
+    name="Snapshots",
+    icon=icon,
+    console=True,  # keeps a window open that shows what is happening; closing it stops the server
+    upx=False,
+    runtime_tmpdir=None,
+)

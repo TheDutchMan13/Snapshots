@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# Your own settings and data never go in the repository
+config.toml
+*.db
+*.db-wal
+*.db-shm
+
+# Build output
+build/
+dist/

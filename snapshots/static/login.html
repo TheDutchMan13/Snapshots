@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Log in · Snapshots</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body class="login-page">
+<main class="login-card">
+  <h1 class="brand">Snapshots</h1>
+  <p id="intro" class="muted"></p>
+  <form id="form" novalidate>
+    <label for="username">User name</label>
+    <input id="username" name="username" autocomplete="username" required autofocus>
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" required>
+    <div id="confirm-row" hidden>
+      <label for="confirm">Type the password again</label>
+      <input id="confirm" name="confirm" type="password" autocomplete="new-password">
+    </div>
+    <p id="error" class="form-error" role="alert"></p>
+    <button id="submit" class="btn primary wide" type="submit">Log in</button>
+  </form>
+</main>
+<script src="/static/login.js"></script>
+</body>
+</html>

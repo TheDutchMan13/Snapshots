@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Snapshots</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div class="app">
+
+  <nav class="side" aria-label="Library">
+    <div class="brand">Snapshots</div>
+    <a class="nav" href="#/" data-route="all">All</a>
+    <a class="nav" href="#/photos" data-route="photos">Photos</a>
+    <a class="nav" href="#/videos" data-route="videos">Videos</a>
+    <a class="nav" href="#/favorites" data-route="favorites">Favourites</a>
+    <a class="nav" href="#/albums" data-route="albums">Albums</a>
+    <a class="nav" href="#/people" data-route="people">People</a>
+    <a class="nav" href="#/places" data-route="places">Places</a>
+    <a class="nav" href="#/trash" data-route="trash">Trash</a>
+    <div class="side-foot">
+      <button id="account-btn" class="nav account" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="account-menu">
+        <span id="account-name">Account</span>
+      </button>
+      <div id="account-menu" class="menu" hidden>
+        <button type="button" data-action="password">Change password</button>
+        <button type="button" data-action="users" class="admin-only">Accounts</button>
+        <button type="button" data-action="logout">Log out</button>
+      </div>
+    </div>
+  </nav>
+
+  <div class="main">
+    <header class="top">
+      <label class="sr-only" for="search">Search</label>
+      <input id="search" type="search" placeholder="Search by name, place, camera, year or month" autocomplete="off">
+      <button id="new-items" class="chip" type="button" hidden>New photos · Show</button>
+      <button id="select-btn" class="btn" type="button" aria-pressed="false">Select</button>
+      <button id="rescan" class="btn" type="button">Rescan</button>
+      <button id="upload-btn" class="btn primary" type="button">Upload</button>
+      <input id="upload-input" class="sr-only" type="file" multiple tabindex="-1"
+             accept="image/*,video/*,.heic,.heif,.avif,.mkv,.m4v,.3gp" aria-label="Choose files to upload">
+    </header>
+
+    <main id="scroller" class="content" tabindex="-1">
+      <div id="page-head" class="page-head" hidden></div>
+      <div id="collection" class="collection" hidden></div>
+      <div id="empty" class="empty" hidden>
+        <h2 id="empty-title"></h2>
+        <p id="empty-text"></p>
+      </div>
+      <div id="grid" class="grid"></div>
+      <div id="sentinel" class="sentinel" aria-hidden="true"></div>
+    </main>
+
+    <div id="actionbar" class="actionbar" role="toolbar" aria-label="Selected items" hidden>
+      <span id="sel-count" class="sel-count"></span>
+      <span class="spacer"></span>
+      <span id="sel-actions" class="sel-actions"></span>
+      <button id="sel-cancel" class="btn" type="button">Done</button>
+    </div>
+
+    <footer id="statusbar" class="status" role="status" aria-live="polite">
+      <span id="st-counts"></span>
+      <span id="st-scan"></span>
+      <span id="st-work"></span>
+      <span id="st-note"></span>
+      <span class="spacer"></span>
+      <span id="st-library"></span>
+    </footer>
+  </div>
+</div>
+
+<div id="drop" class="drop" hidden>Drop files to upload</div>
+
+<dialog id="viewer" class="viewer" aria-label="Viewer">
+  <div class="v-bar">
+    <span id="v-title" class="v-title"></span>
+    <button id="v-fav" class="v-btn" type="button" aria-pressed="false">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20.5s-7.5-4.6-9.3-9.4C1.4 7.6 3.6 4 7.2 4c2 0 3.6 1.1 4.8 2.8C13.2 5.1 14.8 4 16.8 4c3.6 0 5.8 3.6 4.5 7.1C19.5 15.9 12 20.5 12 20.5z"/></svg>
+      <span class="v-label">Favourite</span>
+    </button>
+    <button id="v-album" class="v-btn" type="button"><span class="v-label">Add to album</span></button>
+    <button id="v-trash" class="v-btn" type="button"><span class="v-label">Move to trash</span></button>
+    <button id="v-info" class="v-btn" type="button" aria-pressed="false"><span class="v-label">Info</span></button>
+    <a id="v-download" class="v-btn" href="#" download><span class="v-label">Download</span></a>
+    <button id="v-close" class="v-btn" type="button"><span class="v-label">Close</span></button>
+  </div>
+  <button id="v-prev" class="v-nav prev" type="button" aria-label="Previous">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7" /></svg>
+  </button>
+  <div id="v-stage" class="v-stage"></div>
+  <button id="v-next" class="v-nav next" type="button" aria-label="Next">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5l7 7-7 7" /></svg>
+  </button>
+  <aside id="v-panel" class="v-panel" hidden aria-label="Details">
+    <dl id="v-details"></dl>
+  </aside>
+</dialog>
+
+<dialog id="modal" class="modal" aria-labelledby="modal-title"></dialog>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
