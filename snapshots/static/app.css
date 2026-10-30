@@ -194,7 +194,8 @@ a.btn { display: inline-flex; align-items: center; color: inherit; text-decorati
 .card:hover .card-img img { filter: brightness(1.06); }
 .card-title { margin-top: 8px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card-meta { color: var(--muted); font-size: 13px; }
-.section-title { margin: 22px 0 10px; font-size: 18px; font-weight: 600; display: flex; gap: 12px; align-items: baseline; }
+.section-title { margin: 22px 0 10px; font-size: 18px; font-weight: 600; display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; }
+.section-title .muted { font-size: 14px; font-weight: 400; }
 .section-title a { font-size: 13px; font-weight: 400; }
 .people {
   display: grid; gap: 18px 12px;
@@ -209,6 +210,57 @@ a.btn { display: inline-flex; align-items: center; color: inherit; text-decorati
 .person .unnamed { color: var(--muted); font-style: italic; }
 .person small { color: var(--muted); }
 .info-line { margin: 4px 0 14px; color: var(--muted); }
+
+/* ---- search tabs */
+.tabs { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--surface); }
+.tab {
+  display: inline-flex; align-items: center; gap: 8px; height: 34px; padding: 0 14px;
+  border: 0; background: none; color: inherit; font: inherit; cursor: pointer;
+}
+.tab + .tab { border-left: 1px solid var(--border); }
+.tab .count { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+.tab[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent-ink); font-weight: 600; }
+.tab[aria-pressed="true"] .count { color: inherit; }
+.tab:hover { background: var(--accent-soft); }
+
+/* ---- events */
+.card-img { position: relative; }
+.card-badge {
+  position: absolute; left: 8px; top: 8px; padding: 2px 8px; border-radius: 10px;
+  background: rgba(0, 0, 0, .55); color: #fff; font-size: 12px; font-weight: 600;
+}
+
+/* ---- clean up */
+.cleanup-link {
+  display: flex; align-items: baseline; gap: 12px; margin: 8px 0 4px; padding: 14px 16px;
+  border: 1px solid var(--border); border-radius: 8px; background: var(--surface);
+  color: inherit; text-decoration: none;
+}
+.cleanup-link:hover { border-color: var(--accent); }
+.cleanup-link::after { content: "›"; margin-left: auto; color: var(--muted); font-size: 20px; line-height: 1; }
+.dup-groups { display: grid; gap: 14px; margin: 14px 0; }
+.dup-group { padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+.dup-head { display: flex; gap: 12px; align-items: baseline; margin-bottom: 10px; }
+.dup-row { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+.dup-item {
+  position: relative; display: flex; flex-direction: column; gap: 4px; padding: 0; text-align: left;
+  border: 2px solid transparent; border-radius: 8px; background: none; color: inherit; font: inherit; cursor: pointer;
+}
+.dup-item img { width: 100%; aspect-ratio: 4 / 3; object-fit: cover; border-radius: 6px; background: var(--tile); opacity: .45; }
+.dup-item.keep { border-color: var(--accent); }
+.dup-item.keep img { opacity: 1; }
+.dup-flag {
+  position: absolute; left: 6px; top: 6px; padding: 2px 8px; border-radius: 10px; font-size: 12px; font-weight: 600;
+  background: rgba(0, 0, 0, .6); color: #fff;
+}
+.dup-item.keep .dup-flag { background: var(--accent); color: var(--accent-text); }
+.dup-meta { display: flex; flex-wrap: wrap; gap: 2px 8px; padding: 0 4px 4px; font-size: 12px; color: var(--muted); }
+.dup-meta .best { color: var(--accent-ink); font-weight: 600; }
+.dup-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+
+/* ---- viewer details */
+.photo-text { white-space: pre-wrap; max-height: 12em; overflow-y: auto; font-size: 13px; }
+.quality-note { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .attribution { margin-top: 28px; font-size: 12px; color: var(--muted); }
 
 /* ---- selection bar */
@@ -342,6 +394,9 @@ a.btn { display: inline-flex; align-items: center; color: inherit; text-decorati
   .grid { grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); }
   .cards { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 12px; }
   .people { grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); }
+  .dup-row { grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); }
+  .tabs { width: 100%; }
+  .tab { flex: 1; justify-content: center; padding: 0 8px; font-size: 13px; }
   .avatar { width: 88px; height: 88px; }
   .status { padding: 0 12px; gap: 12px; }
   #st-library, #st-note, #st-work { display: none; }

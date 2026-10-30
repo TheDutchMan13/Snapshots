@@ -3,8 +3,11 @@
 In order of priority it:
 1. rescans the folder when asked, and automatically every `scan_interval_minutes`;
 2. looks up place names for photos with a GPS position;
-3. finds faces in new photos and groups them into people.
-Steps 2 and 3 work in small batches, so a rescan never waits long.
+3. measures photos for the Clean up page (copies, bursts, blur, darkness);
+4. finds faces in new photos and groups them into people;
+5. prepares search by content;
+6. reads text in photos.
+Steps 2-6 work in small batches, so a rescan never waits long.
 """
 
 import logging
@@ -14,7 +17,10 @@ from datetime import datetime, timedelta
 
 from . import db
 from .config import Config
+from .analysis import QualityJob
+from .clipsearch import ClipJob
 from .faces import FacesJob
+from .ocr import OcrJob
 from .places import PlacesJob
 from .scanner import Scanner
 
@@ -27,6 +33,9 @@ class Worker:
         self.scanner = Scanner(cfg)
         self.places = PlacesJob(cfg)
         self.faces = FacesJob(cfg)
+        self.quality = QualityJob(cfg)
+        self.clip = ClipJob(cfg)
+        self.ocr = OcrJob(cfg)
         self._wake = threading.Event()
         self._scan_requested = False
         self._remove_missing = False
@@ -80,7 +89,20 @@ class Worker:
             ),
             "places": dict(self.places.state, enabled=self.cfg.places),
             "faces": dict(self.faces.state, enabled=self.cfg.faces),
+            "checks": dict(self.quality.state, enabled=self.cfg.photo_checks),
+            "content": dict(self.clip.state, enabled=self.cfg.smart_search),
+            "text": dict(self.ocr.state, enabled=self.cfg.text_search),
         }
+
+    def _jobs(self):
+        """Background jobs in order of priority, with whether each is switched on."""
+        return [
+            (self.places, self.cfg.places),
+            (self.quality, self.cfg.photo_checks),
+            (self.faces, self.cfg.faces),
+            (self.clip, self.cfg.smart_search),
+            (self.ocr, self.cfg.text_search),
+        ]
 
     # ------------------------------------------------------------ internals
 
@@ -109,10 +131,10 @@ class Worker:
                     continue
 
                 did_work = False
-                if self.cfg.places:
-                    did_work = self.places.run_batch(conn, now, self._interrupted)
-                if not did_work and self.cfg.faces:
-                    did_work = self.faces.run_batch(conn, now, self._interrupted)
+                for job, enabled in self._jobs():
+                    if enabled and job.run_batch(conn, now, self._interrupted):
+                        did_work = True
+                        break
                 if did_work:
                     continue
 
@@ -121,8 +143,8 @@ class Worker:
                 wait = 3600.0
                 if self.next_scan_at:
                     wait = max(0.0, min(wait, self.next_scan_at - time.time()))
-                for job in (self.places, self.faces):
-                    if job.retry_at > now:
+                for job, enabled in self._jobs():
+                    if enabled and job.retry_at > now:
                         wait = min(wait, job.retry_at - now)
                 self._wake.wait(timeout=wait)
                 self._wake.clear()

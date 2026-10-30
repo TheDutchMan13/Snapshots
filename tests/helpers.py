@@ -14,9 +14,10 @@ ADMIN = ("admin", "correct horse battery")
 
 
 def make_jpeg(path: Path, taken: str | None = None, size=(640, 480), color=(200, 80, 60), camera=None,
-              gps: tuple[float, float] | None = None):
+              gps: tuple[float, float] | None = None, image=None, quality: int = 90):
+    """A JPEG with EXIF date, camera and GPS. `image` (a PIL image) is saved instead of a plain colour."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    img = Image.new("RGB", size, color)
+    img = image.convert("RGB") if image is not None else Image.new("RGB", size, color)
     exif = Image.Exif()
     if taken:
         exif.get_ifd(0x8769)[36867] = taken  # DateTimeOriginal
@@ -35,7 +36,7 @@ def make_jpeg(path: Path, taken: str | None = None, size=(640, 480), color=(200,
         g = exif.get_ifd(0x8825)
         g[1], g[2] = ("N" if lat >= 0 else "S"), dms(lat)
         g[3], g[4] = ("E" if lon >= 0 else "W"), dms(lon)
-    img.save(path, "JPEG", exif=exif)
+    img.save(path, "JPEG", exif=exif, quality=quality)
 
 
 def jpeg_bytes(color=(1, 2, 3)) -> bytes:
@@ -45,9 +46,12 @@ def jpeg_bytes(color=(1, 2, 3)) -> bytes:
 
 
 def new_client(tmp_path: Path, root: Path, **kw):
-    """A test client for a fresh install. Faces, places and timed scans are off unless asked for."""
+    """A test client for a fresh install. Faces, places, content and text search and timed scans are
+    off unless asked for (they need downloads); the photo checks are on."""
     kw.setdefault("faces", False)
     kw.setdefault("places", False)
+    kw.setdefault("smart_search", False)
+    kw.setdefault("text_search", False)
     kw.setdefault("scan_interval_minutes", 0)
     kw.setdefault("data_dir", tmp_path / "data")
     cfg = Config(library_path=root, **kw)

@@ -8,8 +8,8 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules
 datas = [("snapshots/static", "snapshots/static")]  # the web interface
 binaries = []
 hiddenimports = collect_submodules("uvicorn") + ["multipart", "python_multipart"]
-# The face models are not bundled: they are downloaded on first use. OpenCV and NumPy are found by
-# PyInstaller's own hooks.
+# The face, content-search and text-reading models are not bundled: they are downloaded on first use.
+# OpenCV, NumPy and onnxruntime are found by PyInstaller's own hooks.
 
 # pillow-heif ships native codec libraries that PyInstaller will not find by itself.
 heif_datas, heif_binaries, heif_hidden = collect_all("pillow_heif")
@@ -19,6 +19,9 @@ hiddenimports += heif_hidden
 
 # The app window: pywebview draws it with Microsoft's WebView2 through pythonnet. PyInstaller has
 # hooks for all three; the Windows-only parts are named here so a missing one fails loudly.
+# Search by content and text reading run on onnxruntime; its hook collects the native library.
+hiddenimports += ["onnxruntime", "onnxruntime.capi._pybind_state"]
+
 if importlib.util.find_spec("webview") is not None:
     hiddenimports += ["webview.platforms.winforms", "webview.platforms.edgechromium", "clr"]
 

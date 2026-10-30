@@ -32,3 +32,28 @@ face_threads = 2
 # Turn GPS positions into town names (downloads the GeoNames town list, about 14 MB, once).
 # Lookups happen on this computer; your locations are never sent anywhere.
 places = true
+# Two groups of faces that are this alike on average are put together automatically, if neither is
+# hidden and they don't have two different names. 0 turns this off.
+# face_merge_threshold = 0.42
+
+# Look for copies, bursts, blurry and dark photos (Clean up page). Needs no downloads.
+photo_checks = true
+# Copies differ in at most this many of 64 fingerprint bits. Higher finds more edited copies.
+# duplicate_distance = 8
+# Photos taken within burst_seconds of each other that differ in at most burst_distance bits are a burst.
+# burst_seconds = 30
+# burst_distance = 14
+# Lower these to flag fewer photos as blurry or too dark.
+# blur_threshold = 50
+# dark_threshold = 30
+
+# Events: a pause of this many hours starts a new event; events with fewer photos are not listed.
+# event_gap_hours = 4
+# event_min_items = 8
+
+# Search by what is in a photo, like "dog on the beach" (downloads a 154 MB model once).
+smart_search = true
+# Read text in photos (signs, screenshots, receipts) so it can be searched (downloads 11 MB once).
+text_search = true
+# How many CPU threads these two may use.
+search_threads = 2

@@ -29,6 +29,18 @@ class Config:
     face_threads: int = 2                  # CPU threads face recognition may use
     face_match_threshold: float = 0.50     # higher = stricter grouping (more, smaller groups)
     min_faces_per_person: int = 3          # unnamed groups smaller than this are not listed
+    face_merge_threshold: float = 0.42     # merge two groups this alike on average (0 turns it off)
+    photo_checks: bool = True              # find copies, bursts, blurry and dark photos
+    duplicate_distance: int = 8            # copies differ in at most this many of 64 fingerprint bits
+    burst_seconds: int = 30                # photos this close in time ...
+    burst_distance: int = 14               # ... and this alike are a burst
+    blur_threshold: float = 50             # sharpness below this is blurry
+    dark_threshold: float = 30             # average brightness (0-255) below this is too dark
+    event_gap_hours: float = 4             # a pause this long starts a new event
+    event_min_items: int = 8               # smaller events are not listed
+    smart_search: bool = True              # search by what is in a photo (downloads a 154 MB model)
+    text_search: bool = True               # read text in photos so it can be searched (11 MB model)
+    search_threads: int = 2                # CPU threads content and text search may use
     config_file: Path | None = None  # the file these settings were read from, if any
 
     @property
@@ -74,7 +86,10 @@ class Config:
 _FILE_KEYS = {
     "host": str, "port": int, "index_on_start": bool, "scan_interval_minutes": int,
     "faces": bool, "places": bool, "face_threads": int, "face_match_threshold": float,
-    "min_faces_per_person": int,
+    "min_faces_per_person": int, "face_merge_threshold": float,
+    "photo_checks": bool, "duplicate_distance": int, "burst_seconds": int, "burst_distance": int,
+    "blur_threshold": float, "dark_threshold": float, "event_gap_hours": float, "event_min_items": int,
+    "smart_search": bool, "text_search": bool, "search_threads": int,
 }
 
 

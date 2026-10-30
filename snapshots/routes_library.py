@@ -9,7 +9,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
 
-from . import __version__, db, media
+from . import __version__, analysis, db, media
 from pydantic import BaseModel
 
 from .app import current_user, require_admin, safe_filename
@@ -22,23 +22,35 @@ class ScanBody(BaseModel):
     remove_missing: bool = False
 
 
-def filter_params(
-    q: str = "",
-    kind: str = KIND,
-    favorite: bool = False,
-    trashed: bool = False,
-    album: int | None = None,
-    person: int | None = None,
-    country: str | None = None,
-    state: str | None = None,
-    city: str | None = None,
-) -> db.Filter:
-    return db.Filter(q=q, kind=kind, favorite=favorite, trashed=trashed, album=album, person=person,
-                     country=country, state=state, city=city)
+TIME_PATTERN = r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$"
 
 
-def asset_dict(row) -> dict:
-    return {
+def make_filter_params(cfg):
+    """The query parameters every grid understands, turned into a db.Filter."""
+
+    def filter_params(
+        q: str = Query("", max_length=200),
+        kind: str = KIND,
+        favorite: bool = False,
+        trashed: bool = False,
+        album: int | None = None,
+        person: int | None = None,
+        country: str | None = None,
+        state: str | None = None,
+        city: str | None = None,
+        start: str | None = Query(None, pattern=TIME_PATTERN),  # each parameter needs its own Query()
+        end: str | None = Query(None, pattern=TIME_PATTERN),
+        quality: bool = False,
+    ) -> db.Filter:
+        return db.Filter(q=q, kind=kind, favorite=favorite, trashed=trashed, album=album, person=person,
+                         country=country, state=state, city=city, start=start, end=end,
+                         low_quality=analysis.low_quality_sql(cfg) if quality else None)
+
+    return filter_params
+
+
+def asset_dict(row, score: float | None = None) -> dict:
+    out = {
         "id": row["id"],
         "filename": row["filename"],
         "path": row["path"],
@@ -55,6 +67,9 @@ def asset_dict(row) -> dict:
         "has_position": row["lat"] is not None,
         "v": row["sha1"][:8],  # changes when the file changes, so browsers refetch
     }
+    if score is not None:
+        out["score"] = round(score, 4)
+    return out
 
 
 def library_root(cfg) -> Path:
@@ -75,6 +90,7 @@ def original_path(cfg, rel: str) -> Path:
 def router(ctx) -> APIRouter:
     cfg, worker = ctx.cfg, ctx.worker
     r = APIRouter()
+    filter_params = make_filter_params(cfg)
 
     def get_row(asset_id: int, user_id: int):
         with db.session(cfg.db_path) as conn:
@@ -85,10 +101,25 @@ def router(ctx) -> APIRouter:
 
     # ------------------------------------------------------------ browsing
 
+    def content_matches(conn, f: db.Filter, user_id: int) -> list:
+        """Rows that look like f.q (search by content), best first, within the rest of the filter."""
+        ranked = worker.clip.search(conn, f.q)
+        if not ranked:
+            return []
+        score = dict(ranked)
+        g = db.Filter(**{**f.__dict__, "q": "", "ids": list(score)})
+        rows, _ = db.list_assets(conn, g, user_id, "", len(score))
+        return sorted(((row, score[row["id"]]) for row in rows), key=lambda x: -x[1])
+
     @r.get("/api/assets")
     def list_assets(request: Request, f: db.Filter = Depends(filter_params), cursor: str = "",
-                    limit: int = Query(120, ge=1, le=500)):
+                    limit: int = Query(120, ge=1, le=500), look: bool = False):
+        """The photos in a grid, newest first. look=true: photos whose content matches q, best first."""
         user = current_user(request)
+        if look:
+            with db.session(cfg.db_path) as conn:
+                found = content_matches(conn, f, user["id"]) if f.q.strip() else []
+            return {"items": [asset_dict(row, sc) for row, sc in found], "next": None}
         try:
             with db.session(cfg.db_path) as conn:
                 rows, next_cursor = db.list_assets(conn, f, user["id"], cursor, limit)
@@ -102,11 +133,27 @@ def router(ctx) -> APIRouter:
         with db.session(cfg.db_path) as conn:
             return {"months": db.timeline(conn, f, user["id"])}
 
+    @r.get("/api/search")
+    def search_summary(request: Request, f: db.Filter = Depends(filter_params)):
+        """How many photos match q by words and names, and how many by what they show."""
+        user = current_user(request)
+        with db.session(cfg.db_path) as conn:
+            where, params = db.where_clause(f, user["id"])
+            words = conn.execute(f"SELECT COUNT(*) FROM assets a WHERE {where}", params).fetchone()[0]
+            content = len(content_matches(conn, f, user["id"])) if f.q.strip() else 0
+            pending = worker.clip.pending(conn) if cfg.smart_search else 0
+        return {"q": f.q, "words": words, "content": content, "content_enabled": cfg.smart_search,
+                "content_ready": worker.clip.ready(), "content_pending": pending,
+                "content_message": worker.clip.state.get("message")}
+
     @r.get("/api/assets/{asset_id}")
     def get_asset(asset_id: int, request: Request):
         user = current_user(request)
         row = get_row(asset_id, user["id"])
         out = asset_dict(row)
+        out["text"] = row["ocr_text"]
+        out["quality"] = None if row["keep_quality"] else analysis.quality_label(
+            cfg, row["sharpness"], row["brightness"], row["highlights"])
         with db.session(cfg.db_path) as conn:
             out["people"] = [
                 {"face_id": p["id"], "person_id": p["person_id"], "name": p["name"]}

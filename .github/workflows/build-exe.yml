@@ -1,7 +1,7 @@
 name: Build Windows exe
 
 # Builds Snapshots.exe on a Windows machine at GitHub.
-#   - Push a tag like v0.3.0 to publish the exe on the repository's Releases page.
+#   - Push a tag like v0.4.0 to publish the exe on the repository's Releases page.
 #   - Or open the Actions tab, pick this workflow and press "Run workflow";
 #     the exe is then attached to the run as a download.
 on:
@@ -44,7 +44,7 @@ jobs:
           New-Item -ItemType Directory -Force $lib | Out-Null
           python -c "from PIL import Image; Image.new('RGB', (64, 64), (10, 120, 160)).save(r'$lib\a.jpg')"
           # No downloads in the smoke test: faces and places are checked by the Python tests.
-          [IO.File]::WriteAllText($conf, "faces = false`nplaces = false`nscan_interval_minutes = 0`n")
+          [IO.File]::WriteAllText($conf, "faces = false`nplaces = false`nsmart_search = false`ntext_search = false`nscan_interval_minutes = 0`n")
 
           $p = Start-Process -FilePath 'dist\Snapshots.exe' -PassThru `
                  -ArgumentList @('--library', $lib, '--data', $data, '--config', $conf, '--port', '8799', '--no-browser') `
@@ -98,7 +98,7 @@ jobs:
           $conf = Join-Path $env:RUNNER_TEMP 'win.toml'
           New-Item -ItemType Directory -Force $lib | Out-Null
           python -c "from PIL import Image; Image.new('RGB', (64, 64), (10, 120, 160)).save(r'$lib\a.jpg')"
-          [IO.File]::WriteAllText($conf, "faces = false`nplaces = false`nscan_interval_minutes = 0`n")
+          [IO.File]::WriteAllText($conf, "faces = false`nplaces = false`nsmart_search = false`ntext_search = false`nscan_interval_minutes = 0`n")
 
           # A program with no console window has "GUI" (2) as its subsystem, a console program has 3.
           $bytes = [IO.File]::ReadAllBytes((Resolve-Path 'dist\Snapshots.exe'))
@@ -144,6 +144,60 @@ jobs:
           if ($stillServing)     { throw 'The server was still running after the window was closed.' }
           if (-not $storage)     { throw 'The window did not create its storage folder (the login would not be remembered).' }
           Write-Host 'Window smoke test passed: own window, no console, closing it stops Snapshots.'
+
+      - name: Smoke test search by content and text reading
+        shell: pwsh
+        run: |
+          # The exe downloads the two models (about 165 MB), reads the words in a photo, and learns what is in it.
+          $lib  = Join-Path $env:RUNNER_TEMP 'ai-lib'
+          $data = Join-Path $env:RUNNER_TEMP 'ai-data'
+          $conf = Join-Path $env:RUNNER_TEMP 'ai.toml'
+          New-Item -ItemType Directory -Force $lib | Out-Null
+          python -c "from PIL import Image, ImageDraw, ImageFont; im = Image.new('RGB', (1200, 600), (40, 110, 60)); d = ImageDraw.Draw(im); d.rectangle((80, 220, 1120, 360), fill=(250, 250, 240)); d.text((110, 240), 'WELCOME TO SEDONA', font=ImageFont.truetype(r'C:\Windows\Fonts\arialbd.ttf', 90), fill=(10, 10, 10)); im.save(r'$lib\sign.jpg')"
+          [IO.File]::WriteAllText($conf, "faces = false`nplaces = false`nscan_interval_minutes = 0`n")
+
+          $p = Start-Process -FilePath 'dist\Snapshots.exe' -PassThru `
+                 -ArgumentList @('--library', $lib, '--data', $data, '--config', $conf, '--port', '8797', '--no-browser')
+          $base = 'http://127.0.0.1:8797'
+          $web = New-Object Microsoft.PowerShell.Commands.WebRequestSession
+          $hdr = @{ 'X-Snapshots-Request' = '1' }
+          $up = $false
+          for ($i = 0; $i -lt 90 -and -not $up; $i++) {
+            Start-Sleep -Seconds 1
+            try { Invoke-RestMethod "$base/api/health" | Out-Null; $up = $true } catch { }
+          }
+          $done = $null
+          if ($up) {
+            $body = @{ username = 'ci'; password = 'smoke test 123' } | ConvertTo-Json
+            Invoke-RestMethod -Method Post "$base/api/auth/setup" -Body $body -ContentType 'application/json' `
+              -Headers $hdr -WebSession $web | Out-Null
+            for ($i = 0; $i -lt 300; $i++) {
+              $s = Invoke-RestMethod "$base/api/status" -WebSession $web
+              $vectors = $s.photos -ge 1 -and -not $s.scan.running -and $s.content.pending -eq 0 -and $s.text.pending -eq 0 `
+                         -and -not $s.content.running -and -not $s.text.running
+              if ($vectors) { $done = $s; break }
+              Start-Sleep -Seconds 2
+            }
+          }
+          if ($done) {
+            $photo  = Invoke-RestMethod "$base/api/assets/1" -WebSession $web
+            $found  = Invoke-RestMethod "$base/api/search?q=sedona" -WebSession $web
+            $look   = Invoke-RestMethod "$base/api/search?q=a%20green%20sign" -WebSession $web
+            $clean  = Invoke-RestMethod "$base/api/cleanup" -WebSession $web
+          }
+          Get-Process -Name Snapshots -ErrorAction SilentlyContinue | Stop-Process -Force
+          Write-Host '--- exe log ---'
+          Get-Content (Join-Path $data 'snapshots.log') -ErrorAction SilentlyContinue | Select-Object -Last 40
+
+          if (-not $up)                     { throw 'The exe did not start.' }
+          if (-not $done)                   { throw "Search by content or text reading did not finish: $($s | ConvertTo-Json -Depth 4)" }
+          if ($done.content.message)        { throw "Search by content failed: $($done.content.message)" }
+          if ($done.text.message)           { throw "Text reading failed: $($done.text.message)" }
+          if ($photo.text -notmatch 'SEDONA') { throw "The words in the photo were not read (got '$($photo.text)')." }
+          if ($found.words -ne 1)           { throw 'Searching for a word in the photo did not find it.' }
+          if (-not $look.content_ready -or $look.content -lt 1) { throw 'Search by content found nothing.' }
+          if (-not $clean.enabled)          { throw 'The photo checks are not running.' }
+          Write-Host "Search smoke test passed: read '$($photo.text)', content search ready."
 
       - uses: actions/upload-artifact@v4
         with:

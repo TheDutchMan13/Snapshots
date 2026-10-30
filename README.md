@@ -2,7 +2,7 @@
 
 Snapshots is a self-hosted photo and video library for Windows. Your originals stay on your own drive, and the app indexes them locally for browsing, search, people and places. You can reach your library from your phone over Tailscale, with no cloud account or subscription required.
 
-> **Status:** early development (v0.3). Browsing, search, accounts, albums, favourites, trash, people and places all work. Automatic backup from a phone is not built yet, see [Roadmap](#roadmap).
+> **Status:** early development (v0.4). Browsing, search, accounts, albums, favourites, trash, people, places, events and clean-up all work. Automatic backup from a phone is not built yet, see [Roadmap](#roadmap).
 
 ## What works today
 
@@ -12,7 +12,11 @@ Snapshots is a self-hosted photo and video library for Windows. Your originals s
 - **Albums** shared by everyone, **favourites** for each person, and a **trash** you can restore from
 - **People:** faces are found and grouped automatically, on your own computer. Name someone, merge two groups of the same person, or hide someone
 - **Places:** photos with a GPS position are labelled with the nearest town, worked out offline
-- One search box for everything: names of people, places, file names, cameras, years and months (`grandma`, `sedona`, `pixel 2024`, `december`)
+- **Events:** days out and trips are found automatically from when and where photos were taken, and can be saved as albums
+- **Clean up:** finds copies of the same photo, bursts of near-identical shots, and blurry or too-dark photos, and suggests which to keep. Nothing is deleted: the rest go to the trash
+- **Search by what's in a photo:** type `dog on the beach` or `birthday cake` and the best matches come first
+- **Text in photos:** words on signs, screenshots and receipts are read and can be searched
+- One search box for everything: people, places, things, text in photos, file names, cameras, years and months (`grandma`, `sedona`, `snow`, `pixel 2024`, `december`)
 - Timeline grouped by month, with fast infinite scrolling
 - Select many photos at once (Shift-click for a range) to favourite, add to an album or move to the trash
 - Full-screen viewer with arrow-key navigation, details (who is in it, where it was taken, which albums) and download
@@ -76,17 +80,31 @@ Copy `config.example.toml` to `config.toml` and edit it, or use command-line opt
 | | `face_match_threshold` | `0.50` | How alike faces must be to be grouped (higher is stricter) |
 | | `min_faces_per_person` | `3` | Smaller unnamed groups are not listed on the People page |
 | | `places` | `true` | Turn GPS positions into town names |
+| | `face_merge_threshold` | `0.42` | Merge two groups of faces this alike on average; `0` turns it off |
+| | `photo_checks` | `true` | Look for copies, bursts, blurry and dark photos |
+| | `duplicate_distance` | `8` | How different (out of 64) copies' fingerprints may be |
+| | `burst_seconds`, `burst_distance` | `30`, `14` | Photos this close in time and this alike are a burst |
+| | `blur_threshold`, `dark_threshold` | `50`, `30` | Lower them to flag fewer photos as blurry or dark |
+| | `event_gap_hours`, `event_min_items` | `4`, `8` | A pause this long starts a new event; smaller events are not listed |
+| | `smart_search` | `true` | Search by what's in a photo (downloads 154 MB once) |
+| | `text_search` | `true` | Read text in photos (downloads 11 MB once) |
+| | `search_threads` | `2` | CPU threads the two above may use |
 | `--reset-password NAME` | | | Set a new password for an account, then exit |
 | `--window` | | exe: on, source: off | Show Snapshots in its own window |
 | `--open` / `--browser` | | off | Use your web browser instead of the app window |
 | `--no-browser` | | | Open nothing: just run the server |
 
-## People and places
+## How the clever parts work
 
-Both run in the background after a scan, a few photos at a time, so the app stays responsive. The status bar shows how many photos are still to go.
+Everything runs on your own computer, in the background after a scan, a few photos at a time, so the app stays responsive. The status bar shows how many photos are still to go. Nothing about your photos is sent anywhere; the only network use is downloading each model once.
 
-- **Faces** are found with the YuNet detector and compared with the SFace recogniser, both run by OpenCV on your CPU. The two models (about 39 MB) are downloaded once from Hugging Face and checked against known SHA-256 hashes. Faces smaller than 40 pixels are ignored, because they are too blurry to recognise reliably. In a test on 1,200 photos of 598 people from the LFW face set, no group ever held two different people, and 98.8% of same-person photos were grouped together. When one person ends up in two groups, open one and choose **Same person as…**. If a face is in the wrong group, open the photo, press **Info**, and remove it.
+- **Faces** are found with the YuNet detector and compared with the SFace recogniser, both run by OpenCV on your CPU. The two models (about 39 MB) are downloaded once from Hugging Face and checked against known SHA-256 hashes. Faces smaller than 40 pixels are ignored, because they are too blurry to recognise reliably. In a test on 1,200 photos of 598 people from the LFW face set, no group ever held two different people, and 98.8% of same-person photos were grouped together. After new photos are added, groups of the same person are merged automatically when, on average, their faces are clearly alike (never two differently named people, and never hidden people). In a test on 1,862 LFW faces this removed some splits without a single wrong merge. When one person still ends up in two groups, open one and choose **Same person as…**. If a face is in the wrong group, open the photo, press **Info**, and remove it.
 - **Places** come from the GeoNames list of towns (about 14 MB), downloaded once. Lookups happen on your computer: your photo locations are never sent anywhere. Neighbourhoods are left out, so photos are labelled with the town.
+- **Events** are worked out from dates and places. Photos belong together unless more than 4 hours pass or the location jumps more than 30 km. Home is the town most of your photos were taken in: a day's photos at home make one event, and days away that follow each other make one trip.
+- **Copies and bursts** are found with a 64-bit "difference hash" of each thumbnail. In a test on 400 real photos, resized and recompressed copies were always found, and no two different photos were ever mistaken for copies. Photos taken within 30 seconds of each other that look alike are a burst. The suggested photo to keep has the most pixels, then is the sharpest.
+- **Blurry and dark photos** are found by measuring fine detail in the sharpest part of each photo, in the direction camera shake would blur, and the light level. A photo only counts as too dark if even its brightest parts are dim, so night and concert photos with lights are left alone. In the test, none of the 400 normal photos was flagged.
+- **Search by what's in a photo** uses OpenAI's CLIP model (ViT-B/32, 8-bit, about 154 MB). Each photo is learned once from its thumbnail, at about 60 ms per photo. Searches show the best matches first. It is good at things, scenes and activities, but it is approximate: for a description of one particular photo, the right one was the first result 57% of the time and in the first five 84% of the time.
+- **Text in photos** is read with PaddleOCR's English models (about 11 MB). In a test, 97% of words on signs in photos were read exactly. Text-heavy photos take about a quarter of a second each, and this runs last.
 
 ## Your files and safety
 
@@ -116,7 +134,7 @@ If Windows Security removes the exe after a build (programs made with PyInstalle
 
 ## Upgrading
 
-Replace the exe (or pull the new code) and start it again. Your database is upgraded automatically the first time. Version 0.2 added accounts, so after upgrading from 0.1 you'll be asked to create the administrator account. Version 0.3 only changes how Snapshots opens (its own window instead of a browser tab); your accounts, albums and photos are untouched. You will need to log in once more, because the app window keeps its own login separate from your browser.
+Replace the exe (or pull the new code) and start it again. Your database is upgraded automatically the first time. Version 0.2 added accounts, so after upgrading from 0.1 you'll be asked to create the administrator account. Version 0.3 only changes how Snapshots opens (its own window instead of a browser tab); your accounts, albums and photos are untouched. You will need to log in once more, because the app window keeps its own login separate from your browser. Version 0.4 then checks every photo once in the background (copies, blur, content and text), which takes a while for a big library; everything keeps working meanwhile.
 
 ## Roadmap
 
@@ -126,10 +144,11 @@ Replace the exe (or pull the new code) and start it again. Your database is upgr
 - [x] Search by place
 - [x] Automatic rescans
 - [x] Its own app window
+- [x] Events and trips
+- [x] Duplicate and burst finder, blurry and dark photos
+- [x] Search by what is in a photo, and by text in photos
 - [ ] Android app with automatic backup
 - [ ] Map view (could use offline map tiles)
-- [ ] Search by what is in a photo
-- [ ] Duplicate finder
 - [ ] Run at startup as a Windows service
 
 ## Development
@@ -139,7 +158,7 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-The tests build small libraries of generated images, so they don't touch your photos, and they need no internet. One extra test runs face recognition on real faces: point `SNAPSHOTS_TEST_MODELS` at a folder with the two model files, and `SNAPSHOTS_TEST_FACES` at a folder of photos named `<person>_<anything>.jpg`.
+The tests build small libraries of generated images, so they don't touch your photos, and they need no internet. Some extra tests use the real models: point `SNAPSHOTS_TEST_MODELS` at a Snapshots `models` folder (the face models, plus `clip` and `ocr` folders), and for faces also `SNAPSHOTS_TEST_FACES` at a folder of photos named `<person>_<anything>.jpg`.
 
 | File | Job |
 | --- | --- |
@@ -147,6 +166,10 @@ The tests build small libraries of generated images, so they don't touch your ph
 | `snapshots/worker.py` | Background thread: timed rescans, then places, then faces |
 | `snapshots/faces.py` | Finds faces and groups them into people |
 | `snapshots/places.py` | Offline nearest-town lookup from GeoNames |
+| `snapshots/analysis.py` | Copies, bursts, blurry and dark photos, and events |
+| `snapshots/clipsearch.py` | Search by what is in a photo (CLIP) |
+| `snapshots/ocr.py` | Reading text in photos |
+| `snapshots/downloads.py` | Downloading models once and checking their SHA-256 |
 | `snapshots/auth.py` | Passwords, sessions and login throttling |
 | `snapshots/shell.py` | The app window, and logging and message boxes for the exe (which has no console) |
 | `snapshots/media.py` | Reads dates, positions and camera info, makes thumbnails |
@@ -163,6 +186,9 @@ Contributions are welcome. Please open an issue before starting a large change s
 - Face detection: [YuNet](https://huggingface.co/opencv/face_detection_yunet), MIT licence
 - Face recognition: [SFace](https://huggingface.co/opencv/face_recognition_sface), Apache 2.0 licence
 - Place names: [GeoNames](https://www.geonames.org/), CC BY 4.0
+- Search by content: [CLIP](https://github.com/openai/CLIP) by OpenAI, MIT licence, in the ONNX version by [Xenova](https://huggingface.co/Xenova/clip-vit-base-patch32)
+- Text reading: [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR), Apache 2.0 licence, in the ONNX version by [RapidOCR](https://huggingface.co/SWHL/RapidOCR)
+- [ONNX Runtime](https://onnxruntime.ai/), MIT licence
 - [OpenCV](https://opencv.org/), [Pillow](https://python-pillow.org/), [pillow-heif](https://github.com/bigcat88/pillow_heif), [FastAPI](https://fastapi.tiangolo.com/)
 
 The models and place data are downloaded by each installation; they are not part of this repository.

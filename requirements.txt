@@ -5,4 +5,5 @@ pillow>=10.4
 pillow-heif>=0.18
 numpy>=1.26
 opencv-python-headless>=4.8
+onnxruntime>=1.17
 pywebview>=6.0; sys_platform == "win32"

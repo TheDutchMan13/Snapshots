@@ -10,6 +10,13 @@ that similarity is at least `face_match_threshold`; otherwise it starts a new pe
 The default (0.50) was chosen on 1,200 photos of 598 people from the LFW face set: no group
 ever held two different people, while 98.8% of same-person pairs were grouped together.
 (0.45 grouped slightly more but let a stranger into 2 groups.) Splits can be merged in the app.
+
+Faces are grouped one at a time, so the same person sometimes ends up in two groups (say, with and
+without glasses). After each round of new photos, `regroup` compares whole groups: two groups whose
+faces are, on average, at least `face_merge_threshold` alike become one. Only groups of 2 or more
+faces take part: on LFW (1,862 faces: 26 people with many photos among 572 others), merging single
+faces as well let strangers in, while this rule removed splits without a single wrong merge.
+Two differently named people, and hidden people, are never merged.
 """
 
 import hashlib
@@ -207,6 +214,65 @@ class Clusterer:
             self._refresh(row)
 
 
+def regroup(conn, threshold: float, min_faces: int = 2) -> int:
+    """Merge groups that are the same person (average-linkage). Returns how many merges were made."""
+    import numpy as np
+
+    if threshold <= 0:
+        return 0
+    people = {r["id"]: r["name"] for r in conn.execute("SELECT id, name FROM people WHERE hidden = 0")}
+    sums: dict[int, "np.ndarray"] = {}
+    counts: dict[int, int] = {}
+    for person_id, blob in conn.execute("SELECT person_id, embedding FROM faces WHERE person_id IS NOT NULL"):
+        if person_id not in people:
+            continue
+        v = np.frombuffer(blob, dtype=np.float32)
+        if person_id in sums:
+            sums[person_id] = sums[person_id] + v
+            counts[person_id] += 1
+        else:
+            sums[person_id] = v.astype(np.float32)
+            counts[person_id] = 1
+    ids = [i for i in sums if counts[i] >= min_faces]
+    if len(ids) < 2:
+        return 0
+    S = np.array([sums[i] for i in ids], dtype=np.float32)
+    n = np.array([counts[i] for i in ids], dtype=np.float32)
+    named = np.array([bool(people[i]) for i in ids])
+    # Average similarity of every face in one group with every face in another: unit vectors make
+    # that the dot product of the two sums, divided by both sizes.
+    link = (S @ S.T) / np.outer(n, n)
+    np.fill_diagonal(link, -1)
+    link[np.outer(named, named)] = -1          # two names: the person decided, leave them
+    alive = np.ones(len(ids), bool)
+    merges = 0
+    stamp = datetime.now().isoformat(timespec="seconds")
+    while True:
+        best = int(link.argmax())
+        a, b = divmod(best, len(ids))
+        if link[a, b] < threshold:
+            break
+        # keep the named group, or else the larger one
+        keep, gone = (a, b) if (named[a], n[a]) >= (named[b], n[b]) else (b, a)
+        conn.execute("UPDATE faces SET person_id = ? WHERE person_id = ?", (ids[keep], ids[gone]))
+        conn.execute("DELETE FROM people WHERE id = ?", (ids[gone],))
+        log.info("merged person %s into %s (alike %.2f) at %s", ids[gone], ids[keep], float(link[a, b]), stamp)
+        merges += 1
+        S[keep] += S[gone]
+        n[keep] += n[gone]
+        alive[gone] = False
+        row = (S @ S[keep]) / (n * n[keep])
+        row[~alive] = -1
+        row[keep] = -1
+        if named[keep]:
+            row[named] = -1
+        link[keep, :] = row
+        link[:, keep] = row
+        link[gone, :] = -1
+        link[:, gone] = -1
+    return merges
+
+
 class FacesJob:
     """Looks for faces in photos not yet checked. Run in small batches by the worker."""
 
@@ -216,6 +282,7 @@ class FacesJob:
         self.clusterer: Clusterer | None = None
         self.people_version = 0       # bumped whenever people are merged or faces reassigned
         self._clusterer_version = -1
+        self.needs_regroup = True     # after new faces (and once after starting): look for split people
         self.retry_at = 0.0
         self.state = {"running": False, "pending": 0, "message": None}
 
@@ -241,6 +308,15 @@ class FacesJob:
         if not rows:
             self.state["running"] = False
             self.unload()
+            if self.needs_regroup:
+                self.needs_regroup = False
+                try:
+                    if regroup(conn, self.cfg.face_merge_threshold):
+                        self.invalidate()
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    log.exception("could not regroup faces")
             return False
         root = self.cfg.library_path
         if root is None or not root.is_dir():
@@ -300,6 +376,7 @@ class FacesJob:
                  emb.tobytes(), stamp),
             ).lastrowid
             self.clusterer.add(person_id, emb)
+            self.needs_regroup = True
             try:
                 face["thumb"].save(self.cfg.face_path(face_id), "JPEG", quality=85)
             except OSError:

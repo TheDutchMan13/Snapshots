@@ -149,11 +149,15 @@ def index_file(cfg: Config, conn, rel: str, full: Path, digest: str | None = Non
         asset_id = prev["id"]
         forget_faces(cfg, conn, asset_id)
         _unlink(cfg.preview_path(asset_id))
+        conn.execute("DELETE FROM clip_vectors WHERE asset_id = ?", (asset_id,))
+        conn.execute("DELETE FROM not_duplicates WHERE a = ? OR b = ?", (asset_id, asset_id))
         conn.execute(
             """
             UPDATE assets SET filename = ?, kind = ?, size = ?, mtime_ns = ?, sha1 = ?, taken_at = ?,
                 width = ?, height = ?, camera = ?, lat = ?, lon = ?, geo_done = ?, faces_done = ?,
                 city = NULL, state = NULL, country = NULL, has_thumb = 0,
+                dhash = NULL, sharpness = NULL, brightness = NULL, highlights = NULL, quality_done = 0, keep_quality = 0,
+                clip_done = 0, ocr_done = 0, ocr_text = NULL,
                 trashed_at = NULL   -- a different picture now: never inherit the old one's trash state
             WHERE id = ?
             """,

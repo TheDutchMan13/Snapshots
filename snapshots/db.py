@@ -1,6 +1,7 @@
 """SQLite storage. One short-lived connection per request; the background worker keeps its own."""
 
 import calendar
+import json
 import re
 import sqlite3
 from contextlib import contextmanager
@@ -103,6 +104,34 @@ MIGRATIONS = [
     CREATE INDEX idx_faces_asset  ON faces (asset_id);
     CREATE INDEX idx_faces_person ON faces (person_id);
     """,
+    # 3 - version 0.4: photo checks (copies, bursts, blur, dark), search by content, text in photos
+    """
+    ALTER TABLE assets ADD COLUMN dhash INTEGER;           -- 64-bit picture fingerprint, NULL if flat or a video
+    ALTER TABLE assets ADD COLUMN sharpness REAL;
+    ALTER TABLE assets ADD COLUMN brightness REAL;
+    ALTER TABLE assets ADD COLUMN highlights REAL;          -- brightness of the brightest 1%
+    ALTER TABLE assets ADD COLUMN quality_done INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE assets ADD COLUMN keep_quality INTEGER NOT NULL DEFAULT 0;  -- "this one is fine" for blurry/dark
+    ALTER TABLE assets ADD COLUMN clip_done INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE assets ADD COLUMN ocr_done INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE assets ADD COLUMN ocr_text TEXT;
+    UPDATE assets SET ocr_done = 1 WHERE kind = 'video';
+    CREATE INDEX idx_assets_quality ON assets (quality_done) WHERE quality_done = 0;
+    CREATE INDEX idx_assets_clip    ON assets (clip_done) WHERE clip_done = 0;
+    CREATE INDEX idx_assets_ocr     ON assets (ocr_done) WHERE ocr_done = 0;
+    CREATE INDEX idx_assets_dhash   ON assets (dhash) WHERE dhash IS NOT NULL;
+
+    CREATE TABLE clip_vectors (
+        asset_id INTEGER PRIMARY KEY REFERENCES assets (id) ON DELETE CASCADE,
+        vec      BLOB NOT NULL                 -- 512 float16 values, unit length
+    );
+    CREATE TABLE not_duplicates (              -- pairs someone said are not copies of each other
+        a INTEGER NOT NULL REFERENCES assets (id) ON DELETE CASCADE,
+        b INTEGER NOT NULL REFERENCES assets (id) ON DELETE CASCADE,
+        PRIMARY KEY (a, b)
+    ) WITHOUT ROWID;
+    CREATE INDEX idx_not_duplicates_b ON not_duplicates (b);
+    """,
 ]
 SCHEMA_VERSION = len(MIGRATIONS)
 
@@ -165,6 +194,10 @@ class Filter:
     country: str | None = None     # a place: country, optionally narrowed by state and city
     state: str | None = None
     city: str | None = None
+    start: str | None = None       # taken between these two times (inclusive): an event
+    end: str | None = None
+    low_quality: str | None = None  # SQL condition for blurry/dark photos (built from the settings)
+    ids: list[int] | None = None   # only these photos (search by content)
 
 
 _MONTHS = {}
@@ -183,7 +216,7 @@ def where_clause(f: Filter, user_id: int | None) -> tuple[str, list]:
     """SQL for a Filter, on table alias `a`. Every search word must match (AND).
 
     A word can be a year / year-month / full date, a month name, or text looked for in
-    the file path, camera, place names and the names of people in the photo.
+    the file path, camera, place names, text read in the photo and the names of people in it.
     """
     where: list[str] = ["a.trashed_at IS NOT NULL" if f.trashed else "a.trashed_at IS NULL"]
     params: list = []
@@ -199,6 +232,17 @@ def where_clause(f: Filter, user_id: int | None) -> tuple[str, list]:
     if f.person is not None:
         where.append("a.id IN (SELECT asset_id FROM faces WHERE person_id = ?)")
         params.append(f.person)
+    if f.start:
+        where.append("a.taken_at >= ?")
+        params.append(f.start)
+    if f.end:
+        where.append("a.taken_at <= ?")
+        params.append(f.end)
+    if f.low_quality:
+        where.append(f.low_quality)
+    if f.ids is not None:
+        where.append("a.id IN (SELECT value FROM json_each(?))")
+        params.append(json.dumps(f.ids))
     for column in ("country", "state", "city"):
         value = getattr(f, column)
         if value is not None:
@@ -218,17 +262,20 @@ def where_clause(f: Filter, user_id: int | None) -> tuple[str, list]:
                 " OR lower(coalesce(a.city, '')) LIKE ?1 ESCAPE '\\'"
                 " OR lower(coalesce(a.state, '')) LIKE ?1 ESCAPE '\\'"
                 " OR lower(coalesce(a.country, '')) LIKE ?1 ESCAPE '\\'"
+                " OR lower(coalesce(a.ocr_text, '')) LIKE ?1 ESCAPE '\\'"
                 " OR a.id IN (SELECT f.asset_id FROM faces f JOIN people p ON p.id = f.person_id"
                 "             WHERE p.hidden = 0 AND lower(p.name) LIKE ?1 ESCAPE '\\'))"
                 .replace("?1", "?")
             )
-            params += [like] * 6
+            params += [like] * 7
     return " AND ".join(where), params
 
 
 ASSET_COLUMNS = (
     "a.id, a.path, a.filename, a.kind, a.size, a.sha1, a.taken_at, a.width, a.height, a.camera,"
-    " a.has_thumb, a.trashed_at, a.lat, a.lon, a.city, a.state, a.country"
+    " a.has_thumb, a.trashed_at, a.lat, a.lon, a.city, a.state, a.country, a.sharpness, a.brightness,"
+    " a.highlights,"
+    " a.keep_quality, a.ocr_text"
 )
 
 

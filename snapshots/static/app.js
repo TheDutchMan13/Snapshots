@@ -18,6 +18,8 @@ const S = {
   lastClicked: -1,
   viewing: -1,
   detail: null,      // full details of the photo open in the viewer
+  look: null,        // searching by what is in the photo (true), by words (false), or not chosen yet (null)
+  search: null,      // the last search summary: how many matches each way
 };
 
 // ------------------------------------------------------------------ helpers
@@ -214,6 +216,12 @@ function parseRoute() {
     case "videos": return { name: "videos", view: "grid", filter: { kind: "video" } };
     case "favorites": return { name: "favorites", view: "grid", filter: { favorite: "true" }, title: "Favourites" };
     case "trash": return { name: "trash", view: "grid", filter: { trashed: "true" }, title: "Trash" };
+    case "events":
+      if (parts[1] && parts[2]) return { name: "events", view: "grid", filter: { start: parts[1], end: parts[2] }, event: { start: parts[1], end: parts[2] } };
+      return { name: "events", view: "events" };
+    case "cleanup":
+      if (parts[1] === "quality") return { name: "cleanup", view: "grid", filter: { quality: "true" }, quality: true };
+      return { name: "cleanup", view: "cleanup" };
     case "albums":
       if (parts[1] && /^\d+$/.test(parts[1])) return { name: "albums", view: "grid", filter: { album: parts[1] }, album: +parts[1] };
       return { name: "albums", view: "albums" };
@@ -241,6 +249,7 @@ async function render() {
     else a.removeAttribute("aria-current");
   });
   if (!keepSearch) { S.q = ""; $("search").value = ""; }
+  S.look = null;
   keepSearch = false;
   stopSelecting();
   $("new-items").hidden = true;
@@ -266,6 +275,10 @@ async function render() {
       await renderPeople();
     } else if (S.route.view === "places") {
       await renderPlaces();
+    } else if (S.route.view === "events") {
+      await renderEvents();
+    } else if (S.route.view === "cleanup") {
+      await renderCleanup();
     }
   } catch (err) {
     showEmpty("Something went wrong", err.message);
@@ -290,9 +303,17 @@ function headRow(title, metaText, actions, note) {
   head.hidden = false;
 }
 
+const SEARCHABLE = ["all", "photos", "videos", "favorites"];
+
 async function renderHead() {
   const r = S.route;
-  if (r.album) {
+  if (S.q && SEARCHABLE.includes(r.name)) {
+    await renderSearchHead();
+  } else if (r.event) {
+    await renderEventHead(r.event);
+  } else if (r.quality) {
+    renderQualityHead();
+  } else if (r.album) {
     const album = await api(`/api/albums/${r.album}`);
     const range = album.first ? `${fmtMonth(album.first)}${fmtMonth(album.last) !== fmtMonth(album.first) ? " – " + fmtMonth(album.last) : ""}` : "";
     headRow(album.name, [plural(album.count, "item"), range].filter(Boolean).join(" · "), [
@@ -319,6 +340,96 @@ async function renderHead() {
       "Items in the trash are hidden everywhere else and can be restored. Emptying the trash deletes the files from your disk.");
   } else if (r.title) {
     headRow(r.title);
+  }
+}
+
+/** Search results: by words, names, places and dates, or by what is in the photo. */
+async function renderSearchHead() {
+  const q = S.q;
+  let sum;
+  try { sum = await api(`/api/search?${filterParams()}`); } catch (_) { sum = null; }
+  if (q !== S.q) return;
+  S.search = sum;
+  if (!sum) { $("page-head").hidden = true; S.look = false; return; }
+  if (S.look === null) S.look = sum.words === 0 && sum.content > 0;
+  const tabs = el("div", "tabs");
+  tabs.setAttribute("role", "group");
+  tabs.setAttribute("aria-label", "Search by");
+  const tab = (label, count, look) => {
+    const b = button("", "tab", () => {
+      if (S.look === look) return;
+      S.look = look;
+      tabs.querySelectorAll(".tab").forEach((t) => t.setAttribute("aria-pressed", String(t === b)));
+      stopSelecting();
+      reload();
+    });
+    b.append(el("span", null, label), el("span", "count", fmtInt(count)));
+    b.setAttribute("aria-pressed", String(S.look === look));
+    return b;
+  };
+  tabs.append(tab("Words, names and dates", sum.words, false));
+  let note = null;
+  if (sum.content_enabled) {
+    tabs.append(tab("What's in the photo", sum.content, true));
+    if (sum.content_message) note = sum.content_message;
+    else if (!sum.content_ready) note = "Search by what's in the photo starts once its model is downloaded.";
+    else if (sum.content_pending) note = `Still learning what's in your photos: ${plural(sum.content_pending, "photo")} to go.`;
+    else if (S.look) note = "Best matches first. Matching by content is approximate.";
+  }
+  headRow(el("h1", null, `“${q}”`), null, [tabs], note);
+}
+
+async function renderEventHead(ev) {
+  let info = null;
+  try {
+    const { events } = await api("/api/events");
+    info = events.find((e) => e.start === ev.start && e.end === ev.end);
+  } catch (_) { /* the photos still show */ }
+  const title = info ? eventTitle(info) : "Event";
+  headRow(title, info ? `${eventDates(info)} · ${plural(info.count, "item")}` : null, [
+    button("Save as album", "btn small", async () => {
+      const name = await askText("Save as album", "Album name", title, "Create album");
+      if (!name) return;
+      try {
+        const ids = await allIds();
+        const album = await post("/api/albums", { name, ids });
+        flashNote(`Album “${album.name}” created with ${plural(ids.length, "item")}`);
+      } catch (err) { flashNote(err.message); }
+    }),
+    link("All events", "#/events", "btn small"),
+  ]);
+}
+
+function renderQualityHead() {
+  headRow("Blurry or dark", null, [
+    button("All look fine", "btn small", async () => {
+      const ok = await confirmBox("Keep all of these?", "They won't be suggested here again. Nothing is moved or deleted.", "Keep them all");
+      if (!ok) return;
+      try { const ids = await allIds(); await post("/api/cleanup/fine", { ids }); await reload(); } catch (err) { flashNote(err.message); }
+    }),
+    button("Move all to trash", "btn small", async () => {
+      const ids = await allIds();
+      if (!ids.length) return;
+      const ok = await confirmBox(`Move ${plural(ids.length, "photo")} to the trash?`,
+        "They can be restored from the trash until it is emptied.", "Move to trash");
+      if (ok) await moveToTrash(ids);
+    }),
+    link("Clean up", "#/cleanup", "btn small"),
+  ], "Photos that look blurry or too dark. Select the ones to keep and press Looks fine, or move them to the trash.");
+}
+
+/** Every id in the current grid (not only the ones loaded so far). */
+async function allIds() {
+  const ids = [];
+  let cursor = "";
+  for (;;) {
+    const p = filterParams({ limit: 500 });
+    if (S.look) p.set("look", "true");
+    if (cursor) p.set("cursor", cursor);
+    const page = await api(`/api/assets?${p}`);
+    page.items.forEach((it) => ids.push(it.id));
+    if (!page.next) return ids;
+    cursor = page.next;
   }
 }
 
@@ -436,7 +547,7 @@ function appendItems(items) {
   const frag = document.createDocumentFragment();
   for (const item of items) {
     const month = item.taken_at.slice(0, 7);
-    if (month !== S.lastMonth) {
+    if (!S.look && month !== S.lastMonth) {
       S.lastMonth = month;
       frag.append(monthHeader(month));
     }
@@ -452,6 +563,7 @@ async function loadMore() {
   const gen = S.gen;
   try {
     const params = filterParams({ limit: PAGE });
+    if (S.look) params.set("look", "true");
     if (S.cursor) params.set("cursor", S.cursor);
     const page = await api(`/api/assets?${params}`);
     if (gen !== S.gen) return;
@@ -478,10 +590,13 @@ async function reload() {
   S.items = []; S.lastMonth = null;
   $("grid").replaceChildren();
   $("new-items").hidden = true;
-  try {
-    const t = await api(`/api/timeline?${filterParams()}`);
-    S.counts = Object.fromEntries(t.months.map((m) => [m.month, m.count]));
-  } catch (_) { S.counts = {}; }
+  if (S.look) S.counts = {};
+  else {
+    try {
+      const t = await api(`/api/timeline?${filterParams()}`);
+      S.counts = Object.fromEntries(t.months.map((m) => [m.month, m.count]));
+    } catch (_) { S.counts = {}; }
+  }
   await loadMore();
 }
 
@@ -532,7 +647,12 @@ function updateEmpty() {
   if (S.items.length > 0 || !S.loaded) { $("empty").hidden = true; return; }
   const st = S.status;
   const r = S.route;
-  if (S.q) showEmpty("No matches", "Try a different word, or clear the search.");
+  if (S.q && S.look) showEmpty("Nothing looks like that", S.search && !S.search.content_ready
+    ? "Search by what's in the photo is not ready yet." : "Try other words, like “dog”, “snow” or “birthday cake”.");
+  else if (S.q) showEmpty("No matches", S.search && S.search.content
+    ? "No names, places or dates match. Try “What's in the photo” above." : "Try a different word, or clear the search.");
+  else if (r.quality) showEmpty("Nothing to tidy up", "No blurry or dark photos were found.");
+  else if (r.event) showEmpty("No photos", "The photos of this event may all be in the trash.");
   else if (r.name === "trash") showEmpty("The trash is empty", "Photos you move to the trash appear here until the trash is emptied.");
   else if (r.name === "favorites") showEmpty("No favourites yet", "Open a photo and press Favourite, or select several and press Favourite.");
   else if (r.album) showEmpty("This album is empty", "Select photos anywhere in the library and choose Add to album.");
@@ -603,6 +723,13 @@ function updateSelection() {
     actions.append(button("Restore", "btn", () => restore(ids())));
     if (S.me && S.me.is_admin) actions.append(button("Delete permanently", "btn danger", () => deleteForever(ids())));
     return;
+  }
+  if (r.quality) {
+    actions.append(button("Looks fine", "btn", async () => {
+      const chosen = ids();
+      try { await post("/api/cleanup/fine", { ids: chosen }); removeItems(chosen); flashNote(`${plural(chosen.length, "photo")} kept`); }
+      catch (err) { flashNote(err.message); }
+    }));
   }
   const allFav = ids().every((id) => (S.items.find((it) => it.id === id) || {}).favorite);
   actions.append(button(allFav ? "Unfavourite" : "Favourite", "btn", () => setFavorite(ids(), !allFav)));
@@ -820,6 +947,169 @@ async function renderPlaces() {
   coll.replaceChildren(frag);
 }
 
+// ------------------------------------------------------------------ events page
+
+function fmtDay(iso, opts) {
+  const d = new Date(iso);
+  return isNaN(d) ? iso.slice(0, 10) : d.toLocaleDateString(undefined, opts);
+}
+function eventTitle(e) {
+  if (e.kind === "trip") return e.place ? `Trip to ${e.place}` : "A trip";
+  const day = fmtDay(e.start, { weekday: "long", day: "numeric", month: "long" });
+  return e.place ? `${e.place}, ${day}` : day;
+}
+function eventDates(e) {
+  const a = fmtDay(e.start, { day: "numeric", month: "short", year: "numeric" });
+  if (e.days <= 1) return a;
+  const b = fmtDay(e.end, { day: "numeric", month: "short", year: "numeric" });
+  return `${a} – ${b} · ${e.days} days`;
+}
+const eventHash = (e) => `#/events/${encodeURIComponent(e.start)}/${encodeURIComponent(e.end)}`;
+
+async function renderEvents() {
+  const { events } = await api("/api/events");
+  headRow("Events", events.length ? plural(events.length, "event") : null, [],
+    "Days out and trips, found from when and where photos were taken.");
+  if (!events.length) {
+    showEmpty("No events yet", "Events appear when several photos were taken close together. Trips are found from photos with a location.");
+    return;
+  }
+  const frag = document.createDocumentFragment();
+  let year = null, cards = null;
+  for (const e of events) {
+    const y = e.start.slice(0, 4);
+    if (y !== year) {
+      year = y;
+      frag.append(el("h2", "section-title", y));
+      cards = el("div", "cards");
+      frag.append(cards);
+    }
+    const card = link("", eventHash(e), "card");
+    const box = el("div", "card-img");
+    box.append(img(thumbUrl(e.cover, e.cover_v)));
+    if (e.kind === "trip") box.append(el("span", "card-badge", "Trip"));
+    card.append(box, el("div", "card-title", eventTitle(e)));
+    card.append(el("div", "card-meta", `${eventDates(e)} · ${plural(e.count, "item")}`));
+    cards.append(card);
+  }
+  $("collection").replaceChildren(frag);
+}
+
+// ------------------------------------------------------------------ clean up page
+
+async function renderCleanup() {
+  const sum = await api("/api/cleanup");
+  const st = sum.status || {};
+  headRow("Clean up", null, [], !sum.enabled ? "Photo checks are turned off in the settings."
+    : st.pending ? `Still checking photos: ${plural(st.pending, "photo")} to go.` : null);
+  if (!sum.enabled) { showEmpty("Photo checks are off", "Turn on photo_checks in config.toml."); return; }
+  const frag = document.createDocumentFragment();
+
+  const q = el("a", "cleanup-link");
+  q.href = "#/cleanup/quality";
+  q.append(el("strong", null, "Blurry or dark photos"), el("span", "muted", sum.low_quality ? plural(sum.low_quality, "photo") : "None found"));
+  frag.append(q);
+
+  const h = el("h2", "section-title", "Copies and bursts");
+  if (sum.groups) h.append(el("span", "muted", `${plural(sum.groups, "group")} · ${plural(sum.extra, "extra photo")}`));
+  frag.append(h);
+  if (!sum.groups) {
+    frag.append(el("p", "muted", "No copies or bursts found."));
+    $("collection").replaceChildren(frag);
+    return;
+  }
+  frag.append(el("p", "muted", "In each group the best photo (most pixels, then sharpest) is marked to keep. Click photos to change what to keep. Nothing is deleted: the rest go to the trash."));
+  const bulk = button(`Keep the best of every group`, "btn", async () => {
+    const ok = await confirmBox(`Move ${plural(sum.extra, "photo")} to the trash?`,
+      "Each group keeps its best photo. The others can be restored from the trash until it is emptied.", "Move to trash");
+    if (!ok) return;
+    try {
+      let moved = 0;
+      for (;;) {
+        const page = await api("/api/cleanup/groups?limit=100");
+        if (!page.groups.length) break;
+        for (const g of page.groups) {
+          const res = await post("/api/cleanup/resolve", { keep: [g.keep], trash: g.items.map((i) => i.id).filter((i) => i !== g.keep) });
+          moved += res.trashed;
+        }
+        if (page.groups.length < 100 && !page.next) break;
+      }
+      flashNote(`${plural(moved, "photo")} moved to the trash`);
+      refreshStatus();
+      render();
+    } catch (err) { flashNote(err.message); }
+  });
+  frag.append(bulk);
+  const list = el("div", "dup-groups");
+  frag.append(list);
+  const more = button("Show more", "btn", () => loadGroups());
+  frag.append(more);
+  $("collection").replaceChildren(frag);
+
+  let offset = 0;
+  async function loadGroups() {
+    more.disabled = true;
+    try {
+      const page = await api(`/api/cleanup/groups?offset=${offset}&limit=20`);
+      page.groups.forEach((g) => list.append(groupCard(g)));
+      offset = page.next || offset + page.groups.length;
+      more.hidden = !page.next;
+    } catch (err) { flashNote(err.message); }
+    more.disabled = false;
+  }
+  await loadGroups();
+}
+
+function groupCard(g) {
+  const card = el("section", "dup-group");
+  const keep = new Set([g.keep]);
+  const head = el("div", "dup-head");
+  head.append(el("strong", null, g.kind === "burst" ? "Burst" : "Copies"),
+    el("span", "muted", `${fmtDateTime(g.items[0].taken_at)} · ${plural(g.items.length, "photo")}`));
+  const row = el("div", "dup-row");
+  const draw = () => row.querySelectorAll(".dup-item").forEach((d) => {
+    const on = keep.has(+d.dataset.id);
+    d.classList.toggle("keep", on);
+    d.setAttribute("aria-pressed", String(on));
+    d.querySelector(".dup-flag").textContent = on ? "Keep" : "Trash";
+  });
+  for (const it of g.items) {
+    const b = el("button", "dup-item");
+    b.type = "button";
+    b.dataset.id = it.id;
+    b.title = it.path;
+    b.append(img(thumbUrl(it.id, it.v), it.filename), el("span", "dup-flag"));
+    const meta = el("span", "dup-meta");
+    meta.append(el("span", null, it.width && it.height ? `${it.width} × ${it.height}` : it.filename), el("span", null, fmtSize(it.size)));
+    if (it.id === g.keep) meta.append(el("span", "best", "Best"));
+    b.append(meta);
+    b.addEventListener("click", () => {
+      if (keep.has(it.id)) { if (keep.size > 1) keep.delete(it.id); } else keep.add(it.id);
+      draw();
+    });
+    row.append(b);
+  }
+  const actions = el("div", "dup-actions");
+  actions.append(
+    button("Keep marked, trash the rest", "btn small primary", async () => {
+      const trash = g.items.map((i) => i.id).filter((i) => !keep.has(i));
+      try {
+        await post("/api/cleanup/resolve", { keep: [...keep], trash });
+        card.remove();
+        flashNote(trash.length ? `${plural(trash.length, "photo")} moved to the trash` : "Kept them all");
+        refreshStatus();
+      } catch (err) { flashNote(err.message); }
+    }),
+    button("These are different", "btn small", async () => {
+      try { await post("/api/cleanup/not-duplicates", { ids: g.items.map((i) => i.id) }); card.remove(); }
+      catch (err) { flashNote(err.message); }
+    }),
+  );
+  card.append(head, row, actions);
+  draw();
+  return card;
+}
+
 // ------------------------------------------------------------------ status bar
 
 let pollTimer = null;
@@ -843,7 +1133,7 @@ async function refreshStatus() {
   }
   updateEmpty();
   clearTimeout(pollTimer);
-  const busy = sc.running || st.faces.running || st.places.running;
+  const busy = sc.running || [st.faces, st.places, st.checks, st.content, st.text].some((j) => j && j.running);
   pollTimer = setTimeout(refreshStatus, busy ? 1500 : 30000);
 }
 
@@ -861,12 +1151,16 @@ function renderStatus() {
   const work = [];
   if (st.places.enabled && st.places.pending) work.push(`Places: ${fmtInt(st.places.pending)} to look up`);
   if (st.faces.enabled && st.faces.pending) work.push(`Faces: ${fmtInt(st.faces.pending)} photos to check`);
+  if (st.checks && st.checks.enabled && st.checks.pending) work.push(`Checking: ${fmtInt(st.checks.pending)}`);
+  if (st.content && st.content.enabled && st.content.pending) work.push(`Content search: ${fmtInt(st.content.pending)} to learn`);
+  if (st.text && st.text.enabled && st.text.pending) work.push(`Reading text: ${fmtInt(st.text.pending)} to go`);
   $("st-work").textContent = work.join(" · ");
   const notes = [];
   if (!st.heif) notes.push("HEIC photos need pillow-heif");
   if (st.videos && !st.ffmpeg) notes.push("Video thumbnails need ffmpeg");
   if (st.faces.message && st.faces.enabled) notes.push(st.faces.message);
   if (st.places.message && st.places.enabled) notes.push(st.places.message);
+  for (const job of [st.content, st.text]) if (job && job.enabled && job.message) notes.push(job.message);
   $("st-note").textContent = flash && Date.now() < flash.until ? flash.text : notes.join(" · ");
   $("rescan").disabled = sc.running || !st.library_ok;
 }
@@ -896,14 +1190,16 @@ $("search").addEventListener("input", (e) => {
   clearTimeout(searchTimer);
   searchTimer = setTimeout(() => {
     S.q = e.target.value.trim();
+    S.look = null;
     // Search looks through everything, except that All, Photos, Videos and Favourites keep their filter.
-    if (S.q && !["all", "photos", "videos", "favorites"].includes(S.route.name)) {
+    if (S.q && !SEARCHABLE.includes(S.route.name)) {
       keepSearch = true;
       location.hash = "#/";
       return;
     }
     stopSelecting();
-    reload();
+    $("page-head").hidden = true;
+    renderHead().then(reload);
   }, 250);
 });
 
@@ -1050,6 +1346,17 @@ function renderDetails(item) {
       box.append(link(a.name, `#/albums/${a.id}`));
     });
     row("Albums", box);
+  }
+  if (item.text) {
+    const t = el("div", "photo-text", item.text.length > 600 ? item.text.slice(0, 600) + "…" : item.text);
+    row("Text in photo", t);
+  }
+  if (item.quality) {
+    const box = el("span", "quality-note", item.quality === "dark" ? "Looks too dark " : "Looks blurry ");
+    box.append(button("It's fine", "btn small", async () => {
+      try { await post("/api/cleanup/fine", { ids: [item.id] }); item.quality = null; renderDetails(item); } catch (err) { flashNote(err.message); }
+    }));
+    row("Quality", box);
   }
   row("Size", fmtSize(item.size));
   if (item.width && item.height) row("Dimensions", `${item.width} × ${item.height}`);

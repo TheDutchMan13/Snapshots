@@ -105,9 +105,9 @@ def create_app(cfg: Config, start_worker: bool = True) -> FastAPI:
             response.headers["Cache-Control"] = "no-store"
         return response
 
-    from . import routes_auth, routes_collections, routes_library, routes_people
+    from . import routes_auth, routes_collections, routes_explore, routes_library, routes_people
 
-    for module in (routes_auth, routes_library, routes_collections, routes_people):
+    for module in (routes_auth, routes_library, routes_collections, routes_people, routes_explore):
         app.include_router(module.router(ctx))
 
     @app.get("/", include_in_schema=False)
