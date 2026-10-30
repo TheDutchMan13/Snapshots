@@ -15,7 +15,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 
-from . import db, libraries, linking, media
+from . import db, libraries, linking, media, webhooks
 from .config import Config
 
 log = logging.getLogger("snapshots.scanner")
@@ -287,6 +287,7 @@ class Scanner:
             moved_away: set[str] = set()
 
             pending = 0
+            added_ids: list[int] = []
             for rel, full, size, mtime_ns in found:
                 state.done += 1
                 row = existing.get(rel)
@@ -309,9 +310,10 @@ class Scanner:
                             state.moved += 1
                             pending += 1
                             continue
-                    index_file(cfg, conn, rel, full, digest)
+                    new_id = index_file(cfg, conn, rel, full, digest)
                     if row is None:
                         state.added += 1
+                        added_ids.append(new_id)
                     else:
                         state.updated += 1
                 except Exception as exc:
@@ -352,6 +354,12 @@ class Scanner:
                 conn.commit()
             except Exception:
                 log.exception("could not link Live Photos and RAW + JPEG pairs")
+                conn.rollback()
+            try:
+                webhooks.emit_added(conn, added_ids, "scan")
+                conn.commit()
+            except Exception:
+                log.exception("could not queue webhooks")
                 conn.rollback()
         finally:
             conn.close()

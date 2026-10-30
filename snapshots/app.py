@@ -11,7 +11,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import __version__, db
+from . import __version__, db, webhooks
 from .auth import COOKIE, CSRF_HEADER, LoginThrottle, user_for_token
 from .config import Config
 from .worker import Worker
@@ -83,14 +83,18 @@ def create_app(cfg: Config, start_worker: bool = True) -> FastAPI:
     cfg.ensure_dirs()
     db.init(cfg.db_path)
     worker = Worker(cfg)
-    ctx = SimpleNamespace(cfg=cfg, worker=worker, throttle=LoginThrottle(), pin_throttle=LoginThrottle(limit=5))
+    sender = webhooks.Sender(cfg)
+    ctx = SimpleNamespace(cfg=cfg, worker=worker, throttle=LoginThrottle(), pin_throttle=LoginThrottle(limit=5),
+                          webhooks=sender)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         if start_worker:
             worker.start()
+            sender.start()
         yield
         worker.stop()
+        sender.stop()
 
     app = FastAPI(title="Snapshots", version=__version__, lifespan=lifespan,
                   docs_url=None, redoc_url=None, openapi_url=None)
@@ -127,11 +131,11 @@ def create_app(cfg: Config, start_worker: bool = True) -> FastAPI:
             response.headers["Cache-Control"] = "no-store"
         return response
 
-    from . import (routes_auth, routes_collections, routes_explore, routes_library, routes_organize,
-                   routes_people, routes_settings, routes_social)
+    from . import (routes_auth, routes_collections, routes_explore, routes_imports, routes_library, routes_organize,
+                   routes_people, routes_settings, routes_social, routes_tools)
 
     for module in (routes_auth, routes_library, routes_collections, routes_people, routes_explore, routes_organize,
-                   routes_social, routes_settings):
+                   routes_social, routes_settings, routes_imports, routes_tools):
         app.include_router(module.router(ctx))
 
     @app.get("/", include_in_schema=False)

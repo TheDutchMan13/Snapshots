@@ -49,6 +49,10 @@ class Config:
     backup_dir: Path | None = None         # where backups go (default: "backups" in the data folder)
     video_encoder: str = "auto"            # how videos are converted: auto, libx264, h264_amf, h264_nvenc, h264_qsv
     video_cache_gb: float = 20             # converted videos kept for playing, at most this much
+    offsite_method: str = ""               # copies of the photos themselves: "" (off), folder, rclone or restic
+    offsite_target: str = ""               # a folder (folder), an rclone remote:path, or a restic repository
+    offsite_hours: float = 24              # how often the copy is brought up to date
+    offsite_password_file: Path | None = None  # restic: a file holding the repository password
     config_file: Path | None = None  # the file these settings were read from, if any
 
     @property
@@ -91,6 +95,10 @@ class Config:
     def backups_path(self) -> Path:
         return Path(self.backup_dir) if self.backup_dir else self.data_dir / "backups"
 
+    @property
+    def export_dir(self) -> Path:
+        return self.data_dir / "exports"
+
     def thumb_path(self, asset_id: int) -> Path:
         return self.thumb_dir / f"{asset_id}.jpg"
 
@@ -125,8 +133,10 @@ _FILE_KEYS = {
     "smart_search": bool, "text_search": bool, "search_threads": int,
     "map_tiles": str, "map_attribution": str,
     "backup_hours": float, "backup_keep": int, "video_encoder": str, "video_cache_gb": float,
+    "offsite_method": str, "offsite_target": str, "offsite_hours": float,
 }
 VIDEO_ENCODERS = ("auto", "libx264", "h264_amf", "h264_nvenc", "h264_qsv")
+OFFSITE_METHODS = ("", "folder", "rclone", "restic")
 
 
 def user_config_path() -> Path:
@@ -168,6 +178,30 @@ def save_extra_libraries(paths, config_file: Path | None = None) -> Path:
     return path
 
 
+def save_settings(values: dict, config_file: Path | None = None) -> Path:
+    """Write simple settings (text, numbers, true/false) to config.toml, keeping everything else in the file."""
+    path = Path(config_file) if config_file else user_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = path.read_text(encoding="utf-8") if path.is_file() else ""
+    for key, value in values.items():
+        if value is None:
+            value = ""
+        if isinstance(value, bool):
+            shown = "true" if value else "false"
+        elif isinstance(value, (int, float)):
+            shown = repr(value)
+        else:
+            shown = json.dumps(str(value), ensure_ascii=False)
+        line = f"{key} = {shown}"
+        pattern = rf"(?m)^{re.escape(key)}\s*=.*$"
+        if re.search(pattern, text):
+            text = re.sub(pattern, lambda _m: line, text, count=1)
+        else:
+            text = text + ("" if not text or text.endswith("\n") else "\n") + line + "\n"
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
 def load_config(config_file: str | os.PathLike | None = None, **overrides) -> Config:
     """Build a Config. `overrides` (from the command line) win over the file.
 
@@ -191,6 +225,8 @@ def load_config(config_file: str | os.PathLike | None = None, **overrides) -> Co
             cfg.data_dir = Path(data["data_dir"])
         if "backup_dir" in data:
             cfg.backup_dir = Path(data["backup_dir"]) if data["backup_dir"] else None
+        if "offsite_password_file" in data:
+            cfg.offsite_password_file = Path(data["offsite_password_file"]) if data["offsite_password_file"] else None
         if "extra_libraries" in data:
             extra = data["extra_libraries"]
             if not isinstance(extra, list) or not all(isinstance(x, str) for x in extra):
@@ -204,6 +240,8 @@ def load_config(config_file: str | os.PathLike | None = None, **overrides) -> Co
                     raise ValueError(f"{path}: '{key}' should be a {kind.__name__}") from None
         if cfg.video_encoder not in VIDEO_ENCODERS:
             raise ValueError(f"{path}: 'video_encoder' should be one of {', '.join(VIDEO_ENCODERS)}")
+        if cfg.offsite_method not in OFFSITE_METHODS:
+            raise ValueError(f"{path}: 'offsite_method' should be \"\", folder, rclone or restic")
 
     for key, value in overrides.items():
         if value is None:

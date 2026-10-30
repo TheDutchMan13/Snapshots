@@ -148,5 +148,7 @@ class BackupJob:
         except Exception as exc:
             log.warning("database backup failed: %s", exc)
             self.state["message"] = f"The database backup failed: {exc}"
+            from .webhooks import emit_safely
+            emit_safely(self.cfg, "backup.failed", {"error": str(exc)})
             self.retry_at = now + 3600
         return False  # never holds up other work

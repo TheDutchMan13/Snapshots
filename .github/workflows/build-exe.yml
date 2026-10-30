@@ -1,7 +1,7 @@
 name: Build Windows exe
 
 # Builds Snapshots.exe on a Windows machine at GitHub.
-#   - Push a tag like v0.6.0 to publish the exe on the repository's Releases page.
+#   - Push a tag like v0.7.0 to publish the exe on the repository's Releases page.
 #   - Or open the Actions tab, pick this workflow and press "Run workflow";
 #     the exe is then attached to the run as a download.
 on:
@@ -91,6 +91,38 @@ jobs:
                        -ContentType 'application/json' -Headers $hdr -WebSession $web
             $byKey = @((Invoke-RestMethod "$base/api/assets" -Headers @{ Authorization = "Bearer $($key.key)" }).items).Count
             $enc   = Invoke-RestMethod "$base/api/video-encoder" -WebSession $web
+            # 0.7: a smart album, a zip export, a PDF photo book, and an offsite copy to a folder
+            $smart = Invoke-RestMethod -Method Post "$base/api/albums" -Body '{"name": "Smart", "rule": {"kind": "photo"}}' `
+                       -ContentType 'application/json' -Headers $hdr -WebSession $web
+            $zipReq = Invoke-RestMethod -Method Post "$base/api/exports" -Body '{"ids": [1, 2], "format": "zip"}' `
+                       -ContentType 'application/json' -Headers $hdr -WebSession $web
+            $zipFile = Join-Path $env:RUNNER_TEMP 'smoke.zip'
+            Invoke-WebRequest "$base$($zipReq.url)" -WebSession $web -OutFile $zipFile -UseBasicParsing
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            $zipRead = [IO.Compression.ZipFile]::OpenRead($zipFile)
+            $zipCount = $zipRead.Entries.Count
+            $zipRead.Dispose()
+            $book = Invoke-RestMethod -Method Post "$base/api/exports" -Body '{"ids": [1, 2], "format": "pdf"}' `
+                       -ContentType 'application/json' -Headers $hdr -WebSession $web
+            for ($i = 0; $i -lt 60; $i++) {
+              $task = Invoke-RestMethod "$base/api/tasks/$($book.id)" -WebSession $web
+              if ($task.done) { break }
+              Start-Sleep -Seconds 1
+            }
+            $bookFile = Join-Path $env:RUNNER_TEMP 'smoke.pdf'
+            if ($task.done -and -not $task.error) {
+              Invoke-WebRequest "$base/api/tasks/$($book.id)/file" -WebSession $web -OutFile $bookFile -UseBasicParsing
+            }
+            $copyTo = Join-Path $env:RUNNER_TEMP 'offsite-copy'
+            $offBody = @{ method = 'folder'; target = $copyTo; hours = 24 } | ConvertTo-Json
+            Invoke-RestMethod -Method Post "$base/api/offsite" -Body $offBody -ContentType 'application/json' `
+              -Headers $hdr -WebSession $web | Out-Null
+            Invoke-RestMethod -Method Post "$base/api/offsite/run" -Headers $hdr -WebSession $web | Out-Null
+            for ($i = 0; $i -lt 60; $i++) {
+              $off = (Invoke-RestMethod "$base/api/settings" -WebSession $web).offsite.state
+              if ($off.last -and -not $off.running) { break }
+              Start-Sleep -Seconds 1
+            }
           }
           Get-Process -Name Snapshots -ErrorAction SilentlyContinue | Stop-Process -Force
           Write-Host '--- exe output ---'
@@ -110,8 +142,15 @@ jobs:
           if (-not $edit.edited -or $editThumb -ne 200) { throw "Editing a photo did not work: $($edit | ConvertTo-Json -Compress)" }
           if (-not $bk.name)             { throw 'The database backup failed.' }
           if ($byKey -lt 2)              { throw 'An API key could not read the library.' }
+          if ($smart.count -lt 2)        { throw "The smart album found nothing: $($smart | ConvertTo-Json -Compress)" }
+          if ($zipCount -ne 2)           { throw "The zip export holds $zipCount files instead of 2." }
+          if (-not $task.done -or $task.error -or $task.result.pages -lt 2) { throw "The photo book failed: $($task | ConvertTo-Json -Compress)" }
+          if (-not (Test-Path $bookFile) -or (Get-Content $bookFile -TotalCount 1) -notmatch '^%PDF') { throw 'The photo book is not a PDF.' }
+          if (-not (Test-Path (Join-Path $copyTo 'Library\a.jpg')) -or -not (Test-Path (Join-Path $copyTo 'Database\snapshots.db'))) {
+            throw "The offsite copy was not made: $($off | ConvertTo-Json -Compress)"
+          }
           Write-Host "Video converting: ffmpeg $($enc.ffmpeg), encoder $($enc.using)"
-          Write-Host "Smoke test passed: $($status.photos) photos indexed (one RAW), login required, HEIC and RAW support present, map files served, editing, backups and API keys work."
+          Write-Host "Smoke test passed: $($status.photos) photos indexed (one RAW), login required, HEIC and RAW support present, map files served, editing, backups, API keys, smart albums, exports, the photo book and the offsite copy work."
 
       - name: Smoke test the app window
         shell: pwsh

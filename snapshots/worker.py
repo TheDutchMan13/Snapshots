@@ -7,7 +7,7 @@ In order of priority it:
 4. finds faces in new photos and groups them into people;
 5. prepares search by content;
 6. reads text in photos.
-It also copies the database every `backup_hours`.
+It also copies the database every `backup_hours`, and the photos to the offsite copy every `offsite_hours`.
 Steps 2-6 work in small batches, so a rescan never waits long.
 """
 
@@ -23,6 +23,7 @@ from .backup import BackupJob
 from .clipsearch import ClipJob
 from .faces import FacesJob
 from .linking import MotionJob
+from .offsite import OffsiteJob
 from .ocr import OcrJob
 from .places import PlacesJob
 from .scanner import Scanner
@@ -41,6 +42,7 @@ class Worker:
         self.clip = ClipJob(cfg)
         self.ocr = OcrJob(cfg)
         self.backup = BackupJob(cfg)
+        self.offsite = OffsiteJob(cfg)
         self._wake = threading.Event()
         self._scan_requested = False
         self._remove_missing = False
@@ -64,6 +66,7 @@ class Worker:
 
     def stop(self, timeout: float = 10) -> None:
         self._stopping = True
+        self.offsite.stop()
         self._wake.set()
         if self._thread:
             self._thread.join(timeout)
@@ -98,12 +101,14 @@ class Worker:
             "content": dict(self.clip.state, enabled=self.cfg.smart_search),
             "text": dict(self.ocr.state, enabled=self.cfg.text_search),
             "backup": dict(self.backup.state, enabled=bool(self.cfg.backup_hours and self.cfg.backup_hours > 0)),
+            "offsite": dict(self.offsite.state, enabled=self.offsite.enabled()),
         }
 
     def _jobs(self):
         """Background jobs in order of priority, with whether each is switched on."""
         return [
             (self.backup, bool(self.cfg.backup_hours and self.cfg.backup_hours > 0)),
+            (self.offsite, self.offsite.enabled()),
             (self.motion, True),
             (self.places, self.cfg.places),
             (self.quality, self.cfg.photo_checks),

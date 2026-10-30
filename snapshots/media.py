@@ -927,3 +927,93 @@ def make_video_thumb(src: Path, dst: Path) -> bool:
     except OSError:
         pass
     return False
+
+
+# ------------------------------------------------------------- trimming videos and taking stills
+
+
+def trim_video(src: Path, dst: Path, start: float, end: float, encoder: str = "auto", progress=None) -> bool:
+    """Write the part of a video between start and end (seconds) to dst, as H.264 in an MP4.
+
+    The picture is re-encoded, so the cut is exactly where asked (copying would cut at the nearest key
+    frame, often a second or more off). A graphics card encoder that fails is retried with the processor.
+    """
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg or end <= start:
+        return False
+    length = end - start
+    tmp = dst.with_name("." + dst.stem + ".tmp.mp4")
+    first = pick_encoder(encoder)
+    plans = [_ENCODER_ARGS[first]] + ([_ENCODER_ARGS["libx264"]] if first != "libx264" else [])
+    for video_args in plans:
+        cmd = [ffmpeg, "-v", "error", "-y", "-ss", f"{start:.3f}", "-i", str(src), "-t", f"{length:.3f}",
+               "-map", "0:v:0", "-map", "0:a:0?", *video_args, "-pix_fmt", "yuv420p",
+               "-c:a", "aac", "-b:a", "160k", "-map_metadata", "0", "-movflags", "+faststart",
+               "-progress", "pipe:1", "-nostats", str(tmp)]
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
+        except OSError:
+            return False
+        try:
+            for line in proc.stdout:
+                if progress and line.startswith(b"out_time_us="):
+                    try:
+                        progress(min(0.99, int(line.split(b"=", 1)[1]) / 1e6 / length))
+                    except ValueError:
+                        pass
+            proc.wait(timeout=4 * 3600)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+        if proc.returncode == 0 and tmp.is_file() and tmp.stat().st_size > 0:
+            os.replace(tmp, dst)
+            return True
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+    return False
+
+
+def video_frame(src: Path, at: float) -> Image.Image | None:
+    """The frame shown `at` seconds into a video, at full size (turned the right way up)."""
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return None
+    for seek in (at, max(0.0, at - 0.5)):   # the very end of a clip can have no frame to show
+        cmd = [ffmpeg, "-v", "error", "-ss", f"{seek:.3f}", "-i", str(src), "-frames:v", "1",
+               "-f", "image2pipe", "-vcodec", "png", "pipe:1"]
+        try:
+            out = subprocess.run(cmd, capture_output=True, timeout=120, stdin=subprocess.DEVNULL).stdout
+        except (subprocess.SubprocessError, OSError):
+            return None
+        if out:
+            try:
+                img = Image.open(io.BytesIO(out))
+                img.load()
+                return _to_rgb(img)
+            except Exception:
+                return None
+    return None
+
+
+def save_still(img: Image.Image, dst: Path, taken: datetime | None = None, lat: float | None = None,
+               lon: float | None = None, camera: str | None = None) -> None:
+    """Save a frame as a JPEG with its date and place in the EXIF, like a photo from a camera."""
+    exif = Image.Exif()
+    if taken:
+        stamp = taken.strftime("%Y:%m:%d %H:%M:%S")
+        exif.get_ifd(_EXIF_SUBIFD)[_EXIF_DATETIME_ORIGINAL] = stamp
+        exif[_EXIF_DATETIME] = stamp
+    if camera:
+        exif[_EXIF_MODEL] = camera[:100]
+    if lat is not None and lon is not None and _valid_position(lat, lon):
+        def dms(value):
+            value = abs(value)
+            d = int(value)
+            m = int((value - d) * 60)
+            return (float(d), float(m), round(((value - d) * 60 - m) * 60, 4))
+        gps = exif.get_ifd(_EXIF_GPSIFD)
+        gps[1], gps[2] = ("N" if lat >= 0 else "S"), dms(lat)
+        gps[3], gps[4] = ("E" if lon >= 0 else "W"), dms(lon)
+    img.save(dst, "JPEG", quality=93, exif=exif)

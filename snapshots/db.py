@@ -212,6 +212,52 @@ MIGRATIONS = [
         last_used_at TEXT
     );
     """,
+    # 6 - version 0.7: smart albums, imports from Immich and Google Photos, webhooks
+    """
+    ALTER TABLE albums ADD COLUMN rule TEXT;               -- JSON: a smart album's search (its items are found, not added)
+
+    CREATE TABLE face_hints (                  -- names from an import, waiting for faces to be found
+        id       INTEGER PRIMARY KEY,
+        asset_id INTEGER NOT NULL REFERENCES assets (id) ON DELETE CASCADE,
+        name     TEXT NOT NULL,
+        x REAL, y REAL, w REAL, h REAL,        -- where the face is (fractions), NULL if not known
+        source   TEXT NOT NULL
+    );
+    CREATE INDEX idx_face_hints_asset ON face_hints (asset_id);
+
+    CREATE TABLE imports (
+        id          INTEGER PRIMARY KEY,
+        kind        TEXT NOT NULL,             -- 'immich' or 'takeout'
+        started_by  INTEGER REFERENCES users (id) ON DELETE SET NULL,
+        started_at  TEXT NOT NULL,
+        finished_at TEXT,
+        summary     TEXT                       -- JSON: what was found and changed
+    );
+
+    CREATE TABLE webhooks (
+        id          INTEGER PRIMARY KEY,
+        url         TEXT NOT NULL,
+        events      TEXT NOT NULL,             -- JSON list of event names
+        secret      TEXT NOT NULL,             -- signs each delivery (HMAC-SHA256)
+        enabled     INTEGER NOT NULL DEFAULT 1,
+        created_at  TEXT NOT NULL,
+        last_at     TEXT,
+        last_status TEXT                       -- "200", or what went wrong
+    );
+    CREATE TABLE webhook_deliveries (
+        id           INTEGER PRIMARY KEY,
+        webhook_id   INTEGER NOT NULL REFERENCES webhooks (id) ON DELETE CASCADE,
+        event        TEXT NOT NULL,
+        payload      TEXT NOT NULL,
+        created_at   TEXT NOT NULL,
+        attempts     INTEGER NOT NULL DEFAULT 0,
+        next_try_at  REAL NOT NULL DEFAULT 0,  -- seconds since 1970
+        delivered_at TEXT,
+        failed       INTEGER NOT NULL DEFAULT 0,
+        error        TEXT
+    );
+    CREATE INDEX idx_webhook_due ON webhook_deliveries (next_try_at) WHERE delivered_at IS NULL AND failed = 0;
+    """,
 ]
 SCHEMA_VERSION = len(MIGRATIONS)
 
@@ -284,6 +330,8 @@ class Filter:
     stacks: bool = False           # show each stack as one item (its cover)
     bbox: tuple[float, float, float, float] | None = None  # south, west, north, east: an area of the map
     locked: bool = False           # the Locked folder: only the asking person's locked items
+    people: list[int] | None = None  # all of these people are in it (a smart album)
+    words: str = ""                # more words that must match, like q (a smart album's own words)
 
 
 _MONTHS = {}
@@ -416,6 +464,9 @@ def where_clause(f: Filter, user_id: int | None) -> tuple[str, list]:
     if f.person is not None:
         where.append("a.id IN (SELECT asset_id FROM faces WHERE person_id = ?)")
         params.append(f.person)
+    for person in f.people or []:
+        where.append("a.id IN (SELECT asset_id FROM faces WHERE person_id = ?)")
+        params.append(person)
     if f.start:
         where.append("a.taken_at >= ?")
         params.append(f.start)
@@ -432,7 +483,7 @@ def where_clause(f: Filter, user_id: int | None) -> tuple[str, list]:
         if value is not None:
             where.append(f"a.{column} IS ?")  # IS so that "no state" can be asked for with NULL
             params.append(value or None)
-    for token in f.q.lower().split()[:10]:
+    for token in (f.q.lower().split()[:10] + f.words.lower().split()[:10]):
         if _DATE_TOKEN.fullmatch(token):
             where.append("a.taken_at LIKE ?")
             params.append(token + "%")

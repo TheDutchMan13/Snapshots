@@ -1,13 +1,16 @@
 """Settings people change from the app: extra library folders, backups, video conversion and API keys."""
 
+import json
+import urllib.parse
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from . import auth, backup, db, libraries, media
+from . import auth, backup, db, libraries, media, offsite, webhooks
 from .app import current_user, require_admin, require_session
-from .config import save_extra_libraries
+from .config import OFFSITE_METHODS, save_extra_libraries, save_settings
 from .scanner import delete_asset_row
 
 
@@ -17,6 +20,22 @@ class FolderBody(BaseModel):
 
 class KeyBody(BaseModel):
     name: str = Field(min_length=1, max_length=100)
+
+
+class OffsiteBody(BaseModel):
+    method: str = Field("", max_length=10)
+    target: str = Field("", max_length=1000)
+    hours: float = Field(24, ge=0, le=24 * 365)
+
+
+class WebhookBody(BaseModel):
+    url: str = Field(min_length=1, max_length=1000)
+    events: list[str] = Field(min_length=1, max_length=20)
+
+
+class WebhookChange(BaseModel):
+    enabled: bool | None = None
+    events: list[str] | None = Field(None, min_length=1, max_length=20)
 
 
 def router(ctx) -> APIRouter:
@@ -49,7 +68,120 @@ def router(ctx) -> APIRouter:
                 "list": backup.list_backups(cfg), "message": worker.backup.state.get("message"),
             },
             "video": {"encoder": cfg.video_encoder, "cache_gb": cfg.video_cache_gb, "ffmpeg": media.has_ffmpeg()},
+            "offsite": offsite_json(),
         }
+
+    def offsite_json() -> dict:
+        job = worker.offsite
+        return {"method": cfg.offsite_method, "target": cfg.offsite_target, "hours": cfg.offsite_hours,
+                "problem": offsite.problem(cfg), "state": dict(job.state, running=job.running()),
+                "tools": {"rclone": bool(offsite.shutil.which("rclone")), "restic": bool(offsite.shutil.which("restic"))}}
+
+    # ------------------------------------------------------------ offsite copy of the photos
+
+    @r.post("/api/offsite")
+    def set_offsite(body: OffsiteBody, request: Request):
+        """Where (and how often) the photos are copied. method "" turns it off."""
+        require_admin(request)
+        if body.method not in OFFSITE_METHODS:
+            raise HTTPException(400, "Choose folder, rclone or restic.")
+        target = body.target.strip().strip('"')
+        why = offsite.problem(cfg, body.method, target)
+        if why:
+            raise HTTPException(400, why)
+        cfg.offsite_method, cfg.offsite_target, cfg.offsite_hours = body.method, target, float(body.hours)
+        cfg.config_file = save_settings({"offsite_method": cfg.offsite_method, "offsite_target": cfg.offsite_target,
+                                         "offsite_hours": cfg.offsite_hours}, cfg.config_file)
+        worker.offsite.retry_at = 0
+        worker.poke()
+        return offsite_json()
+
+    @r.post("/api/offsite/run", status_code=202)
+    def run_offsite(request: Request):
+        require_admin(request)
+        why = offsite.problem(cfg) or (None if worker.offsite.enabled() else "Choose where the copy goes first.")
+        if why:
+            raise HTTPException(400, why)
+        worker.offsite.start()
+        return offsite_json()
+
+    @r.post("/api/offsite/stop")
+    def stop_offsite(request: Request):
+        require_admin(request)
+        worker.offsite.stop()
+        return offsite_json()
+
+    # ------------------------------------------------------------ webhooks
+
+    def webhook_json(row, conn) -> dict:
+        waiting = conn.execute("SELECT COUNT(*) FROM webhook_deliveries WHERE webhook_id = ? AND delivered_at IS NULL"
+                               " AND failed = 0", (row["id"],)).fetchone()[0]
+        failed = conn.execute("SELECT COUNT(*) FROM webhook_deliveries WHERE webhook_id = ? AND failed = 1",
+                              (row["id"],)).fetchone()[0]
+        return {"id": row["id"], "url": row["url"], "events": json.loads(row["events"]), "enabled": bool(row["enabled"]),
+                "created_at": row["created_at"], "last_at": row["last_at"], "last_status": row["last_status"],
+                "waiting": waiting, "failed": failed}
+
+    def check_events(events: list[str]) -> list[str]:
+        events = list(dict.fromkeys(events))
+        unknown = [e for e in events if e not in webhooks.EVENTS and e != "*"]
+        if unknown:
+            raise HTTPException(400, f"Unknown event: {unknown[0]}")
+        return events
+
+    @r.get("/api/webhooks")
+    def list_webhooks(request: Request):
+        require_admin(request)
+        with db.session(cfg.db_path) as conn:
+            rows = conn.execute("SELECT * FROM webhooks ORDER BY id").fetchall()
+            return {"webhooks": [webhook_json(x, conn) for x in rows], "events": webhooks.EVENTS}
+
+    @r.post("/api/webhooks", status_code=201)
+    def add_webhook(body: WebhookBody, request: Request):
+        """The secret is shown once: the receiver uses it to check the X-Snapshots-Signature header."""
+        require_admin(request)
+        url = body.url.strip()
+        parts = urllib.parse.urlsplit(url)
+        if parts.scheme not in ("http", "https") or not parts.netloc:
+            raise HTTPException(400, "The address should start with http:// or https://")
+        events = check_events(body.events)
+        secret = webhooks.new_secret()
+        with db.session(cfg.db_path) as conn:
+            hook_id = conn.execute("INSERT INTO webhooks (url, events, secret, created_at) VALUES (?, ?, ?, ?)",
+                                   (url, json.dumps(events), secret, datetime.now().isoformat(timespec="seconds"))
+                                   ).lastrowid
+            out = webhook_json(conn.execute("SELECT * FROM webhooks WHERE id = ?", (hook_id,)).fetchone(), conn)
+        return dict(out, secret=secret)
+
+    @r.patch("/api/webhooks/{hook_id}")
+    def change_webhook(hook_id: int, body: WebhookChange, request: Request):
+        require_admin(request)
+        with db.session(cfg.db_path) as conn:
+            if conn.execute("SELECT 1 FROM webhooks WHERE id = ?", (hook_id,)).fetchone() is None:
+                raise HTTPException(404, "No such webhook.")
+            if body.enabled is not None:
+                conn.execute("UPDATE webhooks SET enabled = ? WHERE id = ?", (int(body.enabled), hook_id))
+            if body.events is not None:
+                conn.execute("UPDATE webhooks SET events = ? WHERE id = ?", (json.dumps(check_events(body.events)), hook_id))
+            return webhook_json(conn.execute("SELECT * FROM webhooks WHERE id = ?", (hook_id,)).fetchone(), conn)
+
+    @r.delete("/api/webhooks/{hook_id}")
+    def delete_webhook(hook_id: int, request: Request):
+        require_admin(request)
+        with db.session(cfg.db_path) as conn:
+            if not conn.execute("DELETE FROM webhooks WHERE id = ?", (hook_id,)).rowcount:
+                raise HTTPException(404, "No such webhook.")
+        return {"ok": True}
+
+    @r.post("/api/webhooks/{hook_id}/test")
+    def test_webhook(hook_id: int, request: Request):
+        """Send a "test" event now."""
+        require_admin(request)
+        with db.session(cfg.db_path) as conn:
+            if conn.execute("SELECT 1 FROM webhooks WHERE id = ?", (hook_id,)).fetchone() is None:
+                raise HTTPException(404, "No such webhook.")
+            webhooks.emit(conn, "test", {"message": "This is a test from Snapshots."}, only=hook_id)
+        return {"ok": True}
 
     # ------------------------------------------------------------ extra library folders
 

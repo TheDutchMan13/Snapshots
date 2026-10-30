@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Upl
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from . import __version__, analysis, db, libraries, linking, media
+from . import __version__, analysis, db, libraries, linking, media, smart, webhooks
 from .app import current_user, require_admin, safe_filename
 from .scanner import _make_thumb, index_file
 from .videos import Converter
@@ -167,6 +167,9 @@ def router(ctx) -> APIRouter:
     def content_matches(conn, f: db.Filter, user_id: int) -> list:
         """Rows that look like f.q (search by content), best first, within the rest of the filter."""
         ranked = worker.clip.search(conn, f.q)
+        if f.ids is not None:  # only within these (a smart album found by content, say)
+            allowed = set(f.ids)
+            ranked = [x for x in ranked if x[0] in allowed]
         if not ranked:
             return []
         score = dict(ranked)
@@ -187,10 +190,12 @@ def router(ctx) -> APIRouter:
         user = grid_user(request, f)
         if look:
             with db.session(cfg.db_path) as conn:
+                f, _ = smart.resolve(conn, cfg, worker, f)
                 found = content_matches(conn, f, user["id"]) if f.q.strip() else []
             return {"items": [asset_dict(row, sc) for row, sc in found], "next": None}
         try:
             with db.session(cfg.db_path) as conn:
+                f, _ = smart.resolve(conn, cfg, worker, f)
                 rows, next_cursor = db.list_assets(conn, f, user["id"], cursor, limit)
         except ValueError:
             raise HTTPException(400, "Bad cursor")
@@ -200,6 +205,7 @@ def router(ctx) -> APIRouter:
     def timeline(request: Request, f: db.Filter = Depends(filter_params)):
         user = grid_user(request, f)
         with db.session(cfg.db_path) as conn:
+            f, _ = smart.resolve(conn, cfg, worker, f)
             return {"months": db.timeline(conn, f, user["id"])}
 
     @r.get("/api/search")
@@ -207,6 +213,7 @@ def router(ctx) -> APIRouter:
         """How many photos match q by words and names, and how many by what they show."""
         user = grid_user(request, f)
         with db.session(cfg.db_path) as conn:
+            f, _ = smart.resolve(conn, cfg, worker, f)
             where, params = db.where_clause(f, user["id"])
             words = conn.execute(f"SELECT COUNT(*) FROM assets a WHERE {where}", params).fetchone()[0]
             content = len(content_matches(conn, f, user["id"])) if f.q.strip() else 0
@@ -564,6 +571,7 @@ def router(ctx) -> APIRouter:
         results = [save_upload(f, root) for f in files]
         with db.session(cfg.db_path) as conn:  # a Live Photo's photo and clip may arrive together
             linking.link_pairs(conn, cfg)
+            webhooks.emit_added(conn, [x["id"] for x in results if x["status"] == "added"], "upload")
         worker.poke()  # new photos may need places and faces
         return {"results": results}
 

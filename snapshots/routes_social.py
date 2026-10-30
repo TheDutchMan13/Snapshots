@@ -5,7 +5,7 @@ from datetime import datetime
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from . import db
+from . import db, webhooks
 from .app import current_user
 from .routes_library import can_see, unread_activity
 
@@ -72,7 +72,10 @@ def router(ctx) -> APIRouter:
                 raise HTTPException(403, "Items in a locked folder can't have comments.")
             cid = conn.execute("INSERT INTO comments (asset_id, user_id, text, created_at) VALUES (?, ?, ?, ?)",
                                (asset_id, user["id"], clean(body.text), _now())).lastrowid
-            return _comment_json(conn.execute(_COMMENTS + " WHERE c.id = ?", (cid,)).fetchone(), user)
+            out = _comment_json(conn.execute(_COMMENTS + " WHERE c.id = ?", (cid,)).fetchone(), user)
+            webhooks.emit(conn, "comment.added", {"id": cid, "text": out["text"], "by": out["user"],
+                                                  "asset_id": asset_id, "album": None})
+            return out
 
     @r.get("/api/albums/{album_id}/comments")
     def album_comments(album_id: int, request: Request):
@@ -89,7 +92,11 @@ def router(ctx) -> APIRouter:
             album_exists(conn, album_id)
             cid = conn.execute("INSERT INTO comments (album_id, user_id, text, created_at) VALUES (?, ?, ?, ?)",
                                (album_id, user["id"], clean(body.text), _now())).lastrowid
-            return _comment_json(conn.execute(_COMMENTS + " WHERE c.id = ?", (cid,)).fetchone(), user)
+            out = _comment_json(conn.execute(_COMMENTS + " WHERE c.id = ?", (cid,)).fetchone(), user)
+            name = conn.execute("SELECT name FROM albums WHERE id = ?", (album_id,)).fetchone()[0]
+            webhooks.emit(conn, "comment.added", {"id": cid, "text": out["text"], "by": out["user"],
+                                                  "asset_id": None, "album": {"id": album_id, "name": name}})
+            return out
 
     @r.delete("/api/comments/{comment_id}")
     def delete_comment(comment_id: int, request: Request):

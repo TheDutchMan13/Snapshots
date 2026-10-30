@@ -292,6 +292,7 @@ async function render() {
   $("collection").replaceChildren();
   $("collection").classList.toggle("full", S.route.view === "map");
   S.folderInfo = null;
+  S.album = null;
 
   try {
     if (grid) {
@@ -366,8 +367,16 @@ async function renderHead() {
     renderQualityHead();
   } else if (r.album) {
     const album = await api(`/api/albums/${r.album}`);
+    S.album = album;
     const range = album.first ? `${fmtMonth(album.first)}${fmtMonth(album.last) !== fmtMonth(album.first) ? " – " + fmtMonth(album.last) : ""}` : "";
+    let note = null;
+    if (album.smart) {
+      note = `Smart album: ${album.rule_text}. Photos that match join it by themselves.`;
+      if (album.waiting) note += " Search by what's in the photo isn't ready yet, so it is empty for now.";
+    }
     headRow(album.name, [plural(album.count, "item"), range].filter(Boolean).join(" · "), [
+      ...(album.smart ? [button("Edit rules", "btn small", () => smartAlbumDialog(album, album.rule))] : []),
+      button("Export", "btn small", () => exportDialog({ album: album.id, title: album.name, count: album.count })),
       button(album.comments ? `Comments (${album.comments})` : "Comments", "btn small", () => albumComments(album)),
       button("Rename", "btn small", async () => {
         const name = await askText("Rename album", "Album name", album.name);
@@ -380,7 +389,7 @@ async function renderHead() {
         if (!ok) return;
         try { await del(`/api/albums/${album.id}`); location.hash = "#/albums"; } catch (err) { flashNote(err.message); }
       }),
-    ]);
+    ], note);
   } else if (r.person) {
     await renderPersonHead(r.person);
   } else if (r.place) {
@@ -428,7 +437,9 @@ async function renderSearchHead() {
     else if (sum.content_pending) note = `Still learning what's in your photos: ${plural(sum.content_pending, "photo")} to go.`;
     else if (S.look) note = "Best matches first. Matching by content is approximate.";
   }
-  headRow(el("h1", null, `“${q}”`), null, [tabs], note);
+  const save = button("Save as smart album", "btn small", () =>
+    smartAlbumDialog(null, S.look ? { look: q } : { words: q }, q));
+  headRow(el("h1", null, `“${q}”`), null, [tabs, save], note);
 }
 
 async function renderEventHead(ev) {
@@ -522,6 +533,7 @@ async function renderPersonHead(id) {
   wrap.append(input);
   headRow(wrap, plural(person.photos, "photo"), [
     button("Same person as…", "btn small", () => mergePerson(person)),
+    button("Smart album", "btn small", () => smartAlbumDialog(null, { people: [person.id] }, person.name || "")),
     button(person.hidden ? "Show in People" : "Hide", "btn small", async () => {
       try {
         await patch(`/api/people/${person.id}`, { hidden: !person.hidden });
@@ -816,7 +828,7 @@ function updateSelection() {
   const allFav = chosen().every((it) => it.favorite);
   actions.append(button(allFav ? "Unfavourite" : "Favourite", "btn", () => setFavorite(ids(), !allFav)));
   actions.append(button("Add to album", "btn", () => addToAlbum(ids())));
-  if (r.album) actions.append(button("Remove from album", "btn", () => removeFromAlbum(ids())));
+  if (r.album && !(S.album && S.album.smart)) actions.append(button("Remove from album", "btn", () => removeFromAlbum(ids())));
   actions.append(button("Tag", "btn", () => addTag(ids())));
   if (r.tag) actions.append(button("Remove tag", "btn", () => removeTag(ids())));
   const allArchived = chosen().every((it) => it.archived);
@@ -824,6 +836,7 @@ function updateSelection() {
   if (chosen().some((it) => it.stack)) actions.append(button("Unstack", "btn", () => unstackPhotos(ids())));
   else if (n >= 2) actions.append(button("Stack", "btn", () => stackPhotos(ids())));
   actions.append(button("Edit details", "btn", () => editDetails(ids())));
+  actions.append(button("Export", "btn", () => exportDialog({ ids: ids(), count: n })));
   actions.append(button("Move to Locked", "btn", () => setLocked(ids(), true)));
   actions.append(button("Move to trash", "btn", () => moveToTrash(ids())));
 }
@@ -881,7 +894,7 @@ async function deleteForever(ids) {
 }
 
 async function pickAlbum(count) {
-  const { albums } = await api("/api/albums");
+  const albums = (await api("/api/albums")).albums.filter((a) => !a.smart);
   return modal({
     title: `Add ${plural(count, "item")} to an album`, ok: "Create album", cancel: "Cancel",
     build: (body, ctl) => {
@@ -1010,6 +1023,7 @@ async function unstackPhotos(ids) {
 async function renderAlbums() {
   const { albums } = await api("/api/albums");
   headRow("Albums", albums.length ? plural(albums.length, "album") : null, [
+    button("New smart album", "btn small", () => smartAlbumDialog(null, {})),
     button("New album", "btn small primary", async () => {
       const name = await askText("New album", "Album name", "", "Create");
       if (!name) return;
@@ -1026,6 +1040,7 @@ async function renderAlbums() {
     const card = link("", `#/albums/${a.id}`, "card");
     const box = el("div", "card-img");
     if (a.cover) box.append(img(thumbUrl(a.cover, a.cover_v))); else box.textContent = "Empty";
+    if (a.smart) box.append(el("span", "smart-badge", "Smart"));
     card.append(box, el("div", "card-title", a.name));
     const range = a.first ? ` · ${fmtMonth(a.last)}` : "";
     card.append(el("div", "card-meta", plural(a.count, "item") + range));
@@ -1733,6 +1748,7 @@ function showPicture(item) {
   $("v-album").hidden = trashed || locked;
   $("v-archive").hidden = trashed || locked;
   $("v-edit").hidden = trashed || locked || item.kind !== "photo";
+  $("v-trim").hidden = trashed || item.kind !== "video" || !(S.status && S.status.ffmpeg);
   $("v-play").hidden = trashed;
   $("v-trash").hidden = locked;
 
@@ -1959,6 +1975,7 @@ $("v-fav").addEventListener("click", () => {
 });
 $("v-album").addEventListener("click", () => { if (S.detail) addToAlbum([S.detail.id]); });
 $("v-edit").addEventListener("click", () => { if (S.detail) openEditor(S.detail); });
+$("v-trim").addEventListener("click", () => { if (S.detail) trimDialog(S.detail); });
 $("v-play").addEventListener("click", () => { const at = S.viewing; viewer.close(); startSlideshow(Math.max(0, at)); });
 $("v-archive").addEventListener("click", async () => {
   if (!S.detail) return;
@@ -2029,6 +2046,8 @@ menu.addEventListener("click", async (e) => {
     manageKeys();
   } else if (action === "settings") {
     manageSettings();
+  } else if (action === "import") {
+    importDialog();
   }
 });
 
@@ -2978,6 +2997,621 @@ async function manageKeys() {
   });
 }
 
+// ------------------------------------------------------------------ smart albums
+
+/** Make a smart album (album = null) or change one's rules. preset: a starting rule. */
+async function smartAlbumDialog(album, preset, suggestedName = "") {
+  let people = [], tags = [], places = [];
+  try {
+    [people, tags, places] = await Promise.all([
+      api("/api/people").then((x) => x.people.filter((p) => p.name)),
+      api("/api/tags").then((x) => x.tags),
+      api("/api/places").then((x) => x.places),
+    ]);
+  } catch (_) { /* the rest still works */ }
+  const rule = { ...(preset || {}) };
+  const done = await modal({
+    title: album ? `Rules of “${album.name}”` : "New smart album", ok: album ? "Save rules" : "Create smart album", wide: true,
+    build: (body) => {
+      body.append(el("p", "muted", "A smart album shows every photo that matches its rules, now and later. Fill in what you want; leave the rest empty."));
+      let nameInput = null;
+      if (!album) {
+        const [w, input] = field("Name", { value: suggestedName, maxLength: 200, placeholder: "Like “Sam at the beach”" });
+        nameInput = input;
+        body.append(w);
+      }
+      const grid = el("div", "rule-grid");
+      const [w1, words] = field("Words, names, places or dates", { value: rule.words || "", maxLength: 200, placeholder: "Like “Rome 2024”" });
+      const [w2, look] = field("What's in the photo", { value: rule.look || "", maxLength: 200, placeholder: "Like “beach” or “birthday cake”" });
+      grid.append(w1, w2);
+      const typeWrap = el("label", "field");
+      typeWrap.append(el("span", null, "Photos or videos"));
+      const kind = el("select");
+      [["", "Both"], ["photo", "Photos only"], ["video", "Videos only"]].forEach(([v, t]) => { const o = el("option", null, t); o.value = v; kind.append(o); });
+      kind.value = rule.kind || "";
+      typeWrap.append(kind);
+      const tagWrap = el("label", "field");
+      tagWrap.append(el("span", null, "Tag"));
+      const tag = el("select");
+      const none = el("option", null, "Any");
+      none.value = "";
+      tag.append(none);
+      tags.forEach((t) => { const o = el("option", null, t.name); o.value = String(t.id); tag.append(o); });
+      tag.value = rule.tag != null ? String(rule.tag) : "";
+      tagWrap.append(tag);
+      grid.append(typeWrap, tagWrap);
+      const [w3, start] = field("From", { type: "date", value: rule.start || "" });
+      const [w4, end] = field("Until", { type: "date", value: rule.end || "" });
+      grid.append(w3, w4);
+      const placeWrap = el("label", "field");
+      placeWrap.append(el("span", null, "Place"));
+      const place = el("select");
+      const anywhere = el("option", null, "Anywhere");
+      anywhere.value = "";
+      place.append(anywhere);
+      const seen = new Set();
+      for (const p of places) {
+        for (const key of [JSON.stringify([p.country]), p.state ? JSON.stringify([p.country, p.state]) : null,
+                           p.city ? JSON.stringify([p.country, p.state || "", p.city]) : null]) {
+          if (!key || seen.has(key)) continue;
+          seen.add(key);
+          const parts = JSON.parse(key);
+          const o = el("option", null, [...parts].reverse().filter(Boolean).join(", "));
+          o.value = key;
+          place.append(o);
+        }
+      }
+      if (rule.country) {
+        const key = JSON.stringify(rule.city ? [rule.country, rule.state || "", rule.city] : rule.state ? [rule.country, rule.state] : [rule.country]);
+        if (!seen.has(key)) { const o = el("option", null, key); o.value = key; place.append(o); }
+        place.value = key;
+      }
+      placeWrap.append(place);
+      grid.append(placeWrap);
+      body.append(grid);
+
+      const chosen = new Set(rule.people || []);
+      if (people.length) {
+        body.append(el("h3", "section-title small", "People (all of them in the photo)"));
+        const list = el("div", "people-pick");
+        for (const p of people) {
+          const b = button("", "person-chip", () => {
+            if (chosen.has(p.id)) chosen.delete(p.id); else chosen.add(p.id);
+            b.setAttribute("aria-pressed", String(chosen.has(p.id)));
+          });
+          if (p.face_id) b.append(img(faceUrl(p.face_id), "", "avatar tiny"));
+          b.append(el("span", null, p.name));
+          b.setAttribute("aria-pressed", String(chosen.has(p.id)));
+          list.append(b);
+        }
+        body.append(list);
+      } else if (chosen.size) {
+        body.append(el("p", "muted small", "Includes a person who has no name yet."));
+      }
+      const checks = el("div", "check-row");
+      const fav = el("input");
+      fav.type = "checkbox";
+      fav.checked = !!rule.favorite;
+      const favLabel = el("label", "opt-check");
+      favLabel.append(fav, document.createTextNode(" Only favourites (each person sees their own)"));
+      const arch = el("input");
+      arch.type = "checkbox";
+      arch.checked = !!rule.hide_archived;
+      const archLabel = el("label", "opt-check");
+      archLabel.append(arch, document.createTextNode(" Leave out archived photos"));
+      checks.append(favLabel, archLabel);
+      body.append(checks);
+
+      return { submit: async () => {
+        const out = {};
+        if (words.value.trim()) out.words = words.value.trim();
+        if (look.value.trim()) out.look = look.value.trim();
+        if (chosen.size) out.people = [...chosen];
+        if (kind.value) out.kind = kind.value;
+        if (tag.value) out.tag = Number(tag.value);
+        if (start.value) out.start = start.value;
+        if (end.value) out.end = end.value;
+        if (place.value) {
+          const [country, state, city] = JSON.parse(place.value);
+          out.country = country;
+          if (state) out.state = state;
+          if (city) out.city = city;
+        }
+        if (fav.checked) out.favorite = true;
+        if (arch.checked) out.hide_archived = true;
+        if (album) return patch(`/api/albums/${album.id}`, { rule: out });
+        const name = nameInput.value.trim();
+        if (!name) throw new Error("Give the album a name.");
+        return post("/api/albums", { name, rule: out });
+      } };
+    },
+  });
+  if (!done) return;
+  if (album) { flashNote("Rules saved"); render(); }
+  else location.hash = `#/albums/${done.id}`;
+}
+
+// ------------------------------------------------------------------ exporting
+
+function startDownload(url) {
+  const a = el("a");
+  a.href = url;
+  a.setAttribute("download", "");
+  document.body.append(a);
+  a.click();
+  a.remove();
+}
+
+async function waitForTask(id, onProgress) {
+  for (;;) {
+    const t = await api(`/api/tasks/${id}`);
+    if (onProgress) onProgress(t);
+    if (t.done) {
+      if (t.error) throw new Error(t.error);
+      return t;
+    }
+    await new Promise((r) => setTimeout(r, 700));
+  }
+}
+
+/** Export an album ({album}) or a selection ({ids}): a zip of the files, or a PDF photo book. */
+async function exportDialog({ album = null, ids = null, title = "", count = 0 }) {
+  const usPaper = /^en-(US|CA)$|^es-(MX|US)$/i.test(navigator.language || "");
+  await modal({
+    title: `Export ${plural(count, "item")}`, ok: null, cancel: "Close",
+    build: (body, ctl) => {
+      const choice = el("div", "export-choice");
+      const radio = (value, label, text, checked) => {
+        const wrap = el("label", "export-option");
+        const r = el("input");
+        r.type = "radio";
+        r.name = "export-kind";
+        r.value = value;
+        r.checked = checked;
+        const t = el("span");
+        t.append(el("strong", null, label), el("small", null, text));
+        wrap.append(r, t);
+        choice.append(wrap);
+        return r;
+      };
+      const zipR = radio("zip", "The files, in a zip", "Named by date, so they stay in order wherever you unpack them.", true);
+      radio("pdf", "A photo book (PDF)", "To print or share: a title page, then the photos with their date and place. Photos only.", false);
+      body.append(choice);
+
+      const zipOpts = el("div", "export-opts");
+      const check = (label, on) => {
+        const l = el("label", "opt-check");
+        const c = el("input");
+        c.type = "checkbox";
+        c.checked = on;
+        l.append(c, document.createTextNode(" " + label));
+        zipOpts.append(l);
+        return c;
+      };
+      const edited = check("Edited photos as edited (not the original files)", true);
+      const videos = check("Include videos", true);
+      const pdfOpts = el("div", "export-opts");
+      pdfOpts.hidden = true;
+      const sel = (label, options, value) => {
+        const w = el("label", "field inline");
+        w.append(el("span", null, label));
+        const s2 = el("select");
+        options.forEach(([v, t]) => { const o = el("option", null, t); o.value = v; s2.append(o); });
+        s2.value = value;
+        w.append(s2);
+        pdfOpts.append(w);
+        return s2;
+      };
+      const paper = sel("Paper", [["letter", "Letter"], ["a4", "A4"]], usPaper ? "letter" : "a4");
+      const perPage = sel("Photos a page", [["1", "1"], ["2", "2"], ["4", "4"], ["6", "6"]], "2");
+      body.append(zipOpts, pdfOpts);
+      choice.addEventListener("change", () => {
+        zipOpts.hidden = !zipR.checked;
+        pdfOpts.hidden = zipR.checked;
+        status.textContent = "";
+        bar.hidden = true;
+      });
+
+      const bar = el("div", "progress");
+      bar.hidden = true;
+      const fill = el("div", "progress-fill");
+      bar.append(fill);
+      const status = el("p", "muted small");
+      const go = button("Export", "btn primary", async () => {
+        ctl.error("");
+        go.disabled = true;
+        const what = album != null ? { album } : { ids };
+        try {
+          if (zipR.checked) {
+            const r = await post("/api/exports", { ...what, format: "zip", edited: edited.checked, videos: videos.checked });
+            startDownload(r.url);
+            status.textContent = `Downloading ${plural(r.count, "item")}. The zip is made as it downloads.`;
+          } else {
+            const t = await post("/api/exports", { ...what, format: "pdf", paper: paper.value, per_page: Number(perPage.value), title: title || undefined });
+            bar.hidden = false;
+            status.textContent = `Making the photo book of ${plural(t.count, "photo")}…`;
+            const done = await waitForTask(t.id, (x) => { fill.style.width = `${Math.round(x.progress * 100)}%`; });
+            status.textContent = `Ready: ${plural(done.result.pages, "page")}.`;
+            if (done.result.missing) status.textContent += ` ${plural(done.result.missing, "photo")} could not be read.`;
+            const dl = link("Download the PDF", `/api/tasks/${t.id}/file`, "btn small");
+            dl.setAttribute("download", "");
+            status.append(" ", dl);
+            startDownload(`/api/tasks/${t.id}/file`);
+          }
+        } catch (err) { ctl.error(err.message); }
+        go.disabled = false;
+      });
+      body.append(go, bar, status);
+    },
+  });
+}
+
+// ------------------------------------------------------------------ trimming videos
+
+function fmtSeconds(t) {
+  const m = Math.floor(t / 60), s = t - m * 60;
+  return `${m}:${s.toFixed(1).padStart(4, "0")}`;
+}
+
+async function trimDialog(item) {
+  let made = false;
+  $("v-stage").querySelectorAll("video").forEach((v) => v.pause());
+  await modal({
+    title: `Trim ${item.filename}`, ok: null, cancel: "Close", wide: true,
+    build: (body, ctl) => {
+      body.append(el("p", "muted", "Save part of the video, or one moment of it as a photo. Both are saved as new files next to the video, with its date, place and albums. The video itself isn't changed."));
+      const video = document.createElement("video");
+      video.className = "trim-video";
+      video.controls = true;
+      video.playsInline = true;
+      body.append(video);
+      const load = async () => {
+        for (;;) {
+          let info;
+          try { info = await api(`/api/assets/${item.id}/play`); } catch (err) { ctl.error(err.message); return; }
+          if (info.url) { video.src = info.url; return; }
+          ctl.error(`Preparing the video so it can play here… ${Math.round((info.progress || 0) * 100)}%`);
+          await new Promise((r) => setTimeout(r, 1000));
+          if (!$("modal").open) return;
+        }
+      };
+      load();
+      const row = el("div", "trim-row");
+      const startIn = el("input", "trim-time");
+      const endIn = el("input", "trim-time");
+      for (const i of [startIn, endIn]) { i.type = "number"; i.min = "0"; i.step = "0.1"; }
+      startIn.value = "0";
+      startIn.setAttribute("aria-label", "Start, in seconds");
+      endIn.setAttribute("aria-label", "End, in seconds");
+      video.addEventListener("loadedmetadata", () => {
+        ctl.error("");
+        if (!endIn.value) endIn.value = video.duration.toFixed(1);
+        endIn.max = startIn.max = video.duration.toFixed(1);
+      });
+      const label = (text, input, setText) => {
+        const w = el("span", "trim-point");
+        w.append(el("span", "muted small", text), input, button(setText, "btn small", () => {
+          input.value = video.currentTime.toFixed(1);
+        }));
+        return w;
+      };
+      row.append(label("Start (seconds)", startIn, "Start here"), label("End (seconds)", endIn, "End here"));
+      body.append(row);
+      const status = el("p", "muted small");
+      const save = button("Save trimmed copy", "btn primary", async () => {
+        ctl.error("");
+        const start = Number(startIn.value), end = Number(endIn.value);
+        if (!(end > start)) { ctl.error("The end should be after the start."); return; }
+        save.disabled = true;
+        try {
+          const t = await post(`/api/assets/${item.id}/trim`, { start, end });
+          status.textContent = "Trimming… 0%";
+          const done = await waitForTask(t.id, (x) => { status.textContent = `Trimming… ${Math.round(x.progress * 100)}%`; });
+          status.textContent = `Saved ${fmtSeconds(end - start)} as a new video.`;
+          made = true;
+          void done;
+        } catch (err) { ctl.error(err.message); status.textContent = ""; }
+        save.disabled = false;
+      });
+      const still = button("Save this moment as a photo", "btn", async () => {
+        ctl.error("");
+        still.disabled = true;
+        try {
+          const p = await post(`/api/assets/${item.id}/still`, { at: video.currentTime || 0 });
+          status.textContent = `Saved ${p.filename}.`;
+          made = true;
+        } catch (err) { ctl.error(err.message); }
+        still.disabled = false;
+      });
+      const actions = el("div", "row-actions");
+      actions.append(save, still);
+      body.append(actions, status);
+    },
+  });
+  if (made) { refreshStatus(); if (S.route.view === "grid") reload(); }
+}
+
+// ------------------------------------------------------------------ importing (administrators)
+
+function importSummary(kind, s, dry) {
+  const out = el("div", "import-summary");
+  if (!s) return out;
+  const lines = [];
+  if (kind === "immich") {
+    lines.push(`Immich ${s.immich_version}${s.immich_user ? ` (${s.immich_user})` : ""}: ${plural(s.assets, "item")}, ${plural(s.albums_found || 0, "album")}.`);
+  } else {
+    lines.push(`${plural(s.files, "photo and video", "photos and videos")} in the export, ${plural(s.albums_found || 0, "album")}.`);
+    if (s.without_details) lines.push(`${plural(s.without_details, "file")} had no details from Google.`);
+  }
+  lines.push(`${fmtInt(s.matched)} already in Snapshots; ${fmtInt(s.missing)} not yet${s.missing_bytes ? ` (${fmtSize(s.missing_bytes)})` : ""}.`);
+  if (s.skipped) lines.push(`${plural(s.skipped, "item")} skipped (not photos or videos, or in Immich's trash).`);
+  if (!dry) {
+    if (s.copied || s.copy_failed) lines.push(`Copied into the library: ${fmtInt(s.copied)}${s.copy_failed ? `; ${fmtInt(s.copy_failed)} could not be copied` : ""}.`);
+    const parts = [];
+    const add = (n, one, many) => { if (n) parts.push(plural(n, one, many)); };
+    add(s.favourites, "favourite");
+    add(s.albums, "new album");
+    add(s.album_items, "photo added to albums", "photos added to albums");
+    add(s.tags, "photo tagged", "photos tagged");
+    add(s.archived, "archived");
+    add(s.trashed, "moved to the trash", "moved to the trash");
+    add(s.dates, "date", "dates");
+    add(s.locations, "location");
+    add(s.descriptions, "description");
+    add(s.names, "person's name", "people's names");
+    lines.push(parts.length ? `Brought over: ${parts.join(", ")}.` : "Nothing needed changing.");
+    if (s.names) lines.push("Names go to faces as Snapshots finds them, so People fills in over time.");
+  }
+  lines.forEach((t) => out.append(el("p", null, t)));
+  return out;
+}
+
+async function importDialog() {
+  let users = [];
+  try { users = (await api("/api/users")).users; } catch (_) { /* only yourself, then */ }
+  let timer = null;
+  await modal({
+    title: "Import from Immich or Google Photos", ok: null, cancel: "Close", wide: true,
+    build: (body, ctl) => {
+      body.append(el("p", "muted", "Brings over albums, favourites, archived photos, tags, changed dates and places, descriptions and people's names. Photos are matched by their content, wherever they are. Photos Snapshots doesn't have can be copied into the library. Check first to see what would happen: it changes nothing."));
+      const tabs = el("div", "tabs");
+      const panes = {};
+      const tabBtn = (key, label) => {
+        const b = button(label, "tab", () => {
+          tabs.querySelectorAll(".tab").forEach((t) => t.setAttribute("aria-pressed", String(t === b)));
+          Object.entries(panes).forEach(([k, p]) => { p.hidden = k !== key; });
+        });
+        b.setAttribute("aria-pressed", String(key === "immich"));
+        tabs.append(b);
+      };
+      tabBtn("immich", "Immich");
+      tabBtn("takeout", "Google Photos (Takeout)");
+      body.append(tabs);
+
+      const whoField = () => {
+        const w = el("label", "field");
+        w.append(el("span", null, "Favourites become favourites of"));
+        const s2 = el("select");
+        const list = users.length ? users : [S.me];
+        list.forEach((u) => { const o = el("option", null, u.username); o.value = String(u.id); s2.append(o); });
+        s2.value = String(S.me.id);
+        w.append(s2);
+        return [w, s2];
+      };
+      const copyBox = (text) => {
+        const l = el("label", "opt-check");
+        const c = el("input");
+        c.type = "checkbox";
+        c.checked = true;
+        l.append(c, document.createTextNode(" " + text));
+        return [l, c];
+      };
+
+      const im = el("div", "import-pane");
+      const [a1, url] = field("Immich's address", { value: "http://localhost:2283", maxLength: 500 });
+      const [a2, key] = field("API key (in Immich: Account settings → API keys)", { type: "password", autocomplete: "off", maxLength: 500 });
+      const [a3, imWho] = whoField();
+      const [a4, imCopy] = copyBox("Download photos Snapshots doesn't have into “From Immich” in the library");
+      im.append(a1, a2, a3, a4, el("p", "muted small", "If Snapshots already reads Immich's library folder (as the library or an extra folder), nothing needs downloading. Each person can import with their own Immich API key to bring over their own favourites."));
+      panes.immich = im;
+
+      const to = el("div", "import-pane");
+      to.hidden = true;
+      const [b1, path] = field("Where the export is (the folder with the takeout .zip files, or the unpacked folder)", { placeholder: "D:\\Downloads\\Takeout", maxLength: 1000 });
+      const [b2, toWho] = whoField();
+      const [b3, toCopy] = copyBox("Copy photos Snapshots doesn't have into “From Google Photos” in the library");
+      to.append(b1, b2, b3, el("p", "muted small", "Get the export at takeout.google.com (choose Google Photos). The .zip files can stay zipped."));
+      panes.takeout = to;
+      body.append(im, to);
+
+      const bar = el("div", "progress");
+      const fill = el("div", "progress-fill");
+      bar.append(fill);
+      bar.hidden = true;
+      const status = el("p", "muted");
+      const result = el("div");
+      const history = el("div", "import-history");
+      const stopBtn = button("Stop", "btn small", async () => { try { await post("/api/imports/stop"); } catch (_) { /* finished */ } });
+      stopBtn.hidden = true;
+
+      const show = (state) => {
+        const cur = state.current || {};
+        const running = !!cur.running;
+        checkBtn.disabled = importBtn.disabled = running;
+        stopBtn.hidden = !running;
+        bar.hidden = !running;
+        if (running) {
+          status.textContent = `${cur.phase}…${cur.total ? ` ${fmtInt(cur.done)} of ${fmtInt(cur.total)}` : cur.done ? ` ${fmtInt(cur.done)}` : ""}`;
+          fill.style.width = cur.total ? `${Math.round((cur.done / cur.total) * 100)}%` : "8%";
+          result.replaceChildren();
+        } else if (cur.kind) {
+          status.textContent = cur.error ? "" : (cur.dry_run ? "Checked. Nothing was changed." : "Import finished.");
+          if (cur.error) ctl.error(cur.error);
+          result.replaceChildren(importSummary(cur.kind, cur.summary, cur.dry_run));
+        }
+        history.replaceChildren();
+        if (state.history && state.history.length) {
+          history.append(el("h3", "section-title small", "Earlier imports"));
+          for (const h of state.history.slice(0, 5)) {
+            const s3 = h.summary || {};
+            history.append(el("p", "muted small",
+              `${fmtDateTime(h.started_at)} · ${h.kind === "immich" ? "Immich" : "Google Photos"}${h.by ? ` · by ${h.by}` : ""} · ` +
+              (h.error ? h.error : `${fmtInt(s3.copied || 0)} copied, ${fmtInt(s3.matched || 0)} matched`)));
+          }
+        }
+        return running;
+      };
+      const poll = async () => {
+        clearTimeout(timer);
+        let state;
+        try { state = await api("/api/imports"); } catch (err) { ctl.error(err.message); return; }
+        if (show(state) && $("modal").open) timer = setTimeout(poll, 1000);
+      };
+      const start = async (dry) => {
+        ctl.error("");
+        const immich = !panes.immich.hidden;
+        try {
+          if (immich) {
+            await post("/api/imports/immich", { url: url.value.trim(), key: key.value.trim(), user_id: Number(imWho.value), copy_missing: imCopy.checked, dry_run: dry });
+          } else {
+            await post("/api/imports/takeout", { path: path.value.trim(), user_id: Number(toWho.value), copy_missing: toCopy.checked, dry_run: dry });
+          }
+          poll();
+        } catch (err) { ctl.error(err.message); }
+      };
+      const checkBtn = button("Check first", "btn", () => start(true));
+      const importBtn = button("Import", "btn primary", () => start(false));
+      const actions = el("div", "row-actions");
+      actions.append(checkBtn, importBtn, stopBtn);
+      body.append(actions, bar, status, result, history);
+      poll();
+    },
+  });
+  clearTimeout(timer);
+  refreshStatus();
+}
+
+// ------------------------------------------------------------------ settings: offsite copy and webhooks
+
+function offsiteSection(ctl) {
+  const box = el("div");
+  const draw = (o) => {
+    box.replaceChildren();
+    box.append(el("p", "muted", "A copy of the photos themselves, kept up to date: on another drive, a NAS, a folder OneDrive or Google Drive syncs, or (with rclone or restic) cloud storage. Files deleted from the library stay in the copy."));
+    const grid = el("div", "rule-grid");
+    const mWrap = el("label", "field");
+    mWrap.append(el("span", null, "How"));
+    const method = el("select");
+    [["", "Off"], ["folder", "Copy to a folder"], ["rclone", "rclone (cloud storage)"], ["restic", "restic (encrypted, with history)"]]
+      .forEach(([v, t]) => { const op = el("option", null, t); op.value = v; method.append(op); });
+    method.value = o.method || "";
+    mWrap.append(method);
+    const [tWrap, target] = field("Where", { value: o.target || "", maxLength: 1000 });
+    const [hWrap, hours] = field("Every (hours)", { type: "number", min: "0", step: "1", value: String(o.hours) });
+    const hint = el("p", "muted small");
+    const setHint = () => {
+      target.placeholder = { folder: "E:\\Photo copy", rclone: "b2-crypt:family-photos", restic: "E:\\restic-repo or b2:bucket:photos" }[method.value] || "";
+      hint.textContent = {
+        folder: "A folder on another drive (not inside the library).",
+        rclone: o.tools.rclone ? "An rclone remote and path, set up with “rclone config”. Use a crypt remote to have it encrypted." : "Install rclone (rclone.org) and set up a remote with “rclone config” first.",
+        restic: o.tools.restic ? "A restic repository (made if it doesn't exist). Set offsite_password_file in config.toml to a file holding its password." : "Install restic (restic.net) first.",
+      }[method.value] || "";
+    };
+    method.addEventListener("change", setHint);
+    setHint();
+    grid.append(mWrap, hWrap);
+    box.append(grid, tWrap, hint);
+    const st = o.state || {};
+    const line = el("p", "small");
+    if (st.running) line.textContent = `Copying now…${st.total ? ` ${fmtInt(st.done)} of ${fmtInt(st.total)}` : ""}`;
+    else if (st.last) {
+      const res = st.result || {};
+      line.textContent = `Last copy ${fmtDateTime(st.last)}` + (res.files != null ? `: ${fmtInt(res.copied)} new or changed, ${fmtInt(res.unchanged)} already there.` : ".");
+    } else if (o.method) line.textContent = "No copy made yet.";
+    if (st.message) line.append(el("span", "form-error", " " + st.message));
+    if (o.problem) line.append(el("span", "form-error", " " + o.problem));
+    const actions = el("div", "row-actions");
+    actions.append(button("Save", "btn small primary", async () => {
+      try {
+        let o2 = await post("/api/offsite", { method: method.value, target: target.value.trim(), hours: Number(hours.value || 0) });
+        if (o2.method && !(o2.state && o2.state.running)) o2 = await post("/api/offsite/run");
+        draw(o2);
+        ctl.error("");
+        flashNote(method.value ? "Offsite copy saved. Copying now." : "Offsite copy turned off");
+        if (o2.state && o2.state.running) setTimeout(refresh, 1500);
+      } catch (err) { ctl.error(err.message); }
+    }));
+    if (o.method) actions.append(button(st.running ? "Stop" : "Copy now", "btn small", async () => {
+      try { draw(await post(st.running ? "/api/offsite/stop" : "/api/offsite/run")); ctl.error(""); setTimeout(refresh, 1500); }
+      catch (err) { ctl.error(err.message); }
+    }));
+    box.append(line, actions);
+  };
+  const refresh = async () => {
+    try {
+      const o = (await api("/api/settings")).offsite;
+      draw(o);
+      if (o.state && o.state.running && $("modal").open) setTimeout(refresh, 2000);
+    } catch (_) { /* closed */ }
+  };
+  return { box, draw, refresh };
+}
+
+function webhookSection(ctl) {
+  const box = el("div");
+  const draw = async () => {
+    let data;
+    try { data = await api("/api/webhooks"); } catch (err) { ctl.error(err.message); return; }
+    box.replaceChildren(el("p", "muted", "Tell another program (Home Assistant, a script) when something happens. Snapshots sends a JSON POST to the address, signed with the webhook's secret in the X-Snapshots-Signature header."));
+    for (const h of data.webhooks) {
+      const r = el("div", "user-row");
+      const who = el("div", "who");
+      who.append(el("div", "path", h.url), el("div", "role",
+        h.events.map((e) => data.events[e] || e).join(", ") +
+        (h.last_at ? ` · last sent ${fmtDateTime(h.last_at)} (${h.last_status})` : " · nothing sent yet") +
+        (h.waiting ? ` · ${fmtInt(h.waiting)} waiting` : "") + (h.failed ? ` · ${fmtInt(h.failed)} gave up` : "") +
+        (h.enabled ? "" : " · turned off")));
+      r.append(who,
+        button("Send test", "btn small", async () => { try { await post(`/api/webhooks/${h.id}/test`); flashNote("Test sent"); setTimeout(draw, 2000); } catch (err) { ctl.error(err.message); } }),
+        button(h.enabled ? "Turn off" : "Turn on", "btn small", async () => { try { await patch(`/api/webhooks/${h.id}`, { enabled: !h.enabled }); draw(); } catch (err) { ctl.error(err.message); } }),
+        button("Delete", "btn small", async () => {
+          if (!window.confirm(`Stop sending events to ${h.url}?`)) return;
+          try { await del(`/api/webhooks/${h.id}`); draw(); } catch (err) { ctl.error(err.message); }
+        }));
+      box.append(r);
+    }
+    const [w, url] = field("New webhook address", { placeholder: "http://homeassistant.local:8123/api/webhook/photos", maxLength: 1000 });
+    const events = el("div", "check-row");
+    const picks = {};
+    for (const [k, label] of Object.entries(data.events)) {
+      const l = el("label", "opt-check");
+      const c = el("input");
+      c.type = "checkbox";
+      c.checked = k === "assets.added";
+      picks[k] = c;
+      l.append(c, document.createTextNode(" " + label));
+      events.append(l);
+    }
+    const add = button("Add webhook", "btn small primary", async () => {
+      try {
+        const chosen = Object.keys(picks).filter((k) => picks[k].checked);
+        const made = await post("/api/webhooks", { url: url.value.trim(), events: chosen });
+        ctl.error("");
+        await draw();
+        const fresh = el("div", "key-fresh");
+        const code = el("input", "key-value");
+        code.readOnly = true;
+        code.value = made.secret;
+        code.addEventListener("focus", () => code.select());
+        fresh.append(el("strong", null, "The webhook's secret, for checking signatures. Copy it now: it won't be shown again."), code);
+        box.prepend(fresh);
+      } catch (err) { ctl.error(err.message); }
+    });
+    box.append(w, events, add);
+  };
+  return { box, draw };
+}
+
 // ------------------------------------------------------------------ settings (administrators)
 
 async function manageSettings() {
@@ -3060,8 +3694,13 @@ async function manageSettings() {
       body.append(a, add, el("p", "muted small", "Snapshots only reads these folders. Nothing in them is changed, except by Delete permanently in the trash."));
       body.append(el("h3", "section-title small", "Backups"), backups);
       body.append(el("h3", "section-title small", "Videos"), video);
+      const off = offsiteSection(ctl);
+      const hooks = webhookSection(ctl);
+      body.append(el("h3", "section-title small", "Offsite copy of the photos"), off.box);
+      body.append(el("h3", "section-title small", "Webhooks"), hooks.box);
       body.append(el("p", "muted small cfg-note", ""));
-      draw();
+      draw().then(() => { if (data) off.draw(data.offsite); if (data && data.offsite.state.running) off.refresh(); });
+      hooks.draw();
     },
   });
 }

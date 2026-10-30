@@ -80,3 +80,12 @@ search_threads = 2
 # video_encoder = "auto"
 # Converted copies are kept in the data folder, at most this many GB.
 # video_cache_gb = 20
+
+# A copy of the photos themselves (the backups above hold only the database). Also set in the app:
+# your name, Settings. "folder" copies new and changed files to another folder (another drive, a NAS,
+# a folder OneDrive keeps in the cloud); "rclone" copies to an rclone remote; "restic" makes encrypted,
+# versioned snapshots in a restic repository. Files deleted from the library stay in the copy.
+# offsite_method = "folder"
+# offsite_target = 'E:\Photo copy'          # or "b2-crypt:photos" (rclone), or 'E:\restic-repo' (restic)
+# offsite_hours = 24
+# offsite_password_file = 'C:\Users\me\restic-password.txt'   # restic only

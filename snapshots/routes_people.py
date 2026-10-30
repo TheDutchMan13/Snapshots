@@ -4,7 +4,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from . import db
+from . import db, webhooks
 from .app import current_user
 
 
@@ -77,7 +77,10 @@ def router(ctx) -> APIRouter:
                 conn.execute("UPDATE people SET name = NULL WHERE id = ?", (person_id,))
             elif body.name is not None:
                 name = body.name.strip()
+                before = conn.execute("SELECT name FROM people WHERE id = ?", (person_id,)).fetchone()[0]
                 conn.execute("UPDATE people SET name = ? WHERE id = ?", (name or None, person_id))
+                if name and name != before:
+                    webhooks.emit(conn, "person.named", {"id": person_id, "name": name, "before": before})
             if body.hidden is not None:
                 conn.execute("UPDATE people SET hidden = ? WHERE id = ?", (int(body.hidden), person_id))
             return get_person(conn, person_id)

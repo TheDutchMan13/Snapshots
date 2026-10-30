@@ -2,7 +2,7 @@
 
 Snapshots is a self-hosted photo and video library for Windows. Your originals stay on your own drive, and the app indexes them locally for browsing, search, people and places. You can reach your library from your phone over Tailscale, with no cloud account or subscription required.
 
-> **Status:** early development (v0.6). Browsing, search, accounts, albums, tags, favourites, archive, trash, people, places, the map, memories, events, clean-up, editing, comments and the locked folder all work. Automatic backup from a phone is not built yet, see [Roadmap](#roadmap).
+> **Status:** early development (v0.7). Browsing, search, accounts, albums and smart albums, tags, favourites, archive, trash, people, places, the map, memories, events, clean-up, editing, comments, the locked folder, exports, imports from Immich and Google Photos, offsite copies and webhooks all work. Automatic backup from a phone is not built yet, see [Roadmap](#roadmap).
 
 ## What works today
 
@@ -10,6 +10,12 @@ Snapshots is a self-hosted photo and video library for Windows. Your originals s
 - **Keeps itself up to date:** rescans the library every 15 minutes (adjustable), and photos you move or rename keep their albums, favourites and faces
 - **Accounts:** everyone logs in. The first account is the administrator, who can add accounts for the family
 - **Albums** and **tags** shared by everyone, **favourites** for each person, and a **trash** you can restore from
+- **Smart albums** that fill themselves from rules: people (all of them in the photo), words, what's in the photo, a tag, dates, a place, photos or videos, favourites. New photos that match join by themselves. Save any search as one with **Save as smart album**
+- **Import from Immich or Google Photos** (your name, **Import**, administrators): albums, favourites, archived and trashed photos, tags, dates and places changed in the other app, descriptions and people's names come across. Photos are matched by their content wherever they are, and the ones Snapshots doesn't have can be copied into the library. **Check first** shows what would happen without changing anything
+- **Export** an album or a selection as a zip (files named by date, edited photos edited) or as a **PDF photo book** (Letter or A4, 1 to 6 photos a page, with dates and places)
+- **Trim videos** and **save a moment of a video as a photo**: both are saved as new files next to the video, with its date, place and albums
+- **Offsite copy** of the photos themselves (Settings): to another drive, a NAS or a cloud-synced folder, or with rclone or restic to cloud storage (encrypted if you like). It is kept up to date every day, and files deleted from the library stay in the copy
+- **Webhooks** tell other programs (Home Assistant, a script) about new photos, album additions, comments, named people, finished imports and offsite copies, and failed backups
 - **Archive:** hide screenshots, receipts and the like from the timeline without deleting them. They still show in albums, people, places, folders and search
 - **Folders:** browse the library by its real folders
 - **Several library folders:** add photo folders on other drives (Settings, as an administrator). Each shows up as its own folder, and an unplugged drive loses nothing
@@ -115,6 +121,10 @@ Copy `config.example.toml` to `config.toml` and edit it, or use command-line opt
 | | `backup_dir` | `backups` in the data folder | Where backups go (another drive is safer) |
 | | `video_encoder` | `auto` | How videos are converted: `auto` tries the graphics card first, or `libx264`, `h264_amf` (AMD), `h264_nvenc` (NVIDIA), `h264_qsv` (Intel) |
 | | `video_cache_gb` | `20` | Converted videos kept for playing, at most this many GB |
+| | `offsite_method` | `""` (off) | Copies of the photos themselves: `folder`, `rclone` or `restic` (also set in the app: Settings) |
+| | `offsite_target` | | A folder, an rclone `remote:path`, or a restic repository |
+| | `offsite_hours` | `24` | Bring the offsite copy up to date this often |
+| | `offsite_password_file` | | restic only: a file holding the repository's password |
 | `--restore-backup FILE` | | | Put a database backup back in place (close Snapshots first), then exit |
 | `--reset-password NAME` | | | Set a new password for an account, then exit |
 | `--window` | | exe: on, source: off | Show Snapshots in its own window |
@@ -137,6 +147,10 @@ Everything runs on your own computer, in the background after a scan, a few phot
 - **Edits** are a small recipe kept in the database: a quarter turn, mirror, a straightening angle (the picture is enlarged just enough to leave no empty corners) and a crop. The editor in the app draws the same steps the server uses for thumbnails and the viewer, so what you see while editing is what you get.
 - **360° photos** are recognised from the panorama information phones and 360° cameras write into the photo. The viewer draws them on the inside of a sphere with WebGL. Photos at least 2.4 times wider than tall get a **Pan** button.
 - **Video conversion** happens the first time a video that can't play is opened. A video that is already H.264 but in a file type the app can't open (MKV, AVI) is only repackaged, which takes seconds. Anything else is converted with the graphics card's encoder when ffmpeg can use it (each one is tested once with a tiny clip), otherwise with the processor. Copies are kept in the data folder, up to `video_cache_gb`.
+- **Smart albums** keep their rules, not a list of photos, so they are worked out each time they are opened. A rule with **What's in the photo** uses search by content and stays empty until that is ready.
+- **Imports** match each photo by its SHA-1, which Immich reports for every photo and Snapshots works out for every file in a Google export, so it doesn't matter where either app keeps its files or what they are called. Immich is read through its API with an API key you make in Immich; nothing is changed in Immich. Google Takeout's `.json` files are matched to their photos despite Takeout's naming quirks (`.supplemental-metadata.json`, names cut short, `(1)` copies, `-edited` versions). Google's dates are in UTC with no time zone, so a Google date only replaces the file's own when the two differ by more than a day. Names of people from Immich come with where each face is, and go to the face Snapshots finds there; Google only says who is in a photo, so its names are used for photos with exactly one face.
+- **The photo book** is a PDF written by Snapshots itself, one picture per page at 200 dots per inch, so it is sharp on screen and good for printing at home. Videos are left out.
+- **Webhooks** are kept in the database before they are sent, so none are lost if Snapshots closes. A delivery that fails is tried again after 30 seconds, 2 and 10 minutes, 1 and 6 hours. Each one carries `X-Snapshots-Signature: sha256=<HMAC of the body with the webhook's secret>`. Items in a locked folder never appear in one.
 - **The map** draws pictures from OpenStreetMap while you look at it, so your computer asks OpenStreetMap's servers for the areas you view (not for your photos' locations). Set `map_tiles = ""` to use only the country outlines that come with Snapshots, with nothing fetched, or point it at your own tile server.
 
 ## Your files and safety
@@ -150,6 +164,8 @@ Everything runs on your own computer, in the background after a scan, a few phot
 - Archiving, tagging, stacking, editing, changing details, comments and the locked folder change nothing in your files.
 - **Extra library folders** are read the same way. Removing one in Settings takes its photos out of Snapshots and leaves the files alone.
 - **The locked folder** hides photos inside Snapshots only. The files stay where they are, so anyone who can open your folders in Windows can still see them.
+- **Trimmed videos and stills** are new files next to the video. **Imports** only add files to `From Immich` and `From Google Photos` in the library; nothing is changed in Immich or in the export.
+- **The offsite copy** only reads your library. It never deletes anything from the copy either, so a photo deleted by mistake is still there.
 - **Backups** contain the database (albums, tags, people's names, favourites, accounts, edits, comments), not your photos. To restore one, close Snapshots and run `Snapshots.exe --restore-backup "<backup file>"`; the database it replaces is kept as `snapshots.before-restore.db`.
 
 ## Accounts and remote access
@@ -157,6 +173,8 @@ Everything runs on your own computer, in the background after a scan, a few phot
 Everyone logs in, and everyone sees the same library and albums. Favourites are personal. Administrators manage accounts (sidebar, your name, **Accounts**) and are the only ones who can empty the trash.
 
 Passwords are stored as salted scrypt hashes. Sessions last 30 days and end when a password is changed. Repeated wrong passwords are slowed down, and the app is protected against cross-site request forgery. A future phone app can log in through the same API and send its session as `Authorization: Bearer <token>`. Scripts and other apps can use an **API key** instead (your name, **API keys**): it acts as you, except that it can't open your locked folder, change your password or make more keys. Only a hash of each key is stored.
+
+**Imports, webhooks and the offsite copy** are for administrators, since they add albums and names for everyone, copy files, or send information out.
 
 Each person's **locked folder** opens with their own PIN, for 10 minutes at a time and only in the window where it was typed. Wrong PINs are slowed down. If an administrator deletes an account, that person's locked photos become visible to everyone again.
 
@@ -174,7 +192,7 @@ If Windows Security removes the exe after a build (programs made with PyInstalle
 
 ## Upgrading
 
-Replace the exe (or pull the new code) and start it again. Your database is upgraded automatically the first time. Version 0.2 added accounts, so after upgrading from 0.1 you'll be asked to create the administrator account. Version 0.3 only changes how Snapshots opens (its own window instead of a browser tab); your accounts, albums and photos are untouched. You will need to log in once more, because the app window keeps its own login separate from your browser. Version 0.4 then checks every photo once in the background (copies, blur, content and text), which takes a while for a big library; everything keeps working meanwhile. Version 0.5 looks once through your JPEG and HEIC photos for motion photos and keywords (quick: it reads only the start of each file), pairs Live Photos, stacks RAW + JPEG pairs, and picks up RAW files that earlier versions skipped. Version 0.6 looks once through your JPEG and HEIC photos for 360° panoramas (again reading only the start of each file) and makes its first database backup when it starts.
+Replace the exe (or pull the new code) and start it again. Your database is upgraded automatically the first time. Version 0.2 added accounts, so after upgrading from 0.1 you'll be asked to create the administrator account. Version 0.3 only changes how Snapshots opens (its own window instead of a browser tab); your accounts, albums and photos are untouched. You will need to log in once more, because the app window keeps its own login separate from your browser. Version 0.4 then checks every photo once in the background (copies, blur, content and text), which takes a while for a big library; everything keeps working meanwhile. Version 0.5 looks once through your JPEG and HEIC photos for motion photos and keywords (quick: it reads only the start of each file), pairs Live Photos, stacks RAW + JPEG pairs, and picks up RAW files that earlier versions skipped. Version 0.6 looks once through your JPEG and HEIC photos for 360° panoramas (again reading only the start of each file) and makes its first database backup when it starts. Version 0.7 changes nothing on its own: imports, the offsite copy and webhooks only start once you set them up.
 
 ## Roadmap
 
@@ -195,6 +213,9 @@ Replace the exe (or pull the new code) and start it again. Your database is upgr
 - [x] Locked folder, comments and activity
 - [x] Several library folders, database backups, API keys
 - [x] Converting videos that don't play, with the graphics card
+- [x] Smart albums, exports and photo books, trimming videos
+- [x] Importing from Immich and Google Photos
+- [x] Offsite copies of the photos, webhooks
 - [ ] Android app with automatic backup
 - [ ] Sharing links for people without an account
 - [ ] Run at startup as a Windows service
@@ -219,6 +240,11 @@ The tests build small libraries of generated images, so they don't touch your ph
 | `snapshots/libraries.py` | The main library and extra library folders, and where each item's file is |
 | `snapshots/videos.py` | Converting videos that don't play, in the background |
 | `snapshots/backup.py` | Database backups and restoring them |
+| `snapshots/offsite.py` | Offsite copies of the photos: folder, rclone or restic |
+| `snapshots/imports.py`, `immich.py`, `takeout.py` | Importing from Immich and Google Takeout |
+| `snapshots/smart.py` | Smart albums' rules |
+| `snapshots/exports.py` | Zip exports and the PDF photo book |
+| `snapshots/webhooks.py` | Webhooks: queueing, signing and delivering events |
 | `snapshots/clipsearch.py` | Search by what is in a photo (CLIP) |
 | `snapshots/ocr.py` | Reading text in photos |
 | `snapshots/downloads.py` | Downloading models once and checking their SHA-256 |

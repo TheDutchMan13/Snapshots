@@ -213,6 +213,95 @@ class Clusterer:
             self.sums[row] += embedding
             self._refresh(row)
 
+    def move(self, old: int | None, new: int, embedding) -> None:
+        """A face changed person (a name from an import)."""
+        row = self.index.get(old) if old is not None else None
+        if row is not None:
+            self.sums[row] -= embedding
+            self._refresh(row)
+        self.add(new, embedding)
+
+
+def _overlap(a, b) -> float:
+    """How much two boxes (x, y, w, h as fractions) cover each other: intersection over union."""
+    x1, y1 = max(a[0], b[0]), max(a[1], b[1])
+    x2, y2 = min(a[0] + a[2], b[0] + b[2]), min(a[1] + a[3], b[1] + b[3])
+    inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+    union = a[2] * a[3] + b[2] * b[3] - inter
+    return inter / union if union > 0 else 0.0
+
+
+def _near(a, b) -> bool:
+    """The middle of one box lies inside the other (face finders draw boxes of different sizes)."""
+    ax, ay = a[0] + a[2] / 2, a[1] + a[3] / 2
+    bx, by = b[0] + b[2] / 2, b[1] + b[3] / 2
+    return (b[0] <= ax <= b[0] + b[2] and b[1] <= ay <= b[1] + b[3]) or \
+        (a[0] <= bx <= a[0] + a[2] and a[1] <= by <= a[1] + a[3])
+
+
+def apply_hints(conn, asset_id: int) -> list[tuple[int, int | None, int]]:
+    """Give the faces in a photo the names an import brought along (from Immich or Google Photos).
+
+    A name with a position goes to the face found there. A name without one (Google Photos only says who
+    is in the photo) is used only when the photo has exactly one face and one name. The face's group gets
+    the name if it has none yet, so the rest of that person's photos get it too; otherwise the face moves
+    to the person with that name. Returns the faces that changed person: (face id, old person, new person).
+    The hints are used up, whatever happens.
+    """
+    hints = conn.execute("SELECT name, x, y, w, h FROM face_hints WHERE asset_id = ?", (asset_id,)).fetchall()
+    if not hints:
+        return []
+    conn.execute("DELETE FROM face_hints WHERE asset_id = ?", (asset_id,))
+    faces = conn.execute("SELECT id, person_id, x, y, w, h FROM faces WHERE asset_id = ?", (asset_id,)).fetchall()
+    if not faces:
+        return []
+    pairs = []
+    used: set[int] = set()
+    boxed = [h for h in hints if h["x"] is not None]
+    for hint in boxed:
+        box = (hint["x"], hint["y"], hint["w"], hint["h"])
+        best, best_score = None, 0.0
+        for face in faces:
+            if face["id"] in used:
+                continue
+            fbox = (face["x"], face["y"], face["w"], face["h"])
+            score = _overlap(box, fbox)
+            if score < 0.2 and _near(box, fbox):
+                score = 0.2
+            if score > best_score:
+                best, best_score = face, score
+        if best is not None and best_score >= 0.2:
+            used.add(best["id"])
+            pairs.append((best, hint["name"]))
+    unboxed = [h for h in hints if h["x"] is None]
+    if not boxed and len(unboxed) == 1 and len(faces) == 1:
+        pairs.append((faces[0], unboxed[0]["name"]))
+
+    moves = []
+    stamp = datetime.now().isoformat(timespec="seconds")
+    for face, name in pairs:
+        name = " ".join(name.split())[:200]
+        if not name:
+            continue
+        named = conn.execute("SELECT id FROM people WHERE name = ? COLLATE NOCASE ORDER BY hidden, id LIMIT 1",
+                             (name,)).fetchone()
+        current = conn.execute("SELECT id, name FROM people WHERE id = ?", (face["person_id"],)).fetchone() \
+            if face["person_id"] is not None else None
+        if named is not None:
+            target = named["id"]
+        elif current is not None and not current["name"]:
+            conn.execute("UPDATE people SET name = ? WHERE id = ?", (name, current["id"]))
+            continue  # the whole group now has the name; the face stays where it is
+        else:
+            target = conn.execute("INSERT INTO people (name, created_at) VALUES (?, ?)", (name, stamp)).lastrowid
+        if target != face["person_id"]:
+            conn.execute("UPDATE faces SET person_id = ? WHERE id = ?", (target, face["id"]))
+            moves.append((face["id"], face["person_id"], target))
+    if moves:
+        conn.execute("DELETE FROM people WHERE name IS NULL AND id NOT IN (SELECT person_id FROM faces"
+                     " WHERE person_id IS NOT NULL)")
+    return moves
+
 
 def regroup(conn, threshold: float, min_faces: int = 2) -> int:
     """Merge groups that are the same person (average-linkage). Returns how many merges were made."""
@@ -382,3 +471,6 @@ class FacesJob:
             except OSError:
                 pass
         conn.execute("UPDATE assets SET faces_done = 1 WHERE id = ?", (asset_id,))
+        for face_id, old, new in apply_hints(conn, asset_id):
+            blob = conn.execute("SELECT embedding FROM faces WHERE id = ?", (face_id,)).fetchone()[0]
+            self.clusterer.move(old, new, self.clusterer.np.frombuffer(blob, dtype=self.clusterer.np.float32))
