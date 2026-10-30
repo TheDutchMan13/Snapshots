@@ -161,7 +161,7 @@ def router(ctx) -> APIRouter:
         with db.session(cfg.db_path) as conn:
             get_tag(conn, tag_id)
             conn.executemany("DELETE FROM asset_tags WHERE tag_id = ? AND asset_id = ?",
-                             [(tag_id, i) for i in body.ids])
+                             [(tag_id, i) for i in db.open_ids(conn, body.ids)])
             return tag_json(conn, get_tag(conn, tag_id))
 
     # ------------------------------------------------------------ stacks
@@ -183,7 +183,8 @@ def router(ctx) -> APIRouter:
     def set_cover(stack_id: int, body: CoverBody, request: Request):
         current_user(request)
         with db.session(cfg.db_path) as conn:
-            if not conn.execute("SELECT 1 FROM assets WHERE id = ? AND stack_id = ?", (body.cover, stack_id)).fetchone():
+            if not conn.execute("SELECT 1 FROM assets WHERE id = ? AND stack_id = ? AND locked_by IS NULL",
+                                (body.cover, stack_id)).fetchone():
                 raise HTTPException(404, "That photo is not in this stack.")
             conn.execute("UPDATE stacks SET cover_id = ? WHERE id = ?", (body.cover, stack_id))
         return {"ok": True}
@@ -288,7 +289,8 @@ def router(ctx) -> APIRouter:
                 "SELECT substr(a.taken_at, 1, 4) AS year, COUNT(*) AS count,"
                 # the cover: a favourite if there is one, else the sharpest photo
                 " (SELECT b.id FROM assets b WHERE substr(b.taken_at, 1, 10) = substr(a.taken_at, 1, 10)"
-                f"  AND b.trashed_at IS NULL AND b.archived_at IS NULL AND b.kind = 'photo' AND b.has_thumb = 1"
+                f"  AND b.trashed_at IS NULL AND b.archived_at IS NULL AND b.locked_by IS NULL"
+                "  AND b.kind = 'photo' AND b.has_thumb = 1"
                 "  ORDER BY EXISTS (SELECT 1 FROM favorites f WHERE f.asset_id = b.id) DESC,"
                 "  coalesce(b.sharpness, 0) DESC, b.id LIMIT 1) AS cover"
                 f" FROM assets a WHERE substr(a.taken_at, 5, 6) = ? AND a.taken_at < ? AND {VISIBLE}"
@@ -379,8 +381,10 @@ def router(ctx) -> APIRouter:
                 if not conn.execute("SELECT pin_hash FROM users WHERE id = ?", (user["id"],)).fetchone()[0]:
                     raise HTTPException(400, "Set a PIN for your locked folder first.")
                 ids = linking.with_clips(conn, db.open_ids(conn, body.ids))
-                conn.executemany("UPDATE assets SET locked_by = ? WHERE id = ? AND locked_by IS NULL",
-                                 [(user["id"], i) for i in ids])
+                # A locked item leaves its stack, so nothing about it shows through the rest of the stack.
+                conn.executemany("UPDATE assets SET locked_by = ?, stack_id = NULL, no_auto_stack = 1"
+                                 " WHERE id = ? AND locked_by IS NULL", [(user["id"], i) for i in ids])
+                linking.tidy_stacks(conn)
             else:
                 if not user.get("unlocked"):
                     raise HTTPException(403, "Open the locked folder first.")

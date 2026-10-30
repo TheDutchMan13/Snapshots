@@ -203,8 +203,10 @@ class VectorIndex:
         self.matrix = None
 
     def _version(self, conn):
-        return tuple(conn.execute("SELECT COUNT(*), COALESCE(MAX(rowid), 0), COALESCE(SUM(asset_id), 0)"
-                                  " FROM clip_vectors").fetchone())
+        # Locked items are left out, so they never take places in (or shift) anyone's results.
+        return tuple(conn.execute("SELECT COUNT(*), COALESCE(MAX(c.rowid), 0), COALESCE(SUM(c.asset_id), 0),"
+                                  " COALESCE(SUM(CASE WHEN a.locked_by IS NOT NULL THEN a.id END), 0)"
+                                  " FROM clip_vectors c JOIN assets a ON a.id = c.asset_id").fetchone())
 
     def load(self, conn) -> int:
         import numpy as np
@@ -212,7 +214,8 @@ class VectorIndex:
         key = self._version(conn)
         with self._lock:
             if key != self._key:
-                rows = conn.execute("SELECT asset_id, vec FROM clip_vectors ORDER BY asset_id").fetchall()
+                rows = conn.execute("SELECT c.asset_id, c.vec FROM clip_vectors c JOIN assets a ON a.id = c.asset_id"
+                                    " WHERE a.locked_by IS NULL ORDER BY c.asset_id").fetchall()
                 self.ids = np.array([r[0] for r in rows], dtype=np.int64)
                 self.matrix = (np.frombuffer(b"".join(r[1] for r in rows), dtype=np.float16).reshape(-1, DIM)
                                if rows else np.zeros((0, DIM), np.float16))

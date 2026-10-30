@@ -106,7 +106,8 @@ def router(ctx) -> APIRouter:
         """'This is not them': take one face out of its person."""
         current_user(request)
         with db.session(cfg.db_path) as conn:
-            if conn.execute("SELECT 1 FROM faces WHERE id = ?", (face_id,)).fetchone() is None:
+            if conn.execute("SELECT 1 FROM faces f JOIN assets a ON a.id = f.asset_id"
+                            " WHERE f.id = ? AND a.locked_by IS NULL", (face_id,)).fetchone() is None:
                 raise HTTPException(404, "No such face.")
             conn.execute("UPDATE faces SET person_id = NULL WHERE id = ?", (face_id,))
         worker.faces.invalidate()

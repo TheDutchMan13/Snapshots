@@ -33,7 +33,7 @@ def _key(path: str) -> tuple[str, str]:
 def link_pairs(conn, cfg=None) -> dict:
     """Link Live Photos to their clips and stack RAW + JPEG pairs. Safe to run after every scan."""
     rows = conn.execute(
-        "SELECT id, path, kind, size, live_video, stack_id, no_auto_stack, trashed_at FROM assets"
+        "SELECT id, path, kind, size, live_video, stack_id, no_auto_stack, trashed_at, locked_by FROM assets"
     ).fetchall()
     groups = defaultdict(list)
     for r in rows:
@@ -64,8 +64,9 @@ def link_pairs(conn, cfg=None) -> dict:
                 cfg.motion_path(r["id"]).unlink(missing_ok=True)
             if want:
                 linked += 1
-                # The clip follows its photo into (or out of) the trash.
-                conn.execute("UPDATE assets SET trashed_at = ? WHERE id = ?", (r["trashed_at"], want))
+                # The clip follows its photo into (or out of) the trash and the locked folder.
+                conn.execute("UPDATE assets SET trashed_at = ?, locked_by = ? WHERE id = ?",
+                             (r["trashed_at"], r["locked_by"], want))
             else:
                 unlinked += 1
 
@@ -110,8 +111,8 @@ def unstack(conn, stack_ids: list[int]) -> int:
     """Take stacks apart. Snapshots won't stack those photos again by itself."""
     n = 0
     for sid in set(stack_ids):
-        n += conn.execute("UPDATE assets SET stack_id = NULL, no_auto_stack = 1 WHERE stack_id = ?",
-                          (sid,)).rowcount
+        n += conn.execute("UPDATE assets SET stack_id = NULL, no_auto_stack = 1 WHERE stack_id = ?"
+                          " AND locked_by IS NULL", (sid,)).rowcount
         conn.execute("DELETE FROM stacks WHERE id = ?", (sid,))
     return n
 

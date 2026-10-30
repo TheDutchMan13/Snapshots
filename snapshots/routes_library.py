@@ -520,13 +520,13 @@ def router(ctx) -> APIRouter:
                     out.write(chunk)
 
             with db.session(cfg.db_path) as conn:
+                # A copy in someone's locked folder doesn't count: the upload is added like any new photo,
+                # so nobody can find out what is locked by uploading.
                 dup = conn.execute(
-                    "SELECT id, trashed_at, locked_by FROM assets WHERE sha1 = ? ORDER BY trashed_at IS NOT NULL LIMIT 1",
+                    "SELECT id, trashed_at FROM assets WHERE sha1 = ? AND locked_by IS NULL"
+                    " ORDER BY trashed_at IS NOT NULL LIMIT 1",
                     (digest.hexdigest(),),
                 ).fetchone()
-                if dup and dup["locked_by"] is not None:
-                    tmp.unlink()
-                    return {"name": upload.filename, "status": "duplicate"}  # in a locked folder: say no more
                 if dup and dup["trashed_at"]:
                     # Uploading something that is in the trash brings it back.
                     conn.execute("UPDATE assets SET trashed_at = NULL WHERE id = ?", (dup["id"],))
@@ -634,6 +634,7 @@ def unread_activity(conn, user_id: int) -> int:
         (since, user_id)).fetchone()[0]
     additions = conn.execute(
         "SELECT COUNT(DISTINCT aa.album_id || '|' || coalesce(aa.added_by, 0) || '|' || substr(aa.added_at, 1, 13))"
-        " FROM album_assets aa WHERE aa.added_at > ? AND aa.added_by IS NOT NULL AND aa.added_by != ?",
+        " FROM album_assets aa JOIN assets a ON a.id = aa.asset_id AND a.trashed_at IS NULL AND a.locked_by IS NULL"
+        " WHERE aa.added_at > ? AND aa.added_by IS NOT NULL AND aa.added_by != ?",
         (since, user_id)).fetchone()[0]
     return comments + additions

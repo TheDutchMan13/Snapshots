@@ -96,7 +96,8 @@ def router(ctx) -> APIRouter:
         """People can delete their own comments; administrators can delete any."""
         user = current_user(request)
         with db.session(cfg.db_path) as conn:
-            row = conn.execute("SELECT user_id FROM comments WHERE id = ?", (comment_id,)).fetchone()
+            row = conn.execute("SELECT c.user_id FROM comments c LEFT JOIN assets a ON a.id = c.asset_id"
+                               " WHERE c.id = ? AND (c.asset_id IS NULL OR a.locked_by IS NULL)", (comment_id,)).fetchone()
             if row is None:
                 raise HTTPException(404, "No such comment.")
             if row["user_id"] != user["id"] and not user["is_admin"]:

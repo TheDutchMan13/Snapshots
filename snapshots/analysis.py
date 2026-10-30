@@ -223,7 +223,7 @@ class DuplicateFinder:
         return tuple(conn.execute(
             "SELECT COUNT(*), COALESCE(MAX(id), 0), COALESCE(SUM(dhash % 1000003), 0),"
             " (SELECT COUNT(*) FROM not_duplicates), COALESCE(SUM(trashed_at IS NOT NULL), 0),"
-            " COALESCE(SUM(coalesce(stack_id, 0) % 1000003), 0), COUNT(locked_by)"
+            " COALESCE(SUM(coalesce(stack_id, 0) % 1000003), 0), COALESCE(SUM(CASE WHEN locked_by IS NOT NULL THEN id END), 0)"
             " FROM assets WHERE dhash IS NOT NULL"
         ).fetchone())
 
@@ -411,7 +411,7 @@ class EventFinder:
     def _version(self, conn):
         return tuple(conn.execute(
             "SELECT COUNT(*), COALESCE(MAX(id), 0), COUNT(city), COALESCE(SUM(LENGTH(taken_at) + id % 97), 0),"
-            " COUNT(archived_at), COUNT(live_video), COUNT(locked_by),"
+            " COUNT(archived_at), COUNT(live_video), COALESCE(SUM(CASE WHEN locked_by IS NOT NULL THEN id END), 0),"
             # dates and positions people changed by hand
             " COALESCE(SUM(CAST(replace(replace(replace(taken_at, '-', ''), 'T', ''), ':', '') AS INTEGER) % 1000003), 0),"
             " COALESCE(SUM(CAST(coalesce(lat, 0) * 10000 + coalesce(lon, 0) * 100 AS INTEGER) % 1000003), 0)"

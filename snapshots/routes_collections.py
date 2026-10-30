@@ -207,7 +207,7 @@ def router(ctx) -> APIRouter:
         with db.session(cfg.db_path) as conn:
             get_album(conn, album_id)
             conn.executemany("DELETE FROM album_assets WHERE album_id = ? AND asset_id = ?",
-                             [(album_id, i) for i in body.ids])
+                             [(album_id, i) for i in db.open_ids(conn, body.ids)])
             conn.execute("UPDATE albums SET updated_at = ? WHERE id = ?", (_now(), album_id))
             return album_json(conn, get_album(conn, album_id))
 

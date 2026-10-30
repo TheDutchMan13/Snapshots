@@ -308,7 +308,7 @@ LIVE_PART_HIDDEN = "NOT EXISTS (SELECT 1 FROM assets lp WHERE lp.live_video = a.
 STACK_HIDDEN = (
     "(a.stack_id IS NULL OR NOT EXISTS ("
     " SELECT 1 FROM assets sm JOIN stacks st ON st.id = sm.stack_id"
-    " WHERE sm.stack_id = a.stack_id AND sm.id != a.id AND sm.trashed_at IS NULL"
+    " WHERE sm.stack_id = a.stack_id AND sm.id != a.id AND sm.trashed_at IS NULL AND sm.locked_by IS NULL"
     " AND (sm.id IS st.cover_id OR (a.id IS NOT st.cover_id AND sm.id < a.id))))"
 )
 
@@ -464,7 +464,8 @@ ASSET_COLUMNS = (
     " a.highlights,"
     " a.keep_quality, a.ocr_text, a.archived_at, a.stack_id, a.live_video, a.motion_offset,"
     " a.description, a.taken_at_file, a.position_edited, a.edits, a.edit_v, a.projection, a.locked_by,"
-    " (SELECT COUNT(*) FROM assets sc WHERE sc.stack_id = a.stack_id AND sc.trashed_at IS NULL) AS stack_count"
+    " (SELECT COUNT(*) FROM assets sc WHERE sc.stack_id = a.stack_id AND sc.trashed_at IS NULL"
+    "  AND sc.locked_by IS NULL) AS stack_count"
 )
 
 
