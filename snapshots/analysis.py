@@ -223,7 +223,7 @@ class DuplicateFinder:
         return tuple(conn.execute(
             "SELECT COUNT(*), COALESCE(MAX(id), 0), COALESCE(SUM(dhash % 1000003), 0),"
             " (SELECT COUNT(*) FROM not_duplicates), COALESCE(SUM(trashed_at IS NOT NULL), 0),"
-            " COALESCE(SUM(coalesce(stack_id, 0) % 1000003), 0)"
+            " COALESCE(SUM(coalesce(stack_id, 0) % 1000003), 0), COUNT(locked_by)"
             " FROM assets WHERE dhash IS NOT NULL"
         ).fetchone())
 
@@ -245,7 +245,7 @@ class DuplicateFinder:
     def _compute(self, conn) -> list[dict]:
         rows = [dict(r) for r in conn.execute(
             "SELECT id, dhash, taken_at, width, height, size, sharpness, stack_id FROM assets"
-            " WHERE dhash IS NOT NULL AND trashed_at IS NULL AND kind = 'photo'"
+            " WHERE dhash IS NOT NULL AND trashed_at IS NULL AND locked_by IS NULL AND kind = 'photo'"
         )]
         by_id = {r["id"]: r for r in rows}
         copies = similar_pairs([(r["id"], r["dhash"]) for r in rows], self.cfg.duplicate_distance)
@@ -411,7 +411,10 @@ class EventFinder:
     def _version(self, conn):
         return tuple(conn.execute(
             "SELECT COUNT(*), COALESCE(MAX(id), 0), COUNT(city), COALESCE(SUM(LENGTH(taken_at) + id % 97), 0),"
-            " COUNT(archived_at), COUNT(live_video)"
+            " COUNT(archived_at), COUNT(live_video), COUNT(locked_by),"
+            # dates and positions people changed by hand
+            " COALESCE(SUM(CAST(replace(replace(replace(taken_at, '-', ''), 'T', ''), ':', '') AS INTEGER) % 1000003), 0),"
+            " COALESCE(SUM(CAST(coalesce(lat, 0) * 10000 + coalesce(lon, 0) * 100 AS INTEGER) % 1000003), 0)"
             " FROM assets WHERE trashed_at IS NULL"
         ).fetchone())
 
@@ -421,7 +424,7 @@ class EventFinder:
             if key != self._key:
                 rows = [dict(r) for r in conn.execute(
                     "SELECT a.id, a.taken_at, a.lat, a.lon, a.city, a.state, a.country, a.sharpness FROM assets a"
-                    " WHERE a.trashed_at IS NULL AND a.archived_at IS NULL"
+                    " WHERE a.trashed_at IS NULL AND a.archived_at IS NULL AND a.locked_by IS NULL"
                     " AND NOT EXISTS (SELECT 1 FROM assets lp WHERE lp.live_video = a.id) ORDER BY a.taken_at, a.id"
                 )]
                 self._events = find_events(rows, self.cfg.event_gap_hours, min_items=self.cfg.event_min_items)

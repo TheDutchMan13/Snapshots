@@ -6,6 +6,11 @@
   token is stored, so a copy of the database does not let anyone log in.
 * Changes (POST, PATCH, DELETE) from a browser must carry the X-Snapshots-Request header,
   which other websites cannot add. That blocks cross-site request forgery.
+* API keys (for scripts and other apps) start with "snap_" and are sent as a Bearer token. Like
+  sessions, only a hash is stored. A key can do what its owner can, except manage keys, change the
+  password or PIN, and open the locked folder.
+* The locked folder opens with a PIN (stored like a password) for a few minutes at a time, and only
+  in the session where it was typed.
 """
 
 import hashlib
@@ -20,6 +25,8 @@ COOKIE = "snapshots_session"
 CSRF_HEADER = "x-snapshots-request"
 SESSION_DAYS = 30
 MIN_PASSWORD = 8
+API_KEY_PREFIX = "snap_"
+UNLOCK_MINUTES = 10
 
 _SCRYPT_N, _SCRYPT_R, _SCRYPT_P = 2**14, 8, 1   # ~16 MB and ~50 ms per check
 
@@ -85,13 +92,24 @@ def create_session(conn, user_id: int, user_agent: str | None) -> str:
 
 
 def user_for_token(conn, token: str | None):
-    """The logged-in user for a session token, extending the session while it is used."""
+    """The logged-in user for a session token or API key, extending the session while it is used."""
     if not token:
         return None
     th = _token_hash(token)
+    if token.startswith(API_KEY_PREFIX):
+        row = conn.execute(
+            "SELECT u.id, u.username, u.is_admin, k.id AS key_id, k.last_used_at FROM api_keys k"
+            " JOIN users u ON u.id = k.user_id WHERE k.key_hash = ?", (th,)).fetchone()
+        if row is None:
+            return None
+        stamp = datetime.now().isoformat(timespec="seconds")
+        if not row["last_used_at"] or row["last_used_at"][:13] != stamp[:13]:  # at most once an hour
+            conn.execute("UPDATE api_keys SET last_used_at = ? WHERE id = ?", (stamp, row["key_id"]))
+        return {"id": row["id"], "username": row["username"], "is_admin": bool(row["is_admin"]),
+                "api_key": row["key_id"], "unlocked": False}
     row = conn.execute(
-        "SELECT u.id, u.username, u.is_admin, s.expires_at FROM sessions s JOIN users u ON u.id = s.user_id"
-        " WHERE s.token_hash = ?",
+        "SELECT u.id, u.username, u.is_admin, s.expires_at, s.unlocked_until FROM sessions s"
+        " JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?",
         (th,),
     ).fetchone()
     if row is None:
@@ -104,7 +122,34 @@ def user_for_token(conn, token: str | None):
     if expires - now < timedelta(days=SESSION_DAYS - 1):  # slide the expiry, at most once a day
         conn.execute("UPDATE sessions SET expires_at = ? WHERE token_hash = ?",
                      ((now + timedelta(days=SESSION_DAYS)).isoformat(timespec="seconds"), th))
-    return {"id": row["id"], "username": row["username"], "is_admin": bool(row["is_admin"])}
+    unlocked = bool(row["unlocked_until"]) and datetime.fromisoformat(row["unlocked_until"]) > now
+    return {"id": row["id"], "username": row["username"], "is_admin": bool(row["is_admin"]),
+            "unlocked": unlocked}
+
+
+def create_api_key(conn, user_id: int, name: str) -> tuple[int, str]:
+    """A new key for scripts and apps. Returns (id, key); the key itself is shown only this once."""
+    key = API_KEY_PREFIX + secrets.token_urlsafe(32)
+    key_id = conn.execute(
+        "INSERT INTO api_keys (user_id, name, key_hash, hint, created_at) VALUES (?, ?, ?, ?, ?)",
+        (user_id, name, _token_hash(key), key[:9], datetime.now().isoformat(timespec="seconds")),
+    ).lastrowid
+    return key_id, key
+
+
+def validate_pin(pin: str) -> str | None:
+    if not (4 <= len(pin) <= 32):
+        return "The PIN needs 4 to 32 characters."
+    return None
+
+
+def set_unlocked(conn, token: str | None, minutes: float) -> str | None:
+    """Open (minutes > 0) or close (0) the locked folder for this session. Returns until when."""
+    if not token:
+        return None
+    until = (datetime.now() + timedelta(minutes=minutes)).isoformat(timespec="seconds") if minutes > 0 else None
+    conn.execute("UPDATE sessions SET unlocked_until = ? WHERE token_hash = ?", (until, _token_hash(token)))
+    return until
 
 
 def end_session(conn, token: str | None) -> None:

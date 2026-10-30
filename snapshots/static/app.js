@@ -161,7 +161,8 @@ function modal({ title, build, ok = "OK", cancel = "Cancel", danger = false, wid
       }
     });
     dlg.replaceChildren(form);
-    dlg.onclose = () => finish(null);
+    // A dialog closed just before this one opened sends its "close" late: only a real close counts.
+    dlg.onclose = () => { if (!dlg.open) finish(null); };
     dlg.showModal();
     const first = body.querySelector("input, button, [tabindex]");
     if (first) first.focus();
@@ -219,6 +220,10 @@ function parseRoute() {
     case "favorites": return { name: "favorites", view: "grid", filter: { favorite: "true" }, title: "Favourites" };
     case "trash": return { name: "trash", view: "grid", filter: { trashed: "true" }, title: "Trash" };
     case "archive": return { name: "archive", view: "grid", filter: { archived: "only" }, archive: true };
+    case "locked":
+      if (S.status && S.status.locked && S.status.locked.open) return { name: "locked", view: "grid", filter: { locked: "true" }, locked: true };
+      return { name: "locked", view: "locked" };
+    case "activity": return { name: "activity", view: "activity" };
     case "events":
       if (parts[1] && parts[2]) return { name: "events", view: "grid", filter: { start: parts[1], end: parts[2], archived: "hide" }, event: { start: parts[1], end: parts[2] } };
       return { name: "events", view: "events" };
@@ -279,6 +284,7 @@ async function render() {
   $("grid").hidden = !grid;
   $("sentinel").hidden = !grid;
   $("select-btn").hidden = !grid;
+  $("show-btn").hidden = !grid || S.route.name === "trash";
   $("collection").hidden = grid;
   $("empty").hidden = true;
   $("page-head").replaceChildren();
@@ -305,6 +311,10 @@ async function render() {
       await renderTags();
     } else if (S.route.view === "map") {
       await renderMap();
+    } else if (S.route.view === "locked") {
+      await renderLockedGate();
+    } else if (S.route.view === "activity") {
+      await renderActivity();
     }
   } catch (err) {
     showEmpty("Something went wrong", err.message);
@@ -345,6 +355,9 @@ async function renderHead() {
     await renderFolderHead(r.folder);
   } else if (r.area) {
     headRow("Photos in this area", null, [link("Back to the map", "#/map", "btn small")]);
+  } else if (r.locked) {
+    headRow("Locked", null, [button("Lock now", "btn small", lockNow)],
+      "Only you can see these, and only after typing your PIN. They are hidden everywhere else in Snapshots. The files stay in your library folder.");
   } else if (r.archive) {
     headRow("Archive", null, [], "Archived photos are hidden from All, Photos, Videos, memories and the map. They still show in albums, people, places, folders and search.");
   } else if (r.event) {
@@ -355,6 +368,7 @@ async function renderHead() {
     const album = await api(`/api/albums/${r.album}`);
     const range = album.first ? `${fmtMonth(album.first)}${fmtMonth(album.last) !== fmtMonth(album.first) ? " – " + fmtMonth(album.last) : ""}` : "";
     headRow(album.name, [plural(album.count, "item"), range].filter(Boolean).join(" · "), [
+      button(album.comments ? `Comments (${album.comments})` : "Comments", "btn small", () => albumComments(album)),
       button("Rename", "btn small", async () => {
         const name = await askText("Rename album", "Album name", album.name);
         if (!name) return;
@@ -575,6 +589,8 @@ function tile(item, index) {
   if (item.kind === "video") badges.push("Video");
   if (item.live) badges.push("Live");
   if (item.raw && !item.stack) badges.push("RAW");
+  if (item.projection === "sphere") badges.push("360°");
+  else if (item.projection === "pano") badges.push("Panorama");
   if (item.stack && item.stack_count > 1) badges.push(`${item.stack_count} in stack`);
   if (badges.length) {
     const row = el("span", "badges");
@@ -704,6 +720,7 @@ function updateEmpty() {
   else if (S.q) showEmpty("No matches", S.search && S.search.content
     ? "No names, places or dates match. Try “What's in the photo” above." : "Try a different word, or clear the search.");
   else if (r.quality) showEmpty("Nothing to tidy up", "No blurry or dark photos were found.");
+  else if (r.locked) showEmpty("Your locked folder is empty", "Select photos anywhere in the library and press Move to Locked.");
   else if (r.archive) showEmpty("Nothing archived", "Archive screenshots, receipts and other photos you want to keep but not see in the timeline. Select them and press Archive.");
   else if (r.tag) showEmpty("Nothing with this tag", "Select photos anywhere in the library and press Tag.");
   else if (r.folder !== undefined) {
@@ -779,6 +796,10 @@ function updateSelection() {
   if (!n) return;
   const ids = () => [...S.selected];
   const r = S.route;
+  if (r.locked) {
+    actions.append(button("Move out of Locked", "btn", () => setLocked(ids(), false)));
+    return;
+  }
   if (r.name === "trash") {
     actions.append(button("Restore", "btn", () => restore(ids())));
     if (S.me && S.me.is_admin) actions.append(button("Delete permanently", "btn danger", () => deleteForever(ids())));
@@ -802,6 +823,8 @@ function updateSelection() {
   actions.append(button(allArchived ? "Unarchive" : "Archive", "btn", () => setArchived(ids(), !allArchived)));
   if (chosen().some((it) => it.stack)) actions.append(button("Unstack", "btn", () => unstackPhotos(ids())));
   else if (n >= 2) actions.append(button("Stack", "btn", () => stackPhotos(ids())));
+  actions.append(button("Edit details", "btn", () => editDetails(ids())));
+  actions.append(button("Move to Locked", "btn", () => setLocked(ids(), true)));
   actions.append(button("Move to trash", "btn", () => moveToTrash(ids())));
 }
 
@@ -1231,7 +1254,8 @@ async function renderTagHead(id) {
 
 // ------------------------------------------------------------------ folders
 
-const folderHash = (path) => "#/folders" + (path ? "/" + path.split("/").map(encodeURIComponent).join("/") : "");
+// One encoded part, so paths of other library folders ("D:/Phone", "/media/phone") survive the trip.
+const folderHash = (path) => "#/folders" + (path ? "/" + encodeURIComponent(path) : "");
 
 async function renderFolderHead(path) {
   const info = await api(`/api/folders?path=${encodeURIComponent(path)}`);
@@ -1239,9 +1263,8 @@ async function renderFolderHead(path) {
   S.folderInfo = info;
   const crumbs = el("nav", "crumbs");
   crumbs.setAttribute("aria-label", "Folder");
-  const parts = path ? path.split("/") : [];
-  const root = (S.status && S.status.library_path) ? S.status.library_path.split(/[\\/]/).filter(Boolean).pop() : "Library";
-  const items = [[root || "Library", ""], ...parts.map((p, i) => [p, parts.slice(0, i + 1).join("/")])];
+  const items = (info.crumbs || [{ name: "Library", path: "" }]).map((c) => [c.name, c.path]);
+  if (info.crumbs && info.crumbs[0] && info.crumbs[0].path) items.unshift([libraryName(), ""]);
   items.forEach(([name, at], i) => {
     if (i) crumbs.append(el("span", "crumb-sep", "/"));
     if (i === items.length - 1) { const h = el("h1", null, name); crumbs.append(h); }
@@ -1255,12 +1278,19 @@ async function renderFolderHead(path) {
       const pic = el("span", "folder-pic");
       if (f.cover) pic.append(img(thumbUrl(f.cover, f.cover_v)));
       const text = el("span", "folder-text");
-      text.append(el("span", "folder-name", f.name), el("small", null, plural(f.count, "item")));
+      let meta = plural(f.count, "item");
+      if (f.library) { a.classList.add("library"); meta = (f.available === false ? "Not connected · " : "Library folder · ") + meta; a.title = f.library; }
+      text.append(el("span", "folder-name", f.name), el("small", null, meta));
       a.append(pic, text);
       list.append(a);
     }
     $("page-head").append(list);
   }
+}
+
+function libraryName() {
+  const p = S.status && S.status.library_path;
+  return (p ? p.split(/[\\/]/).filter(Boolean).pop() : "") || "Library";
 }
 
 // ------------------------------------------------------------------ map
@@ -1571,6 +1601,10 @@ function renderStatus() {
   for (const job of [st.content, st.text]) if (job && job.enabled && job.message) notes.push(job.message);
   $("st-note").textContent = flash && Date.now() < flash.until ? flash.text : notes.join(" · ");
   $("rescan").disabled = sc.running || !st.library_ok;
+  const unread = st.activity_unread || 0;
+  $("activity-count").hidden = !unread;
+  $("activity-count").textContent = unread > 99 ? "99+" : String(unread);
+  if (st.backup && st.backup.enabled && st.backup.message) $("st-note").textContent = st.backup.message;
 }
 
 $("rescan").addEventListener("click", async () => {
@@ -1694,20 +1728,19 @@ function showPicture(item) {
   showArchived(item.archived);
   const trashed = S.route.name === "trash";
   $("v-trash").querySelector(".v-label").textContent = trashed ? "Restore" : "Move to trash";
-  $("v-fav").hidden = trashed;
-  $("v-album").hidden = trashed;
-  $("v-archive").hidden = trashed;
+  const locked = !!item.locked;
+  $("v-fav").hidden = trashed || locked;
+  $("v-album").hidden = trashed || locked;
+  $("v-archive").hidden = trashed || locked;
+  $("v-edit").hidden = trashed || locked || item.kind !== "photo";
+  $("v-play").hidden = trashed;
+  $("v-trash").hidden = locked;
 
   const stage = $("v-stage");
   stage.replaceChildren();
   const src = `/api/assets/${item.id}/view?v=${item.v}`;
   if (item.kind === "video") {
-    const v = document.createElement("video");
-    v.controls = true;
-    v.preload = "metadata";
-    v.src = src;
-    v.addEventListener("error", () => stage.replaceChildren(el("p", "msg", "This video cannot be played in the browser. Use Download.")));
-    stage.append(v);
+    playVideo(item, stage);
   } else {
     const i = new Image();
     i.alt = item.filename;
@@ -1715,6 +1748,8 @@ function showPicture(item) {
     i.addEventListener("error", () => stage.replaceChildren(el("p", "msg", "This file cannot be displayed. Use Download.")));
     stage.append(i);
     if (item.live) stage.append(liveButton(item));
+    const wide = item.width && item.height && item.width / item.height >= 2.4;
+    if (item.projection || wide) stage.append(panoButton(item));
   }
   renderDetails(item);
 }
@@ -1791,9 +1826,23 @@ function renderDetails(item) {
     dl.append(dd);
   };
   row("File", item.filename);
-  row("Taken", fmtDateTime(item.taken_at));
+  if (item.description !== undefined && !item.locked) row("Description", descriptionBox(item));
+  const when = el("span", "with-action");
+  when.append(document.createTextNode(fmtDateTime(item.taken_at) + (item.date_edited ? " (changed)" : "")));
+  if (!item.locked && item.id !== undefined && item.description !== undefined) when.append(button("Change", "linklike", () => editDetails([item.id], item)));
+  row("Taken", when);
   if (item.place) {
     row("Place", link(placeName(item.place), placeHash(item.place.country, item.place.state, item.place.city)));
+  } else if (item.position) {
+    row("Place", `${item.position[0].toFixed(4)}, ${item.position[1].toFixed(4)}`);
+  }
+  if (item.edited && !item.locked) {
+    const box = el("span", "with-action");
+    box.append(document.createTextNode("Edited in Snapshots "));
+    const dl = link("Download edited", `/api/assets/${item.id}/edited`, "linklike");
+    dl.setAttribute("download", "");
+    box.append(dl);
+    row("Edits", box);
   }
   if (item.people && item.people.length) {
     const chips = el("div", "face-chips");
@@ -1861,6 +1910,7 @@ function renderDetails(item) {
     }));
     row("Quality", box);
   }
+  if (item.comments !== undefined && !item.locked) row("Comments", commentsBox(item));
   row("Size", fmtSize(item.size));
   if (item.width && item.height) row("Dimensions", `${item.width} × ${item.height}`);
   if (item.camera) row("Camera", item.camera);
@@ -1874,6 +1924,7 @@ function renderDetails(item) {
 }
 
 async function step(delta) {
+  if (S.viewing < 0) return;   // a photo opened on its own
   const next = S.viewing + delta;
   if (next < 0) return;
   if (next >= S.items.length) {
@@ -1907,6 +1958,8 @@ $("v-fav").addEventListener("click", () => {
   if (S.detail) setFavorite([S.detail.id], !S.detail.favorite);
 });
 $("v-album").addEventListener("click", () => { if (S.detail) addToAlbum([S.detail.id]); });
+$("v-edit").addEventListener("click", () => { if (S.detail) openEditor(S.detail); });
+$("v-play").addEventListener("click", () => { const at = S.viewing; viewer.close(); startSlideshow(Math.max(0, at)); });
 $("v-archive").addEventListener("click", async () => {
   if (!S.detail) return;
   const id = S.detail.id, index = S.viewing, value = !S.detail.archived;
@@ -1925,7 +1978,8 @@ $("v-trash").addEventListener("click", async () => {
   showItem(Math.min(index, S.items.length - 1));
 });
 viewer.addEventListener("keydown", (e) => {
-  if (e.target.closest && e.target.closest("input")) return;
+  if (e.target.closest && e.target.closest("input, textarea, select")) return;
+  if ($("v-stage").querySelector(".pano-view") && e.key.startsWith("Arrow")) return;  // looking around
   if (e.key === "ArrowLeft") { e.preventDefault(); step(-1); }
   else if (e.key === "ArrowRight") { e.preventDefault(); step(1); }
 });
@@ -1939,7 +1993,10 @@ viewer.addEventListener("close", () => {
 // Clicking the dark area around the picture closes the viewer.
 $("v-stage").addEventListener("click", (e) => { if (e.target === $("v-stage")) viewer.close(); });
 // Following a link inside the viewer (a person, a place, an album) closes it.
-$("v-details").addEventListener("click", (e) => { if (e.target.closest("a")) viewer.close(); });
+$("v-details").addEventListener("click", (e) => {
+  const a = e.target.closest("a");
+  if (a && !a.hasAttribute("download")) viewer.close();
+});
 
 // ------------------------------------------------------------------ account menu
 
@@ -1966,6 +2023,12 @@ menu.addEventListener("click", async (e) => {
     changePassword();
   } else if (action === "users") {
     manageUsers();
+  } else if (action === "pin") {
+    setPin();
+  } else if (action === "keys") {
+    manageKeys();
+  } else if (action === "settings") {
+    manageSettings();
   }
 });
 
@@ -2014,7 +2077,8 @@ async function manageUsers() {
             }));
             if (!S.me || u.id !== S.me.id) {
               rowEl.append(button("Delete", "btn small", async () => {
-                if (!window.confirm(`Delete the account ${u.username}? Their photos stay in the library.`)) return;
+                const extra = u.locked ? ` Their locked folder holds ${plural(u.locked, "item")}: those will be visible to everyone again.` : "";
+                if (!window.confirm(`Delete the account ${u.username}? Their photos stay in the library.${extra}`)) return;
                 try { await del(`/api/users/${u.id}`); ctl.error(""); draw(); } catch (err) { ctl.error(err.message); }
               }));
             }
@@ -2039,6 +2103,964 @@ async function manageUsers() {
         } catch (err) { ctl.error(err.message); }
       });
       body.append(a, b, adminWrap, add);
+      draw();
+    },
+  });
+}
+
+// ------------------------------------------------------------------ videos
+
+/** Play a video in the viewer. Videos the app can't play (HEVC, AVI, MKV...) are converted once first. */
+async function playVideo(item, stage) {
+  const msg = el("p", "msg", "Loading…");
+  stage.replaceChildren(msg);
+  let info;
+  try { info = await api(`/api/assets/${item.id}/play`); } catch (_) { info = { url: `/api/assets/${item.id}/view?v=${item.v}` }; }
+  const current = () => S.detail && S.detail.id === item.id && viewer.open;
+  while (info.preparing && current()) {
+    if (info.error) {
+      msg.textContent = `${info.error} Use Download to play it in another app.`;
+      return;
+    }
+    msg.textContent = `Preparing this video so it can play here… ${Math.round((info.progress || 0) * 100)}%`;
+    await new Promise((ok) => setTimeout(ok, 1500));
+    if (!current()) return;
+    try { info = await api(`/api/assets/${item.id}/play`); } catch (err) { msg.textContent = err.message; return; }
+  }
+  if (!current()) return;
+  const v = document.createElement("video");
+  v.controls = true;
+  v.preload = "metadata";
+  v.src = info.url;
+  v.addEventListener("error", () => {
+    const text = info.can_convert === false
+      ? "This video can't be played here. Installing ffmpeg lets Snapshots convert it. Use Download meanwhile."
+      : "This video cannot be played here. Use Download.";
+    stage.replaceChildren(el("p", "msg", text));
+  });
+  stage.replaceChildren(v);
+}
+
+// ------------------------------------------------------------------ 360° photos and panoramas
+
+function panoButton(item) {
+  const sphere = item.projection === "sphere";
+  const b = button(sphere ? "Look around" : "Pan", "live-btn pano-btn");
+  b.title = sphere ? "Drag to look around this 360° photo" : "Scroll along this panorama";
+  b.setAttribute("aria-pressed", "false");
+  b.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const stage = $("v-stage");
+    const open = stage.querySelector(".pano-view");
+    if (open) { open.dispatchEvent(new Event("close")); open.remove(); b.setAttribute("aria-pressed", "false"); return; }
+    const view = sphere ? sphereView(`/api/assets/${item.id}/pano?v=${item.v}`) : stripView(`/api/assets/${item.id}/view?v=${item.v}`);
+    stage.insertBefore(view, b);
+    b.setAttribute("aria-pressed", "true");
+    view.focus();
+  });
+  return b;
+}
+
+/** A wide panorama at full height, to scroll or drag along. */
+function stripView(src) {
+  const box = el("div", "pano-view strip");
+  box.tabIndex = 0;
+  const i = new Image();
+  i.src = src;
+  i.alt = "";
+  box.append(i);
+  let drag = null;
+  box.addEventListener("pointerdown", (e) => { drag = { x: e.clientX, left: box.scrollLeft }; box.setPointerCapture(e.pointerId); });
+  box.addEventListener("pointermove", (e) => { if (drag) box.scrollLeft = drag.left - (e.clientX - drag.x); });
+  box.addEventListener("pointerup", () => { drag = null; });
+  box.addEventListener("wheel", (e) => { if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) { box.scrollLeft += e.deltaY; e.preventDefault(); } }, { passive: false });
+  box.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowLeft") { box.scrollLeft -= 120; e.preventDefault(); }
+    if (e.key === "ArrowRight") { box.scrollLeft += 120; e.preventDefault(); }
+  });
+  i.addEventListener("load", () => { box.scrollLeft = (box.scrollWidth - box.clientWidth) / 2; });
+  return box;
+}
+
+/** A 360° photo drawn on the inside of a sphere (WebGL). Drag to look around, scroll to zoom. */
+function sphereView(src) {
+  const box = el("div", "pano-view sphere");
+  box.tabIndex = 0;
+  const canvas = el("canvas");
+  const hint = el("span", "pano-hint", "Drag to look around · scroll to zoom");
+  box.append(canvas, hint);
+  const gl = canvas.getContext("webgl", { antialias: false });
+  if (!gl) { box.replaceChildren(el("p", "msg", "This computer can't show 360° photos here.")); return box; }
+  const shader = (type, text) => { const sh = gl.createShader(type); gl.shaderSource(sh, text); gl.compileShader(sh); return sh; };
+  const prog = gl.createProgram();
+  gl.attachShader(prog, shader(gl.VERTEX_SHADER, "attribute vec2 p; void main(){ gl_Position = vec4(p, 0.0, 1.0); }"));
+  gl.attachShader(prog, shader(gl.FRAGMENT_SHADER, `
+    precision highp float;
+    uniform sampler2D tex; uniform vec2 res; uniform float yaw; uniform float pitch; uniform float fov;
+    const float PI = 3.14159265359;
+    void main() {
+      vec2 q = (gl_FragCoord.xy / res) * 2.0 - 1.0;
+      float t = tan(fov * 0.5);
+      vec3 d = normalize(vec3(q.x * t * res.x / res.y, q.y * t, -1.0));
+      float cp = cos(pitch), sp = sin(pitch);
+      d = vec3(d.x, d.y * cp - d.z * sp, d.y * sp + d.z * cp);
+      float cy = cos(yaw), sy = sin(yaw);
+      d = vec3(d.x * cy - d.z * sy, d.y, d.x * sy + d.z * cy);
+      float u = atan(d.x, -d.z) / (2.0 * PI) + 0.5;
+      float v = 0.5 - asin(clamp(d.y, -1.0, 1.0)) / PI;
+      gl_FragColor = texture2D(tex, vec2(u, v));
+    }`));
+  gl.linkProgram(prog);
+  gl.useProgram(prog);
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+  const loc = gl.getAttribLocation(prog, "p");
+  gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+  const u = (n) => gl.getUniformLocation(prog, n);
+  const view = { yaw: 0, pitch: 0, fov: 75 * Math.PI / 180 };
+  let ready = false, frame = 0, alive = true;
+  const draw = () => {
+    frame = 0;
+    if (!alive || !ready) return;
+    const w = Math.round(canvas.clientWidth * devicePixelRatio), h = Math.round(canvas.clientHeight * devicePixelRatio);
+    if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+    gl.viewport(0, 0, w, h);
+    gl.uniform2f(u("res"), w, h);
+    gl.uniform1f(u("yaw"), view.yaw);
+    gl.uniform1f(u("pitch"), view.pitch);
+    gl.uniform1f(u("fov"), view.fov);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  };
+  const redraw = () => { if (!frame) frame = requestAnimationFrame(draw); };
+  const image = new Image();
+  image.onload = () => {
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, image);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.uniform1i(u("tex"), 0);
+    ready = true;
+    redraw();
+  };
+  image.onerror = () => box.replaceChildren(el("p", "msg", "This photo could not be loaded."));
+  image.src = src;
+  const limit = () => { view.pitch = Math.max(-1.5, Math.min(1.5, view.pitch)); view.fov = Math.max(0.5, Math.min(1.9, view.fov)); };
+  let drag = null;
+  canvas.addEventListener("pointerdown", (e) => { drag = { x: e.clientX, y: e.clientY }; canvas.setPointerCapture(e.pointerId); hint.hidden = true; });
+  canvas.addEventListener("pointermove", (e) => {
+    if (!drag) return;
+    const k = view.fov / canvas.clientHeight;   // the picture follows the pointer
+    view.yaw -= (e.clientX - drag.x) * k;
+    view.pitch += (e.clientY - drag.y) * k;
+    drag = { x: e.clientX, y: e.clientY };
+    limit(); redraw();
+  });
+  canvas.addEventListener("pointerup", () => { drag = null; });
+  canvas.addEventListener("wheel", (e) => { view.fov *= e.deltaY > 0 ? 1.08 : 1 / 1.08; limit(); redraw(); e.preventDefault(); }, { passive: false });
+  box.addEventListener("keydown", (e) => {
+    const step = 0.08;
+    if (e.key === "ArrowLeft") view.yaw -= step;
+    else if (e.key === "ArrowRight") view.yaw += step;
+    else if (e.key === "ArrowUp") view.pitch += step;
+    else if (e.key === "ArrowDown") view.pitch -= step;
+    else return;
+    e.preventDefault(); limit(); redraw();
+  });
+  const resize = new ResizeObserver(redraw);
+  resize.observe(box);
+  box.addEventListener("close", () => { alive = false; resize.disconnect(); const ext = gl.getExtension("WEBGL_lose_context"); if (ext) ext.loseContext(); });
+  return box;
+}
+
+// ------------------------------------------------------------------ slideshow
+
+const showDlg = $("show");
+const SH = { list: [], pos: 0, timer: null, paused: false, seen: new Set(), layer: 0 };
+
+function showPhotos() { return S.items.filter((it) => it.kind === "photo"); }
+
+async function startSlideshow(startIndex = 0) {
+  if (!S.items.length) await loadMore();
+  if (!showPhotos().length) { flashNote("There are no photos to show here."); return; }
+  const start = S.items[startIndex] && S.items[startIndex].kind === "photo" ? S.items[startIndex] : showPhotos()[0];
+  SH.list = [start];
+  SH.pos = 0;
+  SH.seen = new Set([start.id]);
+  SH.paused = false;
+  $("show-pause").textContent = "Pause";
+  $("show-stage").replaceChildren(el("img", "show-img"), el("img", "show-img"));
+  showDlg.showModal();
+  try { if (showDlg.requestFullscreen) await showDlg.requestFullscreen(); } catch (_) { /* a window is fine too */ }
+  showSlide();
+}
+
+async function nextPhoto() {
+  const shuffle = $("show-shuffle").checked;
+  let pool = showPhotos().filter((it) => !SH.seen.has(it.id));
+  if (!pool.length && !S.done) { await loadMore(); pool = showPhotos().filter((it) => !SH.seen.has(it.id)); }
+  if (!pool.length) { SH.seen = new Set(); pool = showPhotos(); }   // start again from the beginning
+  if (!pool.length) return null;
+  if (shuffle) return pool[Math.floor(Math.random() * pool.length)];
+  const cur = SH.list[SH.pos];
+  const all = showPhotos();
+  const at = all.findIndex((it) => it.id === cur.id);
+  return all.slice(at + 1).find((it) => !SH.seen.has(it.id)) || pool[0];
+}
+
+function showSlide() {
+  clearTimeout(SH.timer);
+  const item = SH.list[SH.pos];
+  if (!item) return;
+  const layers = $("show-stage").querySelectorAll(".show-img");
+  SH.layer = 1 - SH.layer;
+  const front = layers[SH.layer], back = layers[1 - SH.layer];
+  front.alt = item.filename;
+  front.onload = () => { front.classList.add("on"); back.classList.remove("on"); };
+  front.onerror = () => { if (!SH.paused) SH.timer = setTimeout(() => step2(1), 300); };
+  front.src = `/api/assets/${item.id}/view?v=${item.v}`;
+  const total = showPhotos().length;
+  $("show-count").textContent = `${fmtInt(SH.seen.size)} of ${fmtInt(total)}${S.done ? "" : "+"}`;
+  if (!SH.paused) SH.timer = setTimeout(() => step2(1), Number($("show-speed").value) * 1000);
+  // Fetch the next picture ahead of time, so it appears without waiting.
+  nextPhoto().then((n) => { if (n) { const pre = new Image(); pre.src = `/api/assets/${n.id}/view?v=${n.v}`; SH.peek = n; } });
+}
+
+async function step2(delta) {
+  if (!showDlg.open) return;
+  if (delta < 0) {
+    if (SH.pos > 0) SH.pos--;
+  } else if (SH.pos < SH.list.length - 1) {
+    SH.pos++;
+  } else {
+    const n = SH.peek && !SH.seen.has(SH.peek.id) ? SH.peek : await nextPhoto();
+    if (!n) return;
+    SH.list.push(n);
+    SH.seen.add(n.id);
+    SH.pos = SH.list.length - 1;
+  }
+  showSlide();
+}
+
+function togglePause() {
+  SH.paused = !SH.paused;
+  $("show-pause").textContent = SH.paused ? "Play" : "Pause";
+  if (SH.paused) clearTimeout(SH.timer); else showSlide();
+}
+
+$("show-btn").addEventListener("click", () => startSlideshow(0));
+$("show-prev").addEventListener("click", () => step2(-1));
+$("show-next").addEventListener("click", () => step2(1));
+$("show-pause").addEventListener("click", togglePause);
+$("show-close").addEventListener("click", () => showDlg.close());
+$("show-speed").addEventListener("change", () => { if (!SH.paused) showSlide(); });
+$("show-stage").addEventListener("click", () => step2(1));
+showDlg.addEventListener("keydown", (e) => {
+  if (e.target.closest("select, input")) return;
+  if (e.key === "ArrowRight") { step2(1); e.preventDefault(); }
+  else if (e.key === "ArrowLeft") { step2(-1); e.preventDefault(); }
+  else if (e.key === " ") { togglePause(); e.preventDefault(); }
+});
+// The controls fade away while the mouse is still.
+let showIdle = null;
+showDlg.addEventListener("pointermove", () => {
+  showDlg.classList.remove("idle");
+  clearTimeout(showIdle);
+  showIdle = setTimeout(() => showDlg.classList.add("idle"), 2500);
+});
+showDlg.addEventListener("close", () => {
+  clearTimeout(SH.timer);
+  $("show-stage").replaceChildren();
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+});
+
+// ------------------------------------------------------------------ the editor
+
+const editor = $("editor");
+const ED = {};
+
+/** Edit a photo: turn, mirror, straighten and crop. Only the recipe is saved; the file is untouched. */
+async function openEditor(item) {
+  let full = item;
+  if (full.edits === undefined) { try { full = await api(`/api/assets/${item.id}`); } catch (err) { flashNote(err.message); return; } }
+  const e = full.edits || {};
+  Object.assign(ED, {
+    item: full, image: null, rotate: e.rotate || 0, flip: !!e.flip, angle: e.straighten || 0,
+    crop: e.crop ? [...e.crop] : [0, 0, 1, 1], ratio: "free", box: null,
+  });
+  $("ed-angle").value = ED.angle;
+  $("ed-angle-out").textContent = `${ED.angle}°`;
+  $("ed-flip").setAttribute("aria-pressed", String(ED.flip));
+  document.querySelectorAll(".ed-ratio").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.ratio === "free")));
+  $("ed-crop").hidden = true;
+  editor.showModal();
+  const image = new Image();
+  image.onload = () => { ED.image = image; $("ed-crop").hidden = false; drawEditor(); };
+  image.onerror = () => { flashNote("This photo can't be edited."); editor.close(); };
+  image.src = `/api/assets/${full.id}/view?plain=true&v=${full.v}`;
+}
+
+function edFrame() {
+  const w = ED.image.naturalWidth, h = ED.image.naturalHeight;
+  return ED.rotate % 180 ? [h, w] : [w, h];
+}
+
+function drawEditor() {
+  if (!ED.image) return;
+  const canvas = $("ed-canvas");
+  const stage = $("ed-stage");
+  const [W, H] = edFrame();
+  const pad = 24;
+  const k = Math.min((stage.clientWidth - pad * 2) / W, (stage.clientHeight - pad * 2) / H);
+  const cw = Math.max(1, Math.round(W * k)), ch = Math.max(1, Math.round(H * k));
+  const dpr = devicePixelRatio || 1;
+  canvas.width = Math.round(cw * dpr);
+  canvas.height = Math.round(ch * dpr);
+  canvas.style.width = `${cw}px`;
+  canvas.style.height = `${ch}px`;
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = "#000";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  // The same steps as the server: turn, mirror, straighten (enlarged to fill), then crop.
+  const t = ED.angle * Math.PI / 180;
+  const s = Math.cos(Math.abs(t)) + Math.sin(Math.abs(t)) * Math.max(W / H, H / W);
+  ctx.translate(canvas.width / 2, canvas.height / 2);
+  ctx.scale(k * dpr, k * dpr);
+  ctx.rotate(t);
+  ctx.scale(s, s);
+  if (ED.flip) ctx.scale(-1, 1);
+  ctx.rotate(ED.rotate * Math.PI / 180);
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(ED.image, -ED.image.naturalWidth / 2, -ED.image.naturalHeight / 2);
+  ED.box = { left: canvas.offsetLeft, top: canvas.offsetTop, w: cw, h: ch, W, H };
+  placeCrop();
+}
+
+function placeCrop() {
+  const b = ED.box;
+  if (!b) return;
+  const [x, y, w, h] = ED.crop;
+  const c = $("ed-crop");
+  c.style.left = `${b.left + x * b.w}px`;
+  c.style.top = `${b.top + y * b.h}px`;
+  c.style.width = `${w * b.w}px`;
+  c.style.height = `${h * b.h}px`;
+}
+
+function ratioValue() {
+  if (ED.ratio === "free") return null;
+  if (ED.ratio === "orig") { const [W, H] = edFrame(); return W / H; }
+  return Number(ED.ratio);
+}
+
+/** The biggest centred crop with the chosen shape (as width / height of the picture, in pixels). */
+function fitRatio(r) {
+  const [W, H] = edFrame();
+  let w = 1, h = (W / r) / H;
+  if (h > 1) { h = 1; w = (H * r) / W; }
+  ED.crop = [(1 - w) / 2, (1 - h) / 2, w, h];
+}
+
+let edDrag = null;
+$("ed-crop").addEventListener("pointerdown", (e) => {
+  e.preventDefault();
+  $("ed-crop").setPointerCapture(e.pointerId);
+  edDrag = { handle: e.target.dataset.h || "move", x: e.clientX, y: e.clientY, crop: [...ED.crop] };
+});
+$("ed-crop").addEventListener("pointermove", (e) => {
+  if (!edDrag || !ED.box) return;
+  const dx = (e.clientX - edDrag.x) / ED.box.w, dy = (e.clientY - edDrag.y) / ED.box.h;
+  let [x, y, w, h] = edDrag.crop;
+  const min = 0.05;
+  if (edDrag.handle === "move") {
+    x = Math.min(Math.max(0, x + dx), 1 - w);
+    y = Math.min(Math.max(0, y + dy), 1 - h);
+  } else {
+    const hh = edDrag.handle;
+    let x2 = x + w, y2 = y + h;
+    if (hh.includes("w")) x = Math.min(Math.max(0, x + dx), x2 - min);
+    if (hh.includes("e")) x2 = Math.max(Math.min(1, x2 + dx), x + min);
+    if (hh.includes("n")) y = Math.min(Math.max(0, y + dy), y2 - min);
+    if (hh.includes("s")) y2 = Math.max(Math.min(1, y2 + dy), y + min);
+    w = x2 - x; h = y2 - y;
+    const r = ratioValue();
+    if (r) {
+      // Keep the shape: the height follows the width (in pixels), within the picture.
+      const { W, H } = ED.box;
+      h = (w * W / r) / H;
+      if (hh.includes("n")) y = y2 - h;
+      if (y < 0 || y + h > 1 || h < min) {
+        h = h < min ? min : hh.includes("n") ? y2 : 1 - y;
+        w = (h * H * r) / W;
+        if (hh.includes("w")) x = x2 - w;
+        if (hh.includes("n")) y = y2 - h;
+      }
+    }
+  }
+  ED.crop = [x, y, w, h];
+  placeCrop();
+});
+$("ed-crop").addEventListener("pointerup", () => { edDrag = null; });
+
+$("ed-left").addEventListener("click", () => { ED.rotate = (ED.rotate + 270) % 360; ED.crop = [0, 0, 1, 1]; if (ratioValue()) fitRatio(ratioValue()); drawEditor(); });
+$("ed-right").addEventListener("click", () => { ED.rotate = (ED.rotate + 90) % 360; ED.crop = [0, 0, 1, 1]; if (ratioValue()) fitRatio(ratioValue()); drawEditor(); });
+$("ed-flip").addEventListener("click", () => { ED.flip = !ED.flip; $("ed-flip").setAttribute("aria-pressed", String(ED.flip)); drawEditor(); });
+$("ed-angle").addEventListener("input", () => { ED.angle = Number($("ed-angle").value); $("ed-angle-out").textContent = `${ED.angle}°`; drawEditor(); });
+$("ed-angle").addEventListener("dblclick", () => { ED.angle = 0; $("ed-angle").value = 0; $("ed-angle-out").textContent = "0°"; drawEditor(); });
+document.querySelectorAll(".ed-ratio").forEach((b) => b.addEventListener("click", () => {
+  ED.ratio = b.dataset.ratio;
+  document.querySelectorAll(".ed-ratio").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
+  if (ratioValue()) fitRatio(ratioValue()); else ED.crop = [0, 0, 1, 1];
+  placeCrop();
+}));
+$("ed-reset").addEventListener("click", () => {
+  Object.assign(ED, { rotate: 0, flip: false, angle: 0, crop: [0, 0, 1, 1], ratio: "free" });
+  $("ed-angle").value = 0; $("ed-angle-out").textContent = "0°";
+  $("ed-flip").setAttribute("aria-pressed", "false");
+  document.querySelectorAll(".ed-ratio").forEach((x) => x.setAttribute("aria-pressed", String(x.dataset.ratio === "free")));
+  drawEditor();
+});
+$("ed-cancel").addEventListener("click", () => editor.close());
+$("ed-save").addEventListener("click", async () => {
+  const round = (v) => Math.round(v * 100000) / 100000;
+  const crop = ED.crop.map(round);
+  const whole = crop[0] <= 0.001 && crop[1] <= 0.001 && crop[2] >= 0.999 && crop[3] >= 0.999;
+  const edits = { rotate: ED.rotate, flip: ED.flip, straighten: ED.angle, crop: whole ? null : crop };
+  $("ed-save").disabled = true;
+  try {
+    const updated = await post(`/api/assets/${ED.item.id}/edits`, { edits });
+    editor.close();
+    applyUpdated(updated);
+    flashNote(updated.edited ? "Saved. Your original file is unchanged." : "Back to the original picture.");
+  } catch (err) { flashNote(err.message); }
+  $("ed-save").disabled = false;
+});
+editor.addEventListener("close", () => { ED.image = null; });
+new ResizeObserver(() => { if (editor.open) drawEditor(); }).observe($("ed-stage"));
+
+/** An item changed on the server (an edit): refresh its tile and, if open, the viewer. */
+function applyUpdated(updated) {
+  const it = S.items.find((x) => x.id === updated.id);
+  if (it) Object.assign(it, updated);
+  const t = $("grid").querySelector(`.tile[data-id="${updated.id}"] img`);
+  if (t) t.src = thumbUrl(updated.id, updated.v);
+  if (viewer.open && S.detail && S.detail.id === updated.id) {
+    showPicture({ ...S.detail, ...updated });
+    loadDetail(updated.id);
+  }
+}
+
+// ------------------------------------------------------------------ details: date, place, description
+
+function descriptionBox(item) {
+  const box = el("textarea", "desc-input");
+  box.value = item.description || "";
+  box.placeholder = "Add a description";
+  box.rows = 2;
+  box.maxLength = 5000;
+  box.setAttribute("aria-label", "Description");
+  box.addEventListener("change", async () => {
+    try {
+      await post("/api/assets/details", { ids: [item.id], description: box.value });
+      item.description = box.value.trim();
+      flashNote("Description saved");
+    } catch (err) { flashNote(err.message); }
+  });
+  return box;
+}
+
+function toLocalInput(iso) { return (iso || "").slice(0, 16); }
+
+/** Change the date, location or description of one or many items. */
+async function editDetails(ids, item) {
+  const one = ids.length === 1;
+  if (one && (!item || item.description === undefined)) {
+    try { item = await api(`/api/assets/${ids[0]}`); } catch (err) { flashNote(err.message); return; }
+  }
+  let map = null;
+  const choice = { position: undefined };   // [lat, lon], null (remove) or "file" (from the file)
+  const done = await modal({
+    title: one ? "Edit details" : `Edit details of ${plural(ids.length, "item")}`, ok: "Save", wide: true,
+    build: (body) => {
+      body.append(el("p", "muted", "Snapshots remembers these changes. Your files are not changed."));
+      body.append(el("h3", "section-title small", "Date and time"));
+      const date = el("input");
+      date.type = "datetime-local";
+      date.step = 60;
+      if (one) date.value = toLocalInput(item.taken_at);
+      const dateWrap = el("label", "field");
+      dateWrap.append(el("span", null, one ? "Taken" : "Set all to (leave empty to keep their dates)"), date);
+      body.append(dateWrap);
+      let shiftH = null, shiftM = null;
+      if (!one) {
+        const row = el("div", "field-row");
+        const [a, h] = field("Or move all by hours", { type: "number", step: 1, value: "", placeholder: "0" });
+        const [b, m] = field("and minutes", { type: "number", step: 1, value: "", placeholder: "0" });
+        row.append(a, b);
+        body.append(row, el("p", "muted small", "Useful when a camera's clock was wrong: use a minus sign to move them earlier."));
+        shiftH = h; shiftM = m;
+      }
+      let resetDate = false;
+      if (one && item.date_edited) {
+        body.append(button("Use the date in the file", "btn small", () => { resetDate = true; date.value = ""; date.disabled = true; }));
+      }
+
+      body.append(el("h3", "section-title small", "Location"));
+      const where = el("p", "muted");
+      const say = () => {
+        if (choice.position === null) where.textContent = "No location (it will be removed).";
+        else if (choice.position === "file") where.textContent = "The location saved in the file.";
+        else if (choice.position) where.textContent = `Chosen: ${choice.position[0].toFixed(5)}, ${choice.position[1].toFixed(5)}`;
+        else if (one && item.position) where.textContent = `Now: ${item.place ? placeName(item.place) + " · " : ""}${item.position[0].toFixed(5)}, ${item.position[1].toFixed(5)}`;
+        else where.textContent = one ? "No location yet. Search for a town, type coordinates, or click the map." : "Unchanged. Search for a town, type coordinates, or click the map.";
+      };
+      const [findWrap, find] = field("Town or coordinates", { placeholder: "Sedona, or 34.87, -111.76", autocomplete: "off" });
+      const results = el("div", "pick-list compact");
+      let timer = null;
+      const pick = (lat, lon, zoom = 12) => {
+        choice.position = [lat, lon];
+        say();
+        if (map) { map.setView([lat, lon], zoom); placePin(); }
+      };
+      find.addEventListener("input", () => {
+        clearTimeout(timer);
+        const text = find.value.trim();
+        const m = text.match(/^(-?\d+(?:\.\d+)?)\s*[,; ]\s*(-?\d+(?:\.\d+)?)$/);
+        results.replaceChildren();
+        if (m) {
+          const lat = Number(m[1]), lon = Number(m[2]);
+          if (Math.abs(lat) <= 90 && Math.abs(lon) <= 180) results.append(button(`Use ${lat}, ${lon}`, "pick", () => pick(lat, lon)));
+          return;
+        }
+        if (text.length < 2) return;
+        timer = setTimeout(async () => {
+          try {
+            const { places } = await api(`/api/places/search?q=${encodeURIComponent(text)}`);
+            results.replaceChildren();
+            if (!places.length) results.append(el("p", "muted small", "No town found. The town list downloads once Places has run."));
+            for (const p of places) {
+              const b = button("", "pick", () => { pick(p.lat, p.lon); results.replaceChildren(); find.value = placeName(p); });
+              const t = el("span", null, p.city);
+              t.append(el("small", null, [p.state, p.country].filter(Boolean).join(", ")));
+              b.append(t);
+              results.append(b);
+            }
+          } catch (_) { /* typing on */ }
+        }, 250);
+      });
+      const mapBox = el("div", "pick-map");
+      const tools = el("div", "row-actions");
+      tools.append(button("Remove location", "btn small", () => { choice.position = null; say(); placePin(); }));
+      if (one && item.position_edited) tools.append(button("Use the location in the file", "btn small", () => { choice.position = "file"; say(); placePin(); }));
+      body.append(findWrap, results, mapBox, where, tools);
+      say();
+      let pin = null;
+      const placePin = () => {
+        if (!map) return;
+        const at = Array.isArray(choice.position) ? choice.position : (choice.position === undefined && one && item.position) ? item.position : null;
+        if (pin) { pin.remove(); pin = null; }
+        if (at) pin = L.circleMarker(at, { radius: 9, weight: 3, color: "#fff", fillColor: "#0d5751", fillOpacity: 1 }).addTo(map);
+      };
+      loadMapLibs().then(() => {
+        if (!document.body.contains(mapBox)) return;
+        const st = (S.status && S.status.map) || {};
+        map = L.map(mapBox, { minZoom: 1, maxZoom: 19, worldCopyJump: true });
+        map.attributionControl.setPrefix(false);
+        if (st.tiles) L.tileLayer(st.tiles, { maxZoom: 19, attribution: st.attribution || "", className: "map-tiles", referrerPolicy: "no-referrer" }).addTo(map);
+        else loadWorld().then((w) => L.geoJSON(w, { interactive: false, style: { className: "map-country", weight: 1, fillOpacity: 1 } }).addTo(map));
+        const start = one && item.position ? item.position : null;
+        if (start) map.setView(start, 11); else map.setView([30, 0], 2);
+        map.on("click", (e) => { choice.position = [e.latlng.lat, ((e.latlng.lng + 540) % 360) - 180]; say(); placePin(); });
+        placePin();
+        setTimeout(() => map.invalidateSize(), 50);
+      }).catch(() => { mapBox.replaceWith(el("p", "muted", "The map could not be loaded; type coordinates instead.")); });
+
+      body.append(el("h3", "section-title small", "Description"));
+      const desc = el("textarea", "desc-input light");
+      desc.rows = 3;
+      desc.maxLength = 5000;
+      desc.placeholder = one ? "Add a description" : "Leave empty to keep each item's description";
+      if (one) desc.value = item.description || "";
+      body.append(desc);
+
+      return { submit: async () => {
+        const req = { ids };
+        if (resetDate) req.reset_date = true;
+        else if (date.value && (!one || date.value !== toLocalInput(item.taken_at))) req.taken_at = date.value.length === 16 ? date.value : date.value.slice(0, 19);
+        else if (!one) {
+          const minutes = (Number(shiftH.value) || 0) * 60 + (Number(shiftM.value) || 0);
+          if (minutes) req.shift_minutes = minutes;
+        }
+        if (choice.position === null) req.clear_position = true;
+        else if (choice.position === "file") req.reset_position = true;
+        else if (choice.position) req.position = choice.position;
+        if (one ? desc.value.trim() !== (item.description || "") : desc.value.trim()) req.description = desc.value;
+        if (Object.keys(req).length === 1) return true;
+        await post("/api/assets/details", req);
+        return true;
+      } };
+    },
+  });
+  if (!done) return;
+  flashNote(one ? "Details saved" : `Details of ${plural(ids.length, "item")} saved`);
+  if (S.selecting) stopSelecting();
+  if (viewer.open && S.detail && ids.includes(S.detail.id)) loadDetail(S.detail.id);
+  if (S.route.view === "grid" && !viewer.open) reload();
+}
+
+// ------------------------------------------------------------------ comments
+
+function commentList(list, comments, onDelete) {
+  list.replaceChildren();
+  if (!comments.length) list.append(el("p", "muted small", "No comments yet."));
+  for (const c of comments) {
+    const row = el("div", "comment");
+    const head = el("div", "comment-head");
+    head.append(el("strong", null, c.user), el("span", "muted", fmtDateTime(c.created_at)));
+    if (c.can_delete) {
+      const x = button("Delete", "linklike small", () => onDelete(c));
+      x.setAttribute("aria-label", "Delete this comment");
+      head.append(x);
+    }
+    row.append(head, el("div", "comment-text", c.text));
+    list.append(row);
+  }
+}
+
+function commentForm(onPost) {
+  const form = el("div", "comment-form");
+  const box = el("textarea", "desc-input");
+  box.rows = 2;
+  box.maxLength = 2000;
+  box.placeholder = "Write a comment";
+  box.setAttribute("aria-label", "Comment");
+  const send = button("Post", "btn small", async () => {
+    const text = box.value.trim();
+    if (!text) return;
+    send.disabled = true;
+    try { await onPost(text); box.value = ""; } catch (err) { flashNote(err.message); }
+    send.disabled = false;
+  });
+  box.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); send.click(); } });
+  form.append(box, send);
+  return form;
+}
+
+/** Comments under a photo, in the viewer's details. */
+function commentsBox(item) {
+  const box = el("div", "comments");
+  const list = el("div", "comment-list");
+  const load = async () => {
+    try {
+      const { comments } = await api(`/api/assets/${item.id}/comments`);
+      commentList(list, comments, async (c) => {
+        try { await del(`/api/comments/${c.id}`); load(); } catch (err) { flashNote(err.message); }
+      });
+    } catch (_) { list.replaceChildren(el("p", "muted small", "Comments could not be loaded.")); }
+  };
+  box.append(list, commentForm(async (text) => { await post(`/api/assets/${item.id}/comments`, { text }); load(); }));
+  if (item.comments) load(); else commentList(list, [], null);
+  return box;
+}
+
+async function albumComments(album) {
+  await modal({
+    title: `Comments on ${album.name}`, ok: null, cancel: "Close", wide: true,
+    build: (body) => {
+      const list = el("div", "comment-list light");
+      const load = async () => {
+        const { comments } = await api(`/api/albums/${album.id}/comments`);
+        commentList(list, comments, async (c) => { try { await del(`/api/comments/${c.id}`); load(); } catch (err) { flashNote(err.message); } });
+      };
+      body.append(list, commentForm(async (text) => { await post(`/api/albums/${album.id}/comments`, { text }); load(); }));
+      load();
+    },
+  });
+  renderHead();
+}
+
+// ------------------------------------------------------------------ activity
+
+async function renderActivity() {
+  const data = await api("/api/activity");
+  headRow("Activity", null, [], "Comments, and photos people added to albums.");
+  if (!data.items.length) {
+    showEmpty("Nothing yet", "When someone comments on a photo or adds photos to an album, it shows up here.");
+  } else {
+    const list = el("div", "activity");
+    for (const i of data.items) {
+      const row = el("div", i.new ? "act new" : "act");
+      let pic = el("span", "act-pic");
+      let target = null;
+      const text = el("div", "act-text");
+      const who = i.mine ? "You" : i.user;
+      if (i.kind === "comment") {
+        if (i.asset) {
+          pic = link("", i.asset.trashed ? "#/trash" : "#/activity", "act-pic");
+          pic.append(img(thumbUrl(i.asset.id, i.asset.v)));
+          if (!i.asset.trashed) pic.addEventListener("click", (e) => { e.preventDefault(); openPhoto(i.asset.id); });
+          pic.setAttribute("aria-label", `Open ${i.asset.filename}`);
+          target = i.asset.filename;
+        } else if (i.album) {
+          pic = link("", `#/albums/${i.album.id}`, "act-pic album");
+          target = i.album.name;
+        }
+        const line = el("div");
+        line.append(el("strong", null, who), document.createTextNode(` commented on ${target || "something deleted"}`));
+        text.append(line, el("div", "act-quote", i.text));
+      } else {
+        pic = link("", `#/albums/${i.album.id}`, "act-pic");
+        if (i.cover) pic.append(img(thumbUrl(i.cover, i.cover_v)));
+        const line = el("div");
+        line.append(el("strong", null, who), document.createTextNode(` added ${plural(i.count, "item")} to `), link(i.album.name, `#/albums/${i.album.id}`));
+        text.append(line);
+      }
+      text.append(el("div", "muted small", fmtDateTime(i.at)));
+      row.append(pic, text);
+      list.append(row);
+    }
+    $("collection").replaceChildren(list);
+  }
+  try { await post("/api/activity/seen"); } catch (_) { /* fine */ }
+  refreshStatus();
+}
+
+/** Show one photo in the viewer on its own (from the Activity page). */
+async function openPhoto(id) {
+  try {
+    const item = await api(`/api/assets/${id}`);
+    S.viewing = -1;
+    showPicture(item);
+    renderStackStrip(item);
+    $("v-prev").disabled = true;
+    $("v-next").disabled = true;
+    if (!viewer.open) viewer.showModal();
+  } catch (err) { flashNote(err.message); }
+}
+
+// ------------------------------------------------------------------ the locked folder
+
+async function renderLockedGate() {
+  const st = (S.status && S.status.locked) || {};
+  headRow("Locked", null, [], "A folder only you can open, with a PIN. What you put in it is hidden from everyone everywhere else in Snapshots.");
+  const box = el("div", "gate");
+  if (!st.has_pin) {
+    box.append(el("h2", null, "Set a PIN first"),
+      el("p", "muted", "You'll type it each time you open your locked folder. It is separate from your password."),
+      button("Set a PIN", "btn primary", async () => { if (await setPin()) render(); }));
+  } else {
+    const [wrap, pin] = field("PIN", { type: "password", inputMode: "numeric", autocomplete: "off", maxLength: 32 });
+    const err = el("p", "form-error");
+    const open = button("Open", "btn primary", async () => {
+      err.textContent = "";
+      try {
+        await post("/api/locked/open", { pin: pin.value });
+        await refreshStatus();
+        render();
+      } catch (x) { err.textContent = x.message; pin.select(); }
+    });
+    pin.addEventListener("keydown", (e) => { if (e.key === "Enter") open.click(); });
+    box.append(el("h2", null, `Your locked folder${st.count ? ` · ${plural(st.count, "item")}` : ""}`), wrap, err, open,
+      el("p", "muted small", "It closes again after 10 minutes, or when you press Lock now."));
+    setTimeout(() => pin.focus(), 0);
+  }
+  $("collection").replaceChildren(box);
+}
+
+async function lockNow() {
+  try { await post("/api/locked/close"); } catch (_) { /* closed anyway */ }
+  await refreshStatus();
+  render();
+}
+
+async function setLocked(ids, value) {
+  const st = (S.status && S.status.locked) || {};
+  if (value && !st.has_pin) {
+    const ok = await confirmBox("Set a PIN first", "Your locked folder opens with a PIN. Set one now?", "Set a PIN");
+    if (!ok || !(await setPin())) return;
+  }
+  if (value) {
+    const ok = await confirmBox(`Move ${plural(ids.length, "item")} to your locked folder?`,
+      "They'll be hidden everywhere else in Snapshots, for everyone, until you move them out. The files stay in your library folder, so anyone using this computer's folders can still find them.",
+      "Move to Locked");
+    if (!ok) return;
+  }
+  try {
+    await post("/api/locked", { ids, value });
+    removeItems(ids);
+    if (viewer.open && S.detail && ids.includes(S.detail.id)) viewer.close();
+    flashNote(value ? `${plural(ids.length, "item")} moved to your locked folder` : `${plural(ids.length, "item")} back in the library`);
+    refreshStatus();
+  } catch (err) {
+    flashNote(err.message);
+    if (/closed|Open the locked/.test(err.message)) { await refreshStatus(); render(); }
+  }
+}
+
+async function setPin() {
+  const st = (S.status && S.status.locked) || {};
+  const done = await modal({
+    title: st.has_pin ? "Change your locked folder PIN" : "Set a PIN for your locked folder", ok: "Save PIN",
+    build: (body) => {
+      body.append(el("p", "muted", "4 to 32 characters. Numbers are easiest to type on a phone."));
+      const [a, pw] = field("Your account password", { type: "password", autocomplete: "current-password" });
+      const [b, pin] = field("PIN", { type: "password", inputMode: "numeric", autocomplete: "off", maxLength: 32 });
+      const [c, again] = field("PIN again", { type: "password", inputMode: "numeric", autocomplete: "off", maxLength: 32 });
+      body.append(a, b, c);
+      return { submit: async () => {
+        if (pin.value !== again.value) throw new Error("The two PINs are different.");
+        await post("/api/locked/pin", { pin: pin.value, password: pw.value });
+        return true;
+      } };
+    },
+  });
+  if (done) { flashNote("PIN saved"); await refreshStatus(); }
+  return !!done;
+}
+
+// ------------------------------------------------------------------ API keys
+
+async function manageKeys() {
+  await modal({
+    title: "API keys", ok: null, cancel: "Close", wide: true,
+    build: (body, ctl) => {
+      body.append(el("p", "muted", "Keys let scripts and other apps use Snapshots as you, without your password. Send one as “Authorization: Bearer <key>”. A key can't open your locked folder or make more keys."));
+      const list = el("div");
+      const fresh = el("div", "key-fresh");
+      fresh.hidden = true;
+      const draw = async () => {
+        try {
+          const { keys } = await api("/api/keys");
+          list.replaceChildren();
+          if (!keys.length) list.append(el("p", "muted", "No keys yet."));
+          for (const k of keys) {
+            const r = el("div", "user-row");
+            const who = el("div", "who");
+            who.append(el("div", null, k.name), el("div", "role",
+              `${k.hint}… · made ${fmtDay(k.created_at, { day: "numeric", month: "short", year: "numeric" })}` +
+              (k.last_used_at ? ` · last used ${fmtDay(k.last_used_at, { day: "numeric", month: "short", year: "numeric" })}` : " · never used")));
+            r.append(who, button("Delete", "btn small", async () => {
+              if (!window.confirm(`Delete the key “${k.name}”? Anything using it will stop working.`)) return;
+              try { await del(`/api/keys/${k.id}`); draw(); } catch (err) { ctl.error(err.message); }
+            }));
+            list.append(r);
+          }
+        } catch (err) { ctl.error(err.message); }
+      };
+      const [a, name] = field("Name for a new key", { placeholder: "What will use it, like “Backup script”", maxLength: 100 });
+      const add = button("Make key", "btn primary", async () => {
+        try {
+          const made = await post("/api/keys", { name: name.value.trim() });
+          name.value = ""; ctl.error("");
+          fresh.replaceChildren(el("strong", null, `Your new key “${made.name}”. Copy it now: it won't be shown again.`));
+          const code = el("input", "key-value");
+          code.readOnly = true;
+          code.value = made.key;
+          code.addEventListener("focus", () => code.select());
+          const copy = button("Copy", "btn small", async () => {
+            try { await navigator.clipboard.writeText(made.key); copy.textContent = "Copied"; } catch (_) { code.select(); }
+          });
+          const line = el("div", "row-actions");
+          line.append(code, copy);
+          fresh.append(line);
+          fresh.hidden = false;
+          draw();
+        } catch (err) { ctl.error(err.message); }
+      });
+      body.append(fresh, list, el("h3", "section-title small", "New key"), a, add);
+      draw();
+    },
+  });
+}
+
+// ------------------------------------------------------------------ settings (administrators)
+
+async function manageSettings() {
+  await modal({
+    title: "Settings", ok: null, cancel: "Close", wide: true,
+    build: (body, ctl) => {
+      const libs = el("div");
+      const backups = el("div");
+      const video = el("div");
+      let data = null;
+      const draw = async () => {
+        try { data = await api("/api/settings"); } catch (err) { ctl.error(err.message); return; }
+        libs.replaceChildren();
+        for (const l of data.libraries) {
+          const r = el("div", "user-row");
+          const who = el("div", "who");
+          who.append(el("div", "path", l.path), el("div", "role",
+            `${l.main ? "Main library (uploads go here)" : "Extra folder"} · ${plural(l.items, "item")}${l.available ? "" : " · not connected"}`));
+          r.append(who);
+          if (!l.main) r.append(button("Remove", "btn small", async () => {
+            const ok = await confirmBox("Remove this folder from Snapshots?",
+              `Its ${plural(l.items, "item")} leave Snapshots, with their albums, tags and faces. The files in ${l.path} are not touched.`,
+              "Remove folder", true);
+            if (!ok) return;
+            try { await api(`/api/libraries?path=${encodeURIComponent(l.path)}`, { method: "DELETE" }); ctl.error(""); draw(); refreshStatus(); }
+            catch (err) { ctl.error(err.message); }
+          }));
+          libs.append(r);
+        }
+        const b = data.backups;
+        backups.replaceChildren();
+        backups.append(el("p", "muted", b.hours > 0
+          ? `A copy of the database is made every ${b.hours} hours into ${b.folder}. The newest ${b.keep} are kept. Your photos are not part of it: they are your own files.`
+          : "Automatic backups are off (backup_hours = 0)."));
+        if (b.message) backups.append(el("p", "form-error", b.message));
+        const blist = el("div", "backup-list");
+        for (const x of b.list.slice(0, 6)) {
+          const line = el("div", "backup");
+          line.append(el("span", null, fmtDateTime(x.made_at)), el("span", "muted", fmtSize(x.size)));
+          blist.append(line);
+        }
+        if (!b.list.length) blist.append(el("p", "muted small", "No backups yet."));
+        if (b.list.length > 6) blist.append(el("p", "muted small", `and ${plural(b.list.length - 6, "older one")}`));
+        backups.append(blist, button("Back up now", "btn small", async (e) => {
+          e.target.disabled = true;
+          try { await post("/api/backups"); ctl.error(""); flashNote("Database backed up"); draw(); } catch (err) { ctl.error(err.message); }
+          e.target.disabled = false;
+        }));
+        backups.append(el("p", "muted small", "To restore one: close Snapshots, then run  Snapshots.exe --restore-backup \"<backup file>\". The database it replaces is kept beside it."));
+        video.replaceChildren();
+        const v = data.video;
+        video.append(el("p", "muted", v.ffmpeg
+          ? `Videos the app can't play (HEVC from phones, AVI, MKV) are converted once when opened. Setting: ${v.encoder}. Converted copies use up to ${v.cache_gb} GB.`
+          : "Install ffmpeg to convert videos the app can't play (HEVC from phones, AVI, MKV)."));
+        if (v.ffmpeg) {
+          const out = el("span", "muted small");
+          video.append(button("Check the graphics card", "btn small", async (e) => {
+            e.target.disabled = true;
+            out.textContent = " Testing…";
+            try {
+              const r = await api("/api/video-encoder");
+              out.textContent = r.using === "libx264" ? " Converting with the processor (no graphics card encoder found)."
+                : ` Converting with the graphics card (${r.using}).`;
+            } catch (err) { out.textContent = ` ${err.message}`; }
+            e.target.disabled = false;
+          }), out);
+        }
+        if (data.config_file) body.querySelector(".cfg-note").textContent = `Other settings are in ${data.config_file}.`;
+      };
+      body.append(el("h3", "section-title small", "Library folders"), libs);
+      const [a, path] = field("Add another folder (another drive, say)", { placeholder: "D:\\Phone backup", maxLength: 1000 });
+      const add = button("Add folder", "btn primary", async () => {
+        try {
+          await post("/api/libraries", { path: path.value.trim() });
+          path.value = ""; ctl.error("");
+          flashNote("Folder added. Snapshots is reading it now.");
+          draw(); refreshStatus();
+        } catch (err) { ctl.error(err.message); }
+      });
+      body.append(a, add, el("p", "muted small", "Snapshots only reads these folders. Nothing in them is changed, except by Delete permanently in the trash."));
+      body.append(el("h3", "section-title small", "Backups"), backups);
+      body.append(el("h3", "section-title small", "Videos"), video);
+      body.append(el("p", "muted small cfg-note", ""));
       draw();
     },
   });

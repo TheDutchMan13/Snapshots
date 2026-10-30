@@ -64,6 +64,14 @@ def current_user(request: Request) -> dict:
     return user
 
 
+def require_session(request: Request) -> dict:
+    """The logged-in user, refusing API keys (for managing keys, passwords and the locked folder)."""
+    user = current_user(request)
+    if user.get("api_key"):
+        raise HTTPException(403, "An API key can't do that. Please use the app.")
+    return user
+
+
 def require_admin(request: Request) -> dict:
     user = current_user(request)
     if not user["is_admin"]:
@@ -75,7 +83,7 @@ def create_app(cfg: Config, start_worker: bool = True) -> FastAPI:
     cfg.ensure_dirs()
     db.init(cfg.db_path)
     worker = Worker(cfg)
-    ctx = SimpleNamespace(cfg=cfg, worker=worker, throttle=LoginThrottle())
+    ctx = SimpleNamespace(cfg=cfg, worker=worker, throttle=LoginThrottle(), pin_throttle=LoginThrottle(limit=5))
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -120,9 +128,10 @@ def create_app(cfg: Config, start_worker: bool = True) -> FastAPI:
         return response
 
     from . import (routes_auth, routes_collections, routes_explore, routes_library, routes_organize,
-                   routes_people)
+                   routes_people, routes_settings, routes_social)
 
-    for module in (routes_auth, routes_library, routes_collections, routes_people, routes_explore, routes_organize):
+    for module in (routes_auth, routes_library, routes_collections, routes_people, routes_explore, routes_organize,
+                   routes_social, routes_settings):
         app.include_router(module.router(ctx))
 
     @app.get("/", include_in_schema=False)

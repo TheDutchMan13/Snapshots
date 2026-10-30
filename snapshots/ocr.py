@@ -13,7 +13,7 @@ import re
 import sqlite3
 from pathlib import Path
 
-from . import downloads, media
+from . import downloads, media, libraries
 
 log = logging.getLogger("snapshots.ocr")
 
@@ -255,7 +255,7 @@ class OcrJob:
             text = None
             if row["kind"] == "photo":
                 try:
-                    text = self.engine.text_in(media.load_oriented(root / row["path"], LOAD_SIDE)) or None
+                    text = self.engine.text_in(media.load_oriented(libraries.full_path(self.cfg, row["path"]) or root / "-missing-", LOAD_SIDE)) or None
                 except Exception as exc:
                     log.info("no text read from %s: %s", row["path"], exc)
             try:

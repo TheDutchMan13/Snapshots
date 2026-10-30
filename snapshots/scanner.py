@@ -2,8 +2,8 @@
 
 Safety rules:
 * Originals are only read here, never changed, moved or deleted.
-* If the library folder is missing (an unplugged drive), nothing is removed.
-* If the folder walk hit errors or came back empty, nothing is removed.
+* If a library folder is missing (an unplugged drive), nothing in it is removed.
+* If the walk of a folder hit errors or came back empty, nothing in it is removed.
 * A file that was moved or renamed keeps its albums, favourites and faces
   (it is recognised by its content).
 """
@@ -15,7 +15,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 
-from . import db, linking, media
+from . import db, libraries, linking, media
 from .config import Config
 
 log = logging.getLogger("snapshots.scanner")
@@ -59,8 +59,8 @@ def _norm(p: Path) -> str:
     return os.path.normcase(os.path.abspath(p))
 
 
-def list_media(root: Path, skip_dir: Path | None = None):
-    """Return ([(rel_path, abs_path, size, mtime_ns)], had_errors)."""
+def list_media(root: Path, skip_dir: Path | None = None, prefix: str = ""):
+    """Return ([(stored_path, abs_path, size, mtime_ns)], had_errors)."""
     found = []
     errors = []
     skip = _norm(skip_dir) if skip_dir else None
@@ -82,7 +82,7 @@ def list_media(root: Path, skip_dir: Path | None = None):
                 errors.append(OSError(f"cannot stat {full}"))
                 continue
             rel = os.path.relpath(full, root).replace(os.sep, "/")
-            found.append((rel, full, st.st_size, st.st_mtime_ns))
+            found.append((prefix + rel, full, st.st_size, st.st_mtime_ns))
     return found, bool(errors)
 
 
@@ -107,6 +107,8 @@ def delete_asset_row(cfg: Config, conn, asset_id: int) -> None:
     _unlink(cfg.thumb_path(asset_id))
     _unlink(cfg.preview_path(asset_id))
     _unlink(cfg.motion_path(asset_id))
+    _unlink(cfg.edited_path(asset_id))
+    _unlink(cfg.video_path(asset_id))
 
 
 def index_file(cfg: Config, conn, rel: str, full: Path, digest: str | None = None) -> int:
@@ -117,42 +119,56 @@ def index_file(cfg: Config, conn, rel: str, full: Path, digest: str | None = Non
         raise ValueError(f"unsupported file type: {full.name}")
     digest = digest or sha1_of(full)
 
-    prev = conn.execute("SELECT id, sha1, has_thumb FROM assets WHERE path = ?", (rel,)).fetchone()
+    prev = conn.execute(
+        "SELECT id, sha1, has_thumb, taken_at, taken_at_file, position_edited, lat, lon, edits FROM assets"
+        " WHERE path = ?", (rel,)).fetchone()
     if prev is not None and prev["sha1"] == digest:
         # Same content, only the timestamp moved: keep everything already known.
         conn.execute("UPDATE assets SET size = ?, mtime_ns = ? WHERE id = ?",
                      (st.st_size, st.st_mtime_ns, prev["id"]))
         if not cfg.thumb_path(prev["id"]).exists():
-            _make_thumb(cfg, conn, prev["id"], kind, full)
+            _make_thumb(cfg, conn, prev["id"], kind, full, prev["edits"])
         return prev["id"]
 
     info = media.read_photo_info(full) if kind == "photo" else media.read_video_info(full)
     taken = info["taken"] or media.date_from_filename(full.name) or datetime.fromtimestamp(st.st_mtime)
-    has_position = info["lat"] is not None
+    taken = taken.isoformat(timespec="seconds")
+    taken_file = None
+    lat, lon = info["lat"], info["lon"]
+    if prev is not None and prev["taken_at_file"]:
+        # Someone set this item's date by hand: that stays, whatever the changed file says.
+        taken, taken_file = prev["taken_at"], taken
+    if prev is not None and prev["position_edited"]:
+        lat, lon = prev["lat"], prev["lon"]
+    has_position = lat is not None
     motion = media.find_motion_video(full) if kind == "photo" else None
+    projection = media.read_projection(full) if kind == "photo" else None
     values = (
-        full.name, kind, st.st_size, st.st_mtime_ns, digest, taken.isoformat(timespec="seconds"),
-        info["width"], info["height"], info["camera"], info["lat"], info["lon"],
+        full.name, kind, st.st_size, st.st_mtime_ns, digest, taken,
+        info["width"], info["height"], info["camera"], lat, lon,
         0 if has_position else 1,           # geo_done: nothing to look up without a position
         0 if kind == "photo" else 1,        # faces_done: faces are found in photos only
-        motion[0] if motion else None, motion[1] if motion else None,
+        motion[0] if motion else None, motion[1] if motion else None, projection, taken_file,
     )
     if prev is None:
         cur = conn.execute(
             """
             INSERT INTO assets (filename, kind, size, mtime_ns, sha1, taken_at, width, height, camera,
-                                lat, lon, geo_done, faces_done, motion_offset, motion_length, motion_done,
-                                path, has_thumb, added_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 0, ?)
+                                lat, lon, geo_done, faces_done, motion_offset, motion_length, projection,
+                                taken_at_file, motion_done, pano_done, path, has_thumb, added_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, 0, ?)
             """,
             values + (rel, now()),
         )
         asset_id = cur.lastrowid
     else:
-        # The content changed: everything worked out from the old picture is stale.
+        # The content changed: everything worked out from the old picture is stale. What people
+        # added by hand (date, position, description, edits, albums, tags) stays.
         asset_id = prev["id"]
         forget_faces(cfg, conn, asset_id)
         _unlink(cfg.preview_path(asset_id))
+        _unlink(cfg.edited_path(asset_id))
+        _unlink(cfg.video_path(asset_id))
         _unlink(cfg.motion_path(asset_id))
         for (owner,) in conn.execute("SELECT id FROM assets WHERE live_video = ?", (asset_id,)).fetchall():
             _unlink(cfg.motion_path(owner))  # a Live Photo's clip changed: its playable copy is stale
@@ -162,7 +178,8 @@ def index_file(cfg: Config, conn, rel: str, full: Path, digest: str | None = Non
             """
             UPDATE assets SET filename = ?, kind = ?, size = ?, mtime_ns = ?, sha1 = ?, taken_at = ?,
                 width = ?, height = ?, camera = ?, lat = ?, lon = ?, geo_done = ?, faces_done = ?,
-                motion_offset = ?, motion_length = ?, motion_done = 1,
+                motion_offset = ?, motion_length = ?, projection = ?, taken_at_file = ?, motion_done = 1,
+                pano_done = 1, vcodec = NULL,
                 city = NULL, state = NULL, country = NULL, has_thumb = 0,
                 dhash = NULL, sharpness = NULL, brightness = NULL, highlights = NULL, quality_done = 0, keep_quality = 0,
                 clip_done = 0, ocr_done = 0, ocr_text = NULL,
@@ -173,13 +190,15 @@ def index_file(cfg: Config, conn, rel: str, full: Path, digest: str | None = Non
         )
     if info.get("keywords"):
         linking.add_keywords(conn, asset_id, info["keywords"])
-    _make_thumb(cfg, conn, asset_id, kind, full)
+    _make_thumb(cfg, conn, asset_id, kind, full, prev["edits"] if prev is not None else None)
     return asset_id
 
 
-def _make_thumb(cfg: Config, conn, asset_id: int, kind: str, full: Path) -> None:
-    make = media.make_thumb if kind == "photo" else media.make_video_thumb
-    ok = make(full, cfg.thumb_path(asset_id))
+def _make_thumb(cfg: Config, conn, asset_id: int, kind: str, full: Path, edits: str | None = None) -> None:
+    if kind == "photo":
+        ok = media.make_thumb(full, cfg.thumb_path(asset_id), media.parse_edits(edits))
+    else:
+        ok = media.make_video_thumb(full, cfg.thumb_path(asset_id))
     conn.execute("UPDATE assets SET has_thumb = ? WHERE id = ?", (1 if ok else 0, asset_id))
 
 
@@ -214,19 +233,20 @@ class Scanner:
 
     def _scan(self, state: ScanState, remove_missing: bool = False) -> None:
         cfg = self.cfg
-        root = cfg.library_path
-        if root is None or not root.is_dir():
-            state.message = f"Library folder not found: {root}"
+        all_roots = libraries.roots(cfg)
+        main = next((r for r in all_roots if r.main), None)
+        if main is None or not main.available():
+            state.message = f"Library folder not found: {cfg.library_path}"
             return
 
         conn = db.connect(cfg.db_path)
         try:
-            # Read what we know BEFORE walking the folder. Anything added while the walk runs
+            # Read what we know BEFORE walking the folders. Anything added while the walk runs
             # (an upload, say) is then never mistaken for a file that has disappeared.
             existing = {
                 r["path"]: r
                 for r in conn.execute(
-                    "SELECT a.id, a.path, a.size, a.mtime_ns, a.has_thumb, a.sha1, a.trashed_at,"
+                    "SELECT a.id, a.path, a.size, a.mtime_ns, a.has_thumb, a.sha1, a.trashed_at, a.edits,"
                     " (SELECT COUNT(*) FROM album_assets WHERE asset_id = a.id)"
                     " + (SELECT COUNT(*) FROM favorites WHERE asset_id = a.id)"
                     " + (SELECT COUNT(*) FROM faces WHERE asset_id = a.id) AS links"
@@ -234,10 +254,25 @@ class Scanner:
                 )
             }
 
-            found, had_errors = list_media(root, skip_dir=cfg.data_dir)
+            found = []
+            protected: list[str] = []       # folders whose missing files must not be forgotten this time
+            unavailable = []
+            for root in all_roots:
+                if not root.available():
+                    unavailable.append(root)
+                    protected.append(root.prefix)
+                    continue
+                files, errors = list_media(root.path, skip_dir=cfg.data_dir, prefix=root.prefix)
+                if errors or not files:
+                    protected.append(root.prefix)
+                found += files
             state.total = len(found)
             state.phase = "indexing"
             seen = {f[0] for f in found}
+
+            def belongs_to_protected(path: str) -> bool:
+                r = libraries.root_of(cfg, path)
+                return r is not None and r.prefix in protected
 
             # Rows whose file is no longer where we last saw it. A new file with the same
             # content is the same photo moved or renamed, so it keeps its row. Trashed rows are
@@ -245,7 +280,7 @@ class Scanner:
             # one with the most albums, favourites and faces wins.
             missing_by_sha: dict[str, list] = {}
             for path, row in existing.items():
-                if path not in seen and row["trashed_at"] is None:
+                if path not in seen and row["trashed_at"] is None and not belongs_to_protected(path):
                     missing_by_sha.setdefault(row["sha1"], []).append(row)
             for candidates in missing_by_sha.values():
                 candidates.sort(key=lambda r: r["links"])  # pop() takes the best
@@ -290,21 +325,23 @@ class Scanner:
 
             state.phase = "cleanup"
             gone = [p for p in existing if p not in seen and p not in moved_away]
-            if gone and (had_errors or not found):
+            kept = [p for p in gone if belongs_to_protected(p)]
+            gone = [p for p in gone if not belongs_to_protected(p)]
+            if kept:
+                where = ", ".join(str(r.path) for r in unavailable) or "the folder"
                 state.message = (
-                    f"Skipped removing {len(gone)} missing entries because the folder "
+                    f"Skipped removing {len(kept)} missing entries because {where} "
                     "could not be read completely."
                 )
-                state.skipped_removals = len(gone)
-                gone = []
-            elif gone and not remove_missing and len(gone) >= MASS_REMOVAL_MIN and len(gone) * 2 > len(existing):
+                state.skipped_removals = len(kept)
+            if gone and not remove_missing and len(gone) >= MASS_REMOVAL_MIN and len(gone) * 2 > len(existing):
                 # More than half the library vanished at once: far more likely a wrong folder or a
                 # half-connected drive than a real clear-out. Keep everything until someone confirms.
                 state.message = (
                     f"{len(gone)} photos were not found, more than half the library. They were kept "
                     "in case the wrong folder is selected or a drive is not fully connected."
                 )
-                state.skipped_removals = len(gone)
+                state.skipped_removals = len(gone) + len(kept)
                 gone = []
             for path in gone:
                 delete_asset_row(cfg, conn, existing[path]["id"])

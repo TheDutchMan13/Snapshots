@@ -63,3 +63,20 @@ search_threads = 2
 # "" shows only the country outlines that come with Snapshots and fetches nothing.
 # map_tiles = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
 # map_attribution = "© OpenStreetMap contributors"
+
+# More folders of photos, besides library_path (another drive, say). They are only read.
+# They can also be added and removed in the app: your name, Settings (administrators).
+# extra_libraries = ['E:\Phone backup', 'F:\Scans']
+
+# A copy of the database (albums, tags, people's names, accounts, edits, comments; not your photos)
+# is made every backup_hours, and the newest backup_keep are kept. 0 turns backups off.
+# backup_hours = 24
+# backup_keep = 14
+# backup_dir = 'E:\Snapshots backups'
+
+# Videos the app can't play (HEVC from phones, AVI, MKV) are converted once when opened, with ffmpeg.
+# "auto" uses the graphics card if ffmpeg can (NVIDIA, AMD or Intel), otherwise the processor.
+# Or choose one: "libx264" (processor), "h264_amf" (AMD), "h264_nvenc" (NVIDIA), "h264_qsv" (Intel).
+# video_encoder = "auto"
+# Converted copies are kept in the data folder, at most this many GB.
+# video_cache_gb = 20

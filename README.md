@@ -2,7 +2,7 @@
 
 Snapshots is a self-hosted photo and video library for Windows. Your originals stay on your own drive, and the app indexes them locally for browsing, search, people and places. You can reach your library from your phone over Tailscale, with no cloud account or subscription required.
 
-> **Status:** early development (v0.5). Browsing, search, accounts, albums, tags, favourites, archive, trash, people, places, the map, memories, events and clean-up all work. Automatic backup from a phone is not built yet, see [Roadmap](#roadmap).
+> **Status:** early development (v0.6). Browsing, search, accounts, albums, tags, favourites, archive, trash, people, places, the map, memories, events, clean-up, editing, comments and the locked folder all work. Automatic backup from a phone is not built yet, see [Roadmap](#roadmap).
 
 ## What works today
 
@@ -12,6 +12,16 @@ Snapshots is a self-hosted photo and video library for Windows. Your originals s
 - **Albums** and **tags** shared by everyone, **favourites** for each person, and a **trash** you can restore from
 - **Archive:** hide screenshots, receipts and the like from the timeline without deleting them. They still show in albums, people, places, folders and search
 - **Folders:** browse the library by its real folders
+- **Several library folders:** add photo folders on other drives (Settings, as an administrator). Each shows up as its own folder, and an unplugged drive loses nothing
+- **Edit photos:** turn, mirror, straighten and crop. Only the recipe is saved: your original file is never changed, and **Download edited** gives you an edited copy
+- **Change details:** fix the date (or move a whole batch by some hours, for a camera with a wrong clock), set or remove the location by town name, coordinates or a click on the map, and add a description. Descriptions are searched too
+- **Slideshow** of any page, with crossfades, a choice of speed and shuffle
+- **360° photos and panoramas:** drag to look around a 360° photo, or scroll along a wide panorama
+- **Locked folder:** move private photos behind a PIN. They are hidden from everyone everywhere else in Snapshots (the files stay in your folder)
+- **Comments** on photos and albums, and an **Activity** page with what others commented and added to albums
+- **Videos that don't play** in the app (HEVC from phones, AVI, MKV) are converted once when you open them, with the graphics card (NVIDIA, AMD or Intel) when ffmpeg can use it
+- **Database backups** every day, kept in the data folder or on another drive
+- **API keys** for scripts and other apps
 - **On this day:** photos from today's date in earlier years, at the top of All
 - **Map:** every photo with a location on a world map, grouped into pins with a photo on each. Press **Show these photos** for everything in view
 - **Stacks:** several photos shown as one in the timeline. RAW + JPEG pairs from a camera are stacked automatically, and you can stack bursts from the Clean up page or any photos you select
@@ -99,6 +109,13 @@ Copy `config.example.toml` to `config.toml` and edit it, or use command-line opt
 | | `search_threads` | `2` | CPU threads the two above may use |
 | | `map_tiles` | OpenStreetMap | Where the map's pictures come from; `""` shows country outlines only, with nothing fetched |
 | | `map_attribution` | `© OpenStreetMap contributors` | Credit shown on the map for `map_tiles` |
+| | `extra_libraries` | none | More photo folders, like `["E:\\Phone backup"]` (also set in the app: Settings) |
+| | `backup_hours` | `24` | Copy the database this often; `0` turns backups off |
+| | `backup_keep` | `14` | How many backups to keep |
+| | `backup_dir` | `backups` in the data folder | Where backups go (another drive is safer) |
+| | `video_encoder` | `auto` | How videos are converted: `auto` tries the graphics card first, or `libx264`, `h264_amf` (AMD), `h264_nvenc` (NVIDIA), `h264_qsv` (Intel) |
+| | `video_cache_gb` | `20` | Converted videos kept for playing, at most this many GB |
+| `--restore-backup FILE` | | | Put a database backup back in place (close Snapshots first), then exit |
 | `--reset-password NAME` | | | Set a new password for an account, then exit |
 | `--window` | | exe: on, source: off | Show Snapshots in its own window |
 | `--open` / `--browser` | | off | Use your web browser instead of the app window |
@@ -117,6 +134,9 @@ Everything runs on your own computer, in the background after a scan, a few phot
 - **Text in photos** is read with PaddleOCR's English models (about 11 MB). In a test, 97% of words on signs in photos were read exactly. Text-heavy photos take about a quarter of a second each, and this runs last.
 - **RAW files** are read with LibRaw. Thumbnails and the viewer use the full-size JPEG preview that cameras store inside every RAW file, so they are quick and look like what the camera showed; a RAW file without one is developed at half size. The original RAW file is what **Download** gives you.
 - **Live Photos** are recognised by name: a photo and a `.mov` or `.mp4` clip (up to 30 MB) with the same name in the same folder. **Motion photos** are recognised from the information the phone writes into the photo, and the video is copied out of it the first time you play it. iPhone clips are usually HEVC, which the Windows app window can't play without an extra codec, so when ffmpeg is installed they are converted to H.264 once.
+- **Edits** are a small recipe kept in the database: a quarter turn, mirror, a straightening angle (the picture is enlarged just enough to leave no empty corners) and a crop. The editor in the app draws the same steps the server uses for thumbnails and the viewer, so what you see while editing is what you get.
+- **360° photos** are recognised from the panorama information phones and 360° cameras write into the photo. The viewer draws them on the inside of a sphere with WebGL. Photos at least 2.4 times wider than tall get a **Pan** button.
+- **Video conversion** happens the first time a video that can't play is opened. A video that is already H.264 but in a file type the app can't open (MKV, AVI) is only repackaged, which takes seconds. Anything else is converted with the graphics card's encoder when ffmpeg can use it (each one is tested once with a tiny clip), otherwise with the processor. Copies are kept in the data folder, up to `video_cache_gb`.
 - **The map** draws pictures from OpenStreetMap while you look at it, so your computer asks OpenStreetMap's servers for the areas you view (not for your photos' locations). Set `map_tiles = ""` to use only the country outlines that come with Snapshots, with nothing fetched, or point it at your own tile server.
 
 ## Your files and safety
@@ -127,13 +147,18 @@ Everything runs on your own computer, in the background after a scan, a few phot
 - If the library folder is missing (an unplugged drive) or can't be read completely, Snapshots does **not** remove anything from its index, and the trash can't be emptied.
 - Deleting a photo from the library folder yourself removes it from Snapshots on the next scan.
 - A Live Photo's clip goes to the trash, comes back and is deleted together with its photo.
-- Archiving, tagging and stacking change nothing in your files.
+- Archiving, tagging, stacking, editing, changing details, comments and the locked folder change nothing in your files.
+- **Extra library folders** are read the same way. Removing one in Settings takes its photos out of Snapshots and leaves the files alone.
+- **The locked folder** hides photos inside Snapshots only. The files stay where they are, so anyone who can open your folders in Windows can still see them.
+- **Backups** contain the database (albums, tags, people's names, favourites, accounts, edits, comments), not your photos. To restore one, close Snapshots and run `Snapshots.exe --restore-backup "<backup file>"`; the database it replaces is kept as `snapshots.before-restore.db`.
 
 ## Accounts and remote access
 
 Everyone logs in, and everyone sees the same library and albums. Favourites are personal. Administrators manage accounts (sidebar, your name, **Accounts**) and are the only ones who can empty the trash.
 
-Passwords are stored as salted scrypt hashes. Sessions last 30 days and end when a password is changed. Repeated wrong passwords are slowed down, and the app is protected against cross-site request forgery. A future phone app can log in through the same API and send its session as `Authorization: Bearer <token>`.
+Passwords are stored as salted scrypt hashes. Sessions last 30 days and end when a password is changed. Repeated wrong passwords are slowed down, and the app is protected against cross-site request forgery. A future phone app can log in through the same API and send its session as `Authorization: Bearer <token>`. Scripts and other apps can use an **API key** instead (your name, **API keys**): it acts as you, except that it can't open your locked folder, change your password or make more keys. Only a hash of each key is stored.
+
+Each person's **locked folder** opens with their own PIN, for 10 minutes at a time and only in the window where it was typed. Wrong PINs are slowed down. If an administrator deletes an account, that person's locked photos become visible to everyone again.
 
 The safe way to reach Snapshots from your phone is [Tailscale](https://tailscale.com/). Keep Snapshots on its default `127.0.0.1` address and let Tailscale publish it to your own devices only, for example with `tailscale serve --bg 8080` (see the Tailscale documentation for the current syntax). Even with login, don't port-forward Snapshots to the open internet.
 
@@ -149,7 +174,7 @@ If Windows Security removes the exe after a build (programs made with PyInstalle
 
 ## Upgrading
 
-Replace the exe (or pull the new code) and start it again. Your database is upgraded automatically the first time. Version 0.2 added accounts, so after upgrading from 0.1 you'll be asked to create the administrator account. Version 0.3 only changes how Snapshots opens (its own window instead of a browser tab); your accounts, albums and photos are untouched. You will need to log in once more, because the app window keeps its own login separate from your browser. Version 0.4 then checks every photo once in the background (copies, blur, content and text), which takes a while for a big library; everything keeps working meanwhile. Version 0.5 looks once through your JPEG and HEIC photos for motion photos and keywords (quick: it reads only the start of each file), pairs Live Photos, stacks RAW + JPEG pairs, and picks up RAW files that earlier versions skipped.
+Replace the exe (or pull the new code) and start it again. Your database is upgraded automatically the first time. Version 0.2 added accounts, so after upgrading from 0.1 you'll be asked to create the administrator account. Version 0.3 only changes how Snapshots opens (its own window instead of a browser tab); your accounts, albums and photos are untouched. You will need to log in once more, because the app window keeps its own login separate from your browser. Version 0.4 then checks every photo once in the background (copies, blur, content and text), which takes a while for a big library; everything keeps working meanwhile. Version 0.5 looks once through your JPEG and HEIC photos for motion photos and keywords (quick: it reads only the start of each file), pairs Live Photos, stacks RAW + JPEG pairs, and picks up RAW files that earlier versions skipped. Version 0.6 looks once through your JPEG and HEIC photos for 360° panoramas (again reading only the start of each file) and makes its first database backup when it starts.
 
 ## Roadmap
 
@@ -165,6 +190,11 @@ Replace the exe (or pull the new code) and start it again. Your database is upgr
 - [x] Archive, folders, tags, stacks and memories
 - [x] Map view
 - [x] RAW files, Live Photos and motion photos
+- [x] Editing, changing dates and locations, descriptions
+- [x] Slideshow, 360° photos and panoramas
+- [x] Locked folder, comments and activity
+- [x] Several library folders, database backups, API keys
+- [x] Converting videos that don't play, with the graphics card
 - [ ] Android app with automatic backup
 - [ ] Sharing links for people without an account
 - [ ] Run at startup as a Windows service
@@ -186,10 +216,13 @@ The tests build small libraries of generated images, so they don't touch your ph
 | `snapshots/places.py` | Offline nearest-town lookup from GeoNames |
 | `snapshots/analysis.py` | Copies, bursts, blurry and dark photos, and events |
 | `snapshots/linking.py` | Live Photos, motion photos, RAW + JPEG stacks, keywords as tags |
+| `snapshots/libraries.py` | The main library and extra library folders, and where each item's file is |
+| `snapshots/videos.py` | Converting videos that don't play, in the background |
+| `snapshots/backup.py` | Database backups and restoring them |
 | `snapshots/clipsearch.py` | Search by what is in a photo (CLIP) |
 | `snapshots/ocr.py` | Reading text in photos |
 | `snapshots/downloads.py` | Downloading models once and checking their SHA-256 |
-| `snapshots/auth.py` | Passwords, sessions and login throttling |
+| `snapshots/auth.py` | Passwords, sessions, API keys, the locked folder PIN and login throttling |
 | `snapshots/shell.py` | The app window, and logging and message boxes for the exe (which has no console) |
 | `snapshots/media.py` | Reads dates, positions and camera info, makes thumbnails |
 | `snapshots/db.py` | SQLite schema, upgrades, search and paging |

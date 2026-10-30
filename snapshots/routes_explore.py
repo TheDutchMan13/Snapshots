@@ -40,7 +40,8 @@ def router(ctx) -> APIRouter:
         with db.session(cfg.db_path) as conn:
             groups = duplicates.groups(conn) if cfg.photo_checks else []
             low = conn.execute(
-                f"SELECT COUNT(*) FROM assets a WHERE a.trashed_at IS NULL AND {analysis.low_quality_sql(cfg)}"
+                f"SELECT COUNT(*) FROM assets a WHERE a.trashed_at IS NULL AND {db.NOT_LOCKED}"
+                f" AND {analysis.low_quality_sql(cfg)}"
             ).fetchone()[0] if cfg.photo_checks else 0
         return {
             "enabled": cfg.photo_checks,
@@ -76,13 +77,15 @@ def router(ctx) -> APIRouter:
         if set(body.keep) & set(body.trash):
             raise HTTPException(400, "A photo can't be both kept and moved to the trash.")
         with db.session(cfg.db_path) as conn:
-            if body.trash:
+            trash = db.open_ids(conn, body.trash)
+            if trash:
                 stamp = datetime.now().isoformat(timespec="seconds")
                 conn.executemany("UPDATE assets SET trashed_at = ? WHERE id = ? AND trashed_at IS NULL",
-                                 [(stamp, i) for i in body.trash])
-            if len(body.keep) > 1:
-                analysis.record_not_duplicates(conn, body.keep)  # kept together: not copies after all
-        return {"trashed": len(body.trash)}
+                                 [(stamp, i) for i in trash])
+            keep = db.open_ids(conn, body.keep)
+            if len(keep) > 1:
+                analysis.record_not_duplicates(conn, keep)  # kept together: not copies after all
+        return {"trashed": len(trash)}
 
     @r.post("/api/cleanup/not-duplicates")
     def not_duplicates(body: Ids, request: Request):
@@ -90,7 +93,7 @@ def router(ctx) -> APIRouter:
         if len(body.ids) < 2 or len(body.ids) > 500:
             raise HTTPException(400, "Choose between 2 and 500 photos.")
         with db.session(cfg.db_path) as conn:
-            analysis.record_not_duplicates(conn, body.ids)
+            analysis.record_not_duplicates(conn, db.open_ids(conn, body.ids))
         return {"ok": True}
 
     @r.post("/api/cleanup/fine")
@@ -98,8 +101,9 @@ def router(ctx) -> APIRouter:
         """'These blurry or dark photos are fine': stop suggesting them."""
         current_user(request)
         with db.session(cfg.db_path) as conn:
-            marks = ",".join("?" * len(body.ids))
-            n = conn.execute(f"UPDATE assets SET keep_quality = 1 WHERE id IN ({marks})", body.ids).rowcount
+            ids = db.open_ids(conn, body.ids)
+            marks = ",".join("?" * len(ids)) or "NULL"
+            n = conn.execute(f"UPDATE assets SET keep_quality = 1 WHERE id IN ({marks})", ids).rowcount
         return {"updated": n}
 
     # ------------------------------------------------------------ events
@@ -109,13 +113,7 @@ def router(ctx) -> APIRouter:
         current_user(request)
         with db.session(cfg.db_path) as conn:
             found = events.events(conn)
-            versions = {}
-            if found:
-                ids = [e["cover"] for e in found]
-                for start in range(0, len(ids), 900):
-                    chunk = ids[start:start + 900]
-                    versions.update({x["id"]: x["sha1"][:8] for x in conn.execute(
-                        f"SELECT id, sha1 FROM assets WHERE id IN ({','.join('?' * len(chunk))})", chunk)})
+            versions = db.versions(conn, [e["cover"] for e in found])
         return {"events": [dict(e, cover_v=versions.get(e["cover"])) for e in found]}
 
     return r

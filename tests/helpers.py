@@ -245,3 +245,24 @@ def make_keywords_jpeg(path: Path, words: list[str], taken: str = "2024:06:01 12
     payload = b"http://ns.adobe.com/xap/1.0/\0" + xmp.encode()
     data = path.read_bytes()
     path.write_bytes(data[:2] + b"\xff\xe1" + struct.pack(">H", len(payload) + 2) + payload + data[2:])
+
+
+def make_pano_jpeg(path: Path, full: bool = True, size=(800, 400), taken: str = "2024:07:01 12:00:00"):
+    """A JPEG marked as an equirectangular panorama (GPano XMP), as phones and 360° cameras write it."""
+    import struct
+
+    make_jpeg(path, taken, size=size)
+    w, h = size
+    crop = "" if full else f' GPano:CroppedAreaImageWidthPixels="{w}" GPano:FullPanoWidthPixels="{w * 3}"'
+    xmp = ('<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF><rdf:Description'
+           ' xmlns:GPano="http://ns.google.com/photos/1.0/panorama/" GPano:ProjectionType="equirectangular"'
+           f' GPano:UsePanoramaViewer="True"{crop}/></rdf:RDF></x:xmpmeta>')
+    payload = b"http://ns.adobe.com/xap/1.0/\0" + xmp.encode()
+    data = path.read_bytes()
+    path.write_bytes(data[:2] + b"\xff\xe1" + struct.pack(">H", len(payload) + 2) + payload + data[2:])
+
+
+def add_member(client, username="member", password="member password 1", is_admin=False):
+    r = client.post("/api/users", json={"username": username, "password": password, "is_admin": is_admin})
+    assert r.status_code == 201, r.text
+    return r.json()

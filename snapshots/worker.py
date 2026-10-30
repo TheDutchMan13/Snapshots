@@ -7,6 +7,7 @@ In order of priority it:
 4. finds faces in new photos and groups them into people;
 5. prepares search by content;
 6. reads text in photos.
+It also copies the database every `backup_hours`.
 Steps 2-6 work in small batches, so a rescan never waits long.
 """
 
@@ -18,6 +19,7 @@ from datetime import datetime, timedelta
 from . import db
 from .config import Config
 from .analysis import QualityJob
+from .backup import BackupJob
 from .clipsearch import ClipJob
 from .faces import FacesJob
 from .linking import MotionJob
@@ -38,6 +40,7 @@ class Worker:
         self.quality = QualityJob(cfg)
         self.clip = ClipJob(cfg)
         self.ocr = OcrJob(cfg)
+        self.backup = BackupJob(cfg)
         self._wake = threading.Event()
         self._scan_requested = False
         self._remove_missing = False
@@ -94,11 +97,13 @@ class Worker:
             "checks": dict(self.quality.state, enabled=self.cfg.photo_checks),
             "content": dict(self.clip.state, enabled=self.cfg.smart_search),
             "text": dict(self.ocr.state, enabled=self.cfg.text_search),
+            "backup": dict(self.backup.state, enabled=bool(self.cfg.backup_hours and self.cfg.backup_hours > 0)),
         }
 
     def _jobs(self):
         """Background jobs in order of priority, with whether each is switched on."""
         return [
+            (self.backup, bool(self.cfg.backup_hours and self.cfg.backup_hours > 0)),
             (self.motion, True),
             (self.places, self.cfg.places),
             (self.quality, self.cfg.photo_checks),

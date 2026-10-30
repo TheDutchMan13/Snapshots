@@ -16,6 +16,7 @@
     <a class="nav" href="#/photos" data-route="photos">Photos</a>
     <a class="nav" href="#/videos" data-route="videos">Videos</a>
     <a class="nav" href="#/favorites" data-route="favorites">Favourites</a>
+    <a class="nav" href="#/activity" data-route="activity">Activity <span id="activity-count" class="nav-count" hidden></span></a>
     <div class="nav-group" aria-hidden="true">Explore</div>
     <a class="nav" href="#/people" data-route="people">People</a>
     <a class="nav" href="#/places" data-route="places">Places</a>
@@ -26,6 +27,7 @@
     <a class="nav" href="#/tags" data-route="tags">Tags</a>
     <a class="nav" href="#/folders" data-route="folders">Folders</a>
     <a class="nav" href="#/archive" data-route="archive">Archive</a>
+    <a class="nav" href="#/locked" data-route="locked">Locked</a>
     <a class="nav" href="#/cleanup" data-route="cleanup">Clean up</a>
     <a class="nav" href="#/trash" data-route="trash">Trash</a>
     <div class="side-foot">
@@ -34,7 +36,10 @@
       </button>
       <div id="account-menu" class="menu" hidden>
         <button type="button" data-action="password">Change password</button>
+        <button type="button" data-action="pin">Locked folder PIN</button>
+        <button type="button" data-action="keys">API keys</button>
         <button type="button" data-action="users" class="admin-only">Accounts</button>
+        <button type="button" data-action="settings" class="admin-only">Settings</button>
         <button type="button" data-action="logout">Log out</button>
       </div>
     </div>
@@ -45,6 +50,7 @@
       <label class="sr-only" for="search">Search</label>
       <input id="search" type="search" placeholder="Search people, places, things, text or dates" autocomplete="off">
       <button id="new-items" class="chip" type="button" hidden>New photos · Show</button>
+      <button id="show-btn" class="btn" type="button" title="Play these photos full screen">Slideshow</button>
       <button id="select-btn" class="btn" type="button" aria-pressed="false">Select</button>
       <button id="rescan" class="btn" type="button">Rescan</button>
       <button id="upload-btn" class="btn primary" type="button">Upload</button>
@@ -92,6 +98,8 @@
     </button>
     <button id="v-album" class="v-btn" type="button"><span class="v-label">Add to album</span></button>
     <button id="v-archive" class="v-btn" type="button"><span class="v-label">Archive</span></button>
+    <button id="v-edit" class="v-btn" type="button"><span class="v-label">Edit</span></button>
+    <button id="v-play" class="v-btn" type="button" title="Slideshow from this photo"><span class="v-label">Slideshow</span></button>
     <button id="v-trash" class="v-btn" type="button"><span class="v-label">Move to trash</span></button>
     <button id="v-info" class="v-btn" type="button" aria-pressed="false"><span class="v-label">Info</span></button>
     <a id="v-download" class="v-btn" href="#" download><span class="v-label">Download</span></a>
@@ -108,6 +116,63 @@
   <aside id="v-panel" class="v-panel" hidden aria-label="Details">
     <dl id="v-details"></dl>
   </aside>
+</dialog>
+
+<dialog id="show" class="show" aria-label="Slideshow">
+  <div id="show-stage" class="show-stage"></div>
+  <div id="show-bar" class="show-bar">
+    <button id="show-prev" class="v-btn" type="button" aria-label="Previous photo">‹</button>
+    <button id="show-pause" class="v-btn" type="button">Pause</button>
+    <button id="show-next" class="v-btn" type="button" aria-label="Next photo">›</button>
+    <label class="show-opt">Every
+      <select id="show-speed">
+        <option value="3">3 seconds</option>
+        <option value="5" selected>5 seconds</option>
+        <option value="10">10 seconds</option>
+        <option value="20">20 seconds</option>
+      </select>
+    </label>
+    <label class="show-opt"><input id="show-shuffle" type="checkbox"> Shuffle</label>
+    <span id="show-count" class="show-count"></span>
+    <button id="show-close" class="v-btn" type="button">Close</button>
+  </div>
+</dialog>
+
+<dialog id="editor" class="editor" aria-label="Edit photo">
+  <div class="ed-bar">
+    <span class="ed-title">Edit photo</span>
+    <span class="ed-note">Your original file is not changed.</span>
+    <span class="spacer"></span>
+    <button id="ed-reset" class="v-btn" type="button">Reset</button>
+    <button id="ed-cancel" class="v-btn" type="button">Cancel</button>
+    <button id="ed-save" class="v-btn primary" type="button">Save</button>
+  </div>
+  <div id="ed-stage" class="ed-stage">
+    <canvas id="ed-canvas"></canvas>
+    <div id="ed-crop" class="ed-crop" hidden>
+      <span class="h nw" data-h="nw"></span><span class="h ne" data-h="ne"></span>
+      <span class="h sw" data-h="sw"></span><span class="h se" data-h="se"></span>
+    </div>
+  </div>
+  <div class="ed-tools">
+    <div class="ed-group">
+      <button id="ed-left" class="v-btn" type="button" title="Turn left">⟲ Left</button>
+      <button id="ed-right" class="v-btn" type="button" title="Turn right">⟳ Right</button>
+      <button id="ed-flip" class="v-btn" type="button" aria-pressed="false">Mirror</button>
+    </div>
+    <label class="ed-group ed-straighten">Straighten
+      <input id="ed-angle" type="range" min="-45" max="45" step="0.5" value="0">
+      <output id="ed-angle-out">0°</output>
+    </label>
+    <div class="ed-group" role="group" aria-label="Crop shape">
+      <span class="ed-label">Crop</span>
+      <button class="v-btn ed-ratio" type="button" data-ratio="free" aria-pressed="true">Free</button>
+      <button class="v-btn ed-ratio" type="button" data-ratio="orig">Original</button>
+      <button class="v-btn ed-ratio" type="button" data-ratio="1">Square</button>
+      <button class="v-btn ed-ratio" type="button" data-ratio="1.3333">4:3</button>
+      <button class="v-btn ed-ratio" type="button" data-ratio="1.7778">16:9</button>
+    </div>
+  </div>
 </dialog>
 
 <dialog id="modal" class="modal" aria-labelledby="modal-title"></dialog>

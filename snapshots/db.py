@@ -167,6 +167,51 @@ MIGRATIONS = [
     ) WITHOUT ROWID;
     CREATE INDEX idx_asset_tags_tag ON asset_tags (tag_id);
     """,
+    # 5 - version 0.6: edits and details, 360° photos, locked folder, comments, API keys, video copies
+    """
+    ALTER TABLE assets ADD COLUMN description TEXT;
+    ALTER TABLE assets ADD COLUMN taken_at_file TEXT;      -- the file's own date, kept when someone changed taken_at
+    ALTER TABLE assets ADD COLUMN position_edited INTEGER NOT NULL DEFAULT 0;  -- lat/lon set (or removed) by hand
+    ALTER TABLE assets ADD COLUMN edits TEXT;              -- JSON: rotate, flip, straighten, crop (the file is untouched)
+    ALTER TABLE assets ADD COLUMN edit_v TEXT;             -- short hash of edits, so browsers fetch new thumbnails
+    ALTER TABLE assets ADD COLUMN projection TEXT;         -- 'sphere' (360°) or 'pano' (a partial panorama)
+    ALTER TABLE assets ADD COLUMN pano_done INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE assets ADD COLUMN locked_by INTEGER REFERENCES users (id) ON DELETE SET NULL;
+    ALTER TABLE assets ADD COLUMN vcodec TEXT;             -- a video's codec and container, once looked at
+    UPDATE assets SET pano_done = 1 WHERE kind = 'video'
+        OR lower(path) NOT GLOB '*.jp*g' AND lower(path) NOT GLOB '*.hei[cf]' AND lower(path) NOT GLOB '*.tif*';
+    CREATE INDEX idx_assets_pano   ON assets (pano_done) WHERE pano_done = 0;
+    CREATE INDEX idx_assets_locked ON assets (locked_by) WHERE locked_by IS NOT NULL;
+
+    ALTER TABLE users ADD COLUMN pin_hash TEXT;            -- opens the locked folder
+    ALTER TABLE users ADD COLUMN activity_seen_at TEXT;
+    ALTER TABLE sessions ADD COLUMN unlocked_until TEXT;   -- the locked folder is open until then
+    ALTER TABLE album_assets ADD COLUMN added_by INTEGER REFERENCES users (id) ON DELETE SET NULL;
+
+    CREATE TABLE comments (
+        id         INTEGER PRIMARY KEY,
+        asset_id   INTEGER REFERENCES assets (id) ON DELETE CASCADE,
+        album_id   INTEGER REFERENCES albums (id) ON DELETE CASCADE,
+        user_id    INTEGER REFERENCES users (id) ON DELETE SET NULL,
+        text       TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        CHECK (asset_id IS NOT NULL OR album_id IS NOT NULL)
+    );
+    CREATE INDEX idx_comments_asset ON comments (asset_id) WHERE asset_id IS NOT NULL;
+    CREATE INDEX idx_comments_album ON comments (album_id) WHERE album_id IS NOT NULL;
+    CREATE INDEX idx_comments_time  ON comments (created_at);
+    CREATE INDEX idx_album_assets_added ON album_assets (added_at);
+
+    CREATE TABLE api_keys (
+        id           INTEGER PRIMARY KEY,
+        user_id      INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+        name         TEXT NOT NULL,
+        key_hash     TEXT NOT NULL UNIQUE,
+        hint         TEXT NOT NULL,                        -- the first characters, so people can tell keys apart
+        created_at   TEXT NOT NULL,
+        last_used_at TEXT
+    );
+    """,
 ]
 SCHEMA_VERSION = len(MIGRATIONS)
 
@@ -238,6 +283,7 @@ class Filter:
     folder: str | None = None      # only items directly in this folder ("" = the library folder itself)
     stacks: bool = False           # show each stack as one item (its cover)
     bbox: tuple[float, float, float, float] | None = None  # south, west, north, east: an area of the map
+    locked: bool = False           # the Locked folder: only the asking person's locked items
 
 
 _MONTHS = {}
@@ -267,14 +313,71 @@ STACK_HIDDEN = (
 )
 
 
+def is_external(path: str) -> bool:
+    """Paths in a second (third, ...) library folder are stored whole; the main library's are relative."""
+    return path.startswith("/") or bool(_DRIVE.match(path))
+
+
+_DRIVE = re.compile(r"^[A-Za-z]:/")
+
+
+def folder_prefix(folder: str) -> str:
+    """The text every path directly or indirectly in `folder` starts with ("" = the main library)."""
+    if is_external(folder):
+        return folder.rstrip("/") + "/"
+    folder = folder.strip("/")
+    return folder + "/" if folder else ""
+
+
+def version(row) -> str:
+    """Changes whenever the picture shown for an item changes (a new file, or an edit)."""
+    edit = row["edit_v"] if "edit_v" in row.keys() else None
+    return row["sha1"][:8] + (f"-{edit}" if edit else "")
+
+
+def version_sql(alias: str = "a") -> str:
+    return f"substr({alias}.sha1, 1, 8) || coalesce('-' || {alias}.edit_v, '')"
+
+
+def versions(conn, ids) -> dict:
+    """version() for many items at once."""
+    ids = [i for i in dict.fromkeys(ids) if i]
+    out = {}
+    for start in range(0, len(ids), 900):
+        chunk = ids[start:start + 900]
+        out.update({r[0]: r[1] for r in conn.execute(
+            f"SELECT a.id, {version_sql()} FROM assets a WHERE a.id IN ({','.join('?' * len(chunk))})", chunk)})
+    return out
+
+
+# Items in someone's locked folder are left out everywhere except that folder.
+NOT_LOCKED = "a.locked_by IS NULL"
+
+
+def open_ids(conn, ids) -> list[int]:
+    """The ids that exist and are not in anyone's locked folder (others are ignored by changes)."""
+    ids = list(dict.fromkeys(i for i in ids if isinstance(i, int)))
+    out = set()
+    for start in range(0, len(ids), 900):
+        chunk = ids[start:start + 900]
+        out.update(r[0] for r in conn.execute(
+            f"SELECT id FROM assets WHERE locked_by IS NULL AND id IN ({','.join('?' * len(chunk))})", chunk))
+    return [i for i in ids if i in out]
+
+
 def where_clause(f: Filter, user_id: int | None) -> tuple[str, list]:
     """SQL for a Filter, on table alias `a`. Every search word must match (AND).
 
     A word can be a year / year-month / full date, a month name, or text looked for in
-    the file path, camera, place names, text read in the photo and the names of people in it.
+    the file path, camera, place names, description, text read in the photo and the names of people in it.
     """
     where: list[str] = ["a.trashed_at IS NOT NULL" if f.trashed else "a.trashed_at IS NULL", LIVE_PART_HIDDEN]
     params: list = []
+    if f.locked:
+        where.append("a.locked_by = ?")
+        params.append(user_id)
+    else:
+        where.append(NOT_LOCKED)
     if f.archived == "hide":
         where.append("a.archived_at IS NULL")
     elif f.archived == "only":
@@ -283,8 +386,8 @@ def where_clause(f: Filter, user_id: int | None) -> tuple[str, list]:
         where.append("a.id IN (SELECT asset_id FROM asset_tags WHERE tag_id = ?)")
         params.append(f.tag)
     if f.folder is not None:
-        if f.folder:
-            prefix = f.folder.strip("/") + "/"
+        prefix = folder_prefix(f.folder)
+        if prefix:
             where.append("substr(a.path, 1, ?) = ? AND instr(substr(a.path, ?), '/') = 0")
             params += [len(prefix), prefix, len(prefix) + 1]
         else:
@@ -344,13 +447,14 @@ def where_clause(f: Filter, user_id: int | None) -> tuple[str, list]:
                 " OR lower(coalesce(a.state, '')) LIKE ?1 ESCAPE '\\'"
                 " OR lower(coalesce(a.country, '')) LIKE ?1 ESCAPE '\\'"
                 " OR lower(coalesce(a.ocr_text, '')) LIKE ?1 ESCAPE '\\'"
+                " OR lower(coalesce(a.description, '')) LIKE ?1 ESCAPE '\\'"
                 " OR a.id IN (SELECT at.asset_id FROM asset_tags at JOIN tags t ON t.id = at.tag_id"
                 "             WHERE lower(t.name) LIKE ?1 ESCAPE '\\')"
                 " OR a.id IN (SELECT f.asset_id FROM faces f JOIN people p ON p.id = f.person_id"
                 "             WHERE p.hidden = 0 AND lower(p.name) LIKE ?1 ESCAPE '\\'))"
                 .replace("?1", "?")
             )
-            params += [like] * 8
+            params += [like] * 9
     return " AND ".join(where), params
 
 
@@ -359,6 +463,7 @@ ASSET_COLUMNS = (
     " a.has_thumb, a.trashed_at, a.lat, a.lon, a.city, a.state, a.country, a.sharpness, a.brightness,"
     " a.highlights,"
     " a.keep_quality, a.ocr_text, a.archived_at, a.stack_id, a.live_video, a.motion_offset,"
+    " a.description, a.taken_at_file, a.position_edited, a.edits, a.edit_v, a.projection, a.locked_by,"
     " (SELECT COUNT(*) FROM assets sc WHERE sc.stack_id = a.stack_id AND sc.trashed_at IS NULL) AS stack_count"
 )
 

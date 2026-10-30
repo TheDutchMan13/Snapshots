@@ -203,6 +203,24 @@ def reset_password(cfg, username: str, read_password=None) -> int:
     return 0
 
 
+def restore_backup(cfg, backup_file: str, check_host: str) -> int:
+    """Put a database backup back in place (Snapshots must be closed)."""
+    from . import backup
+
+    if shell.snapshots_running(check_host, cfg.port):
+        return fail("Snapshots is running. Close it first, then restore the backup.")
+    src = Path(backup_file)
+    if not src.is_file():
+        return fail(f"Backup not found: {src}")
+    try:
+        kept = backup.restore(cfg, src)
+    except (ValueError, OSError) as exc:
+        return fail(f"That backup can't be restored. {exc}")
+    notify(f"Restored {src.name}.\nThe database it replaced was kept as {kept}.")
+    pause_if_frozen()
+    return 0
+
+
 def main(argv=None) -> int:
     if sys.stdout is None or sys.stderr is None:  # the exe has no console window
         shell.console = shell.prepare_streams(sys.argv[1:] if argv is None else argv)
@@ -222,6 +240,8 @@ def main(argv=None) -> int:
     p.add_argument("--no-index", action="store_true", help="Do not scan the library on start")
     p.add_argument("--reset-password", metavar="USER",
                    help="Set a new password for an account (creates it as an administrator if missing), then exit")
+    p.add_argument("--restore-backup", metavar="FILE",
+                   help="Put a database backup back in place (close Snapshots first), then exit")
     p.add_argument("--window", action="store_true", help="Show Snapshots in its own window (the exe's default)")
     p.add_argument("--open", "--browser", dest="open", action="store_true",
                    help="Open Snapshots in your web browser instead of its own window")
@@ -246,6 +266,10 @@ def main(argv=None) -> int:
 
     if args.reset_password:
         return reset_password(cfg, args.reset_password)
+
+    if args.restore_backup:
+        host = "127.0.0.1" if cfg.host in ("0.0.0.0", "localhost") else cfg.host
+        return restore_backup(cfg, args.restore_backup, host)
 
     if args.library is None and (args.change_library or cfg.library_path is None):
         chosen = pick_folder()

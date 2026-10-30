@@ -185,3 +185,31 @@ class PlacesJob:
         conn.commit()
         self.state["pending"] = self.pending(conn)
         return True
+
+
+def search_towns(cfg, text: str, limit: int = 12) -> list[dict]:
+    """Towns whose name starts with `text` (then those containing it), from the offline place list.
+
+    Used to set a photo's location by typing a town. Empty until the list has been downloaded.
+    """
+    cache = cfg.places_dir / _CACHE_NAME
+    needle = " ".join(text.split()).casefold()
+    if not needle or not cache.is_file():
+        return []
+    starts, contains = [], []
+    with open(cache, encoding="utf-8", newline="") as fh:
+        for line in fh:
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) < 5:
+                continue
+            name = parts[2].casefold()
+            if name.startswith(needle):
+                starts.append(parts)
+            elif len(contains) < limit and needle in name:
+                contains.append(parts)
+    # Exact names first, then shorter names (usually the better-known place).
+    starts.sort(key=lambda p: (p[2].casefold() != needle, len(p[2])))
+    out = []
+    for p in (starts + contains)[:limit]:
+        out.append({"city": p[2], "state": p[3] or None, "country": p[4], "lat": float(p[0]), "lon": float(p[1])})
+    return out

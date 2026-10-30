@@ -1,12 +1,12 @@
-"""Archive, tags, stacks, folders, memories ("on this day") and the map."""
+"""Archive, tags, stacks, folders, memories ("on this day"), the map and the locked folder."""
 
 from datetime import date, datetime
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from . import db, linking
-from .app import current_user
+from . import auth, db, libraries, linking
+from .app import current_user, require_session
 
 
 class Ids(BaseModel):
@@ -35,22 +35,23 @@ class CoverBody(BaseModel):
     cover: int
 
 
+class LockBody(Ids):
+    value: bool = True
+
+
+class PinBody(BaseModel):
+    pin: str = Field(min_length=1, max_length=64)
+
+
 def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
-def _versions(conn, ids) -> dict:
-    ids = [i for i in ids if i]
-    out = {}
-    for start in range(0, len(ids), 900):
-        chunk = ids[start:start + 900]
-        out.update({r[0]: r[1][:8] for r in conn.execute(
-            f"SELECT id, sha1 FROM assets WHERE id IN ({','.join('?' * len(chunk))})", chunk)})
-    return out
+_versions = db.versions
 
 
-# Shown in memories, folders and the map: everything in the library that isn't hidden.
-VISIBLE = f"a.trashed_at IS NULL AND a.archived_at IS NULL AND {db.LIVE_PART_HIDDEN}"
+# Shown in memories and the map: everything in the library that isn't hidden.
+VISIBLE = f"a.trashed_at IS NULL AND a.archived_at IS NULL AND {db.LIVE_PART_HIDDEN} AND {db.NOT_LOCKED}"
 
 
 def router(ctx) -> APIRouter:
@@ -64,7 +65,7 @@ def router(ctx) -> APIRouter:
         """Archived items leave the timelines (All, Photos, Videos, memories, the map) but stay everywhere else."""
         current_user(request)
         with db.session(cfg.db_path) as conn:
-            ids = linking.with_clips(conn, body.ids)
+            ids = linking.with_clips(conn, db.open_ids(conn, body.ids))
             stamp = _now() if body.value else None
             conn.executemany(
                 "UPDATE assets SET archived_at = ? WHERE id = ? AND (archived_at IS NULL) = ?",
@@ -76,7 +77,8 @@ def router(ctx) -> APIRouter:
     def tag_json(conn, row) -> dict:
         stats = conn.execute(
             "SELECT COUNT(*) AS n, MAX(a.taken_at || '|' || a.id) AS cover FROM asset_tags at"
-            " JOIN assets a ON a.id = at.asset_id AND a.trashed_at IS NULL WHERE at.tag_id = ?", (row["id"],)
+            f" JOIN assets a ON a.id = at.asset_id AND a.trashed_at IS NULL AND {db.NOT_LOCKED}"
+            " WHERE at.tag_id = ?", (row["id"],)
         ).fetchone()
         cover = int(stats["cover"].rpartition("|")[2]) if stats["cover"] else None
         return {"id": row["id"], "name": row["name"], "count": stats["n"], "cover": cover,
@@ -90,7 +92,7 @@ def router(ctx) -> APIRouter:
 
     def tag_assets(conn, tag_id: int, ids) -> None:
         conn.executemany("INSERT OR IGNORE INTO asset_tags (asset_id, tag_id) SELECT id, ? FROM assets WHERE id = ?",
-                         [(tag_id, i) for i in ids])
+                         [(tag_id, i) for i in db.open_ids(conn, ids)])
 
     @r.get("/api/tags")
     def list_tags(request: Request):
@@ -169,8 +171,7 @@ def router(ctx) -> APIRouter:
         """Put photos in a stack: one tile in the timeline, the others behind it."""
         current_user(request)
         with db.session(cfg.db_path) as conn:
-            ids = [r[0] for r in conn.execute(
-                f"SELECT id FROM assets WHERE id IN ({','.join('?' * len(body.ids))})", body.ids)]
+            ids = db.open_ids(conn, body.ids)
             if len(ids) < 2:
                 raise HTTPException(400, "A stack needs at least two photos.")
             order = {i: n for n, i in enumerate(body.ids)}
@@ -192,9 +193,10 @@ def router(ctx) -> APIRouter:
         """Take apart the stacks these photos are in."""
         current_user(request)
         with db.session(cfg.db_path) as conn:
-            marks = ",".join("?" * len(body.ids))
+            ids = db.open_ids(conn, body.ids)
+            marks = ",".join("?" * len(ids)) or "NULL"
             stacks = [r[0] for r in conn.execute(
-                f"SELECT DISTINCT stack_id FROM assets WHERE id IN ({marks}) AND stack_id IS NOT NULL", body.ids)]
+                f"SELECT DISTINCT stack_id FROM assets WHERE id IN ({marks}) AND stack_id IS NOT NULL", ids)]
             n = linking.unstack(conn, stacks)
         return {"stacks": len(stacks), "photos": n}
 
@@ -202,40 +204,73 @@ def router(ctx) -> APIRouter:
 
     @r.get("/api/folders")
     def folders(request: Request, path: str = Query("", max_length=1000)):
-        """The folders inside a folder of the library, and how many items each holds (including subfolders)."""
+        """The folders inside a folder of the library, and how many items each holds (including subfolders).
+
+        The main library's top level also lists the extra library folders.
+        """
         current_user(request)
-        prefix = path.strip("/")
-        prefix = prefix + "/" if prefix else ""
+        prefix = db.folder_prefix(path)
         n = len(prefix)
+        all_roots = libraries.roots(cfg)
+        shown = f"a.trashed_at IS NULL AND {db.LIVE_PART_HIDDEN} AND {db.NOT_LOCKED}"
+        # the newest photo that isn't too dark or blurry, else the newest item
+        cover_sql = (
+            "coalesce(MAX(CASE WHEN a.kind = 'photo' AND coalesce(a.brightness, 255) >= 40"
+            " AND coalesce(a.sharpness, 999) >= 50 THEN a.taken_at || '|' || a.id END), MAX(a.taken_at || '|' || a.id))")
+        main_only = "" if prefix else " AND NOT (a.path GLOB '/*' OR a.path GLOB '[A-Za-z]:/*')"
         with db.session(cfg.db_path) as conn:
             rows = conn.execute(
                 f"SELECT substr(a.path, {n + 1}, instr(substr(a.path, {n + 1}), '/') - 1) AS name,"
-                " COUNT(*) AS count, coalesce("
-                # the newest photo that isn't too dark or blurry, else the newest item
-                "  MAX(CASE WHEN a.kind = 'photo' AND coalesce(a.brightness, 255) >= 40 AND coalesce(a.sharpness, 999) >= 50"
-                "      THEN a.taken_at || '|' || a.id END), MAX(a.taken_at || '|' || a.id)) AS cover"
+                f" COUNT(*) AS count, {cover_sql} AS cover"
                 f" FROM assets a WHERE substr(a.path, 1, ?) = ? AND instr(substr(a.path, {n + 1}), '/') > 0"
-                f" AND a.trashed_at IS NULL AND {db.LIVE_PART_HIDDEN}"
-                " GROUP BY name ORDER BY name COLLATE NOCASE",
+                f" AND {shown}{main_only} GROUP BY name ORDER BY name COLLATE NOCASE",
                 (n, prefix),
             ).fetchall()
             direct = conn.execute(
                 f"SELECT COUNT(*) FROM assets a WHERE substr(a.path, 1, ?) = ? AND instr(substr(a.path, {n + 1}), '/') = 0"
-                f" AND a.trashed_at IS NULL AND {db.LIVE_PART_HIDDEN}", (n, prefix)
+                f" AND {shown}", (n, prefix)
             ).fetchone()[0]
+            extra = []
+            if not prefix:
+                for root in all_roots:
+                    if root.main:
+                        continue
+                    stats = conn.execute(
+                        f"SELECT COUNT(*) AS count, {cover_sql} AS cover FROM assets a"
+                        f" WHERE substr(a.path, 1, ?) = ? AND {shown}", (len(root.prefix), root.prefix)).fetchone()
+                    extra.append((root, stats))
             covers = [int(row["cover"].rpartition("|")[2]) for row in rows]
+            covers += [int(st["cover"].rpartition("|")[2]) for _, st in extra if st["cover"]]
             versions = _versions(conn, covers)
         if prefix and not rows and not direct:
             raise HTTPException(404, "No such folder.")
-        return {
-            "path": prefix.rstrip("/"),
-            "items": direct,
-            "folders": [
-                {"name": row["name"], "path": prefix + row["name"], "count": row["count"],
-                 "cover": c, "cover_v": versions.get(c)}
-                for row, c in zip(rows, covers)
-            ],
-        }
+
+        # Breadcrumbs: from the library folder the path is in.
+        here = prefix.rstrip("/")
+        root = next((x for x in all_roots if not x.main and (prefix == x.prefix or prefix.startswith(x.prefix))), None)
+        main = next((x for x in all_roots if x.main), None)
+        if root is not None:
+            crumbs = [{"name": root.name, "path": root.prefix.rstrip("/")}]
+            rest = prefix[len(root.prefix):].strip("/")
+            base = root.prefix
+        else:
+            crumbs = [{"name": main.name if main else "Library", "path": ""}]
+            rest, base = here, ""
+        if rest:
+            parts = rest.split("/")
+            for i, part in enumerate(parts):
+                crumbs.append({"name": part, "path": base + "/".join(parts[:i + 1])})
+
+        folders = [
+            {"name": row["name"], "path": prefix + row["name"], "count": row["count"],
+             "cover": c, "cover_v": versions.get(c)}
+            for row, c in zip(rows, covers)
+        ]
+        for x, st in extra:
+            c = int(st["cover"].rpartition("|")[2]) if st["cover"] else None
+            folders.append({"name": x.name, "path": x.prefix.rstrip("/"), "count": st["count"], "cover": c,
+                            "cover_v": versions.get(c), "library": str(x.path), "available": x.available()})
+        return {"path": here, "items": direct, "crumbs": crumbs, "folders": folders}
 
     # ------------------------------------------------------------ memories
 
@@ -280,12 +315,81 @@ def router(ctx) -> APIRouter:
         current_user(request)
         with db.session(cfg.db_path) as conn:
             points = [list(row) for row in conn.execute(
-                f"SELECT a.id, a.lat, a.lon, substr(a.sha1, 1, 8) FROM assets a WHERE a.lat IS NOT NULL AND {VISIBLE}"
+                f"SELECT a.id, a.lat, a.lon, {db.version_sql()} FROM assets a WHERE a.lat IS NOT NULL AND {VISIBLE}"
                 f" AND {db.STACK_HIDDEN} ORDER BY a.taken_at DESC")]
         return {
             "points": points,
             "tiles": cfg.map_tiles or None,
             "attribution": cfg.map_attribution if cfg.map_tiles else None,
         }
+
+    # ------------------------------------------------------------ the locked folder
+
+    @r.post("/api/locked/pin")
+    def set_pin(request: Request, body: dict):
+        """Set or change the PIN of your locked folder. Needs your account password."""
+        user = require_session(request)
+        pin, password = str(body.get("pin") or ""), str(body.get("password") or "")
+        problem = auth.validate_pin(pin)
+        if problem:
+            raise HTTPException(400, problem)
+        with db.session(cfg.db_path) as conn:
+            row = conn.execute("SELECT pw_hash FROM users WHERE id = ?", (user["id"],)).fetchone()
+            if not auth.verify_password(password, row["pw_hash"]):
+                raise HTTPException(400, "Your password is not right.")
+            conn.execute("UPDATE users SET pin_hash = ? WHERE id = ?", (auth.hash_password(pin), user["id"]))
+        return {"ok": True}
+
+    @r.post("/api/locked/open")
+    def open_locked(body: PinBody, request: Request):
+        """Open your locked folder for a few minutes, in this session only."""
+        user = require_session(request)
+        keys = (f"pin:{user['id']}",)
+        wait = ctx.pin_throttle.retry_after(*keys)
+        if wait:
+            raise HTTPException(429, f"Too many wrong PINs. Try again in {max(1, wait // 60)} minute(s).",
+                                headers={"Retry-After": str(wait)})
+        with db.session(cfg.db_path) as conn:
+            row = conn.execute("SELECT pin_hash FROM users WHERE id = ?", (user["id"],)).fetchone()
+            if not row["pin_hash"]:
+                raise HTTPException(400, "Set a PIN first.")
+            if not auth.verify_password(body.pin, row["pin_hash"]):
+                ctx.pin_throttle.failed(*keys)
+                raise HTTPException(400, "Wrong PIN.")
+            ctx.pin_throttle.succeeded(*keys)
+            until = auth.set_unlocked(conn, request.state.token, auth.UNLOCK_MINUTES)
+        return {"open": True, "until": until}
+
+    @r.post("/api/locked/close")
+    def close_locked(request: Request):
+        current_user(request)
+        with db.session(cfg.db_path) as conn:
+            auth.set_unlocked(conn, request.state.token, 0)
+        return {"open": False}
+
+    @r.post("/api/locked")
+    def lock(body: LockBody, request: Request):
+        """Move items into your locked folder (value=true), or back out of it (false, with the folder open).
+
+        Locked items are hidden from everyone everywhere else in Snapshots. The files stay where they are.
+        """
+        user = require_session(request)
+        with db.session(cfg.db_path) as conn:
+            if body.value:
+                if not conn.execute("SELECT pin_hash FROM users WHERE id = ?", (user["id"],)).fetchone()[0]:
+                    raise HTTPException(400, "Set a PIN for your locked folder first.")
+                ids = linking.with_clips(conn, db.open_ids(conn, body.ids))
+                conn.executemany("UPDATE assets SET locked_by = ? WHERE id = ? AND locked_by IS NULL",
+                                 [(user["id"], i) for i in ids])
+            else:
+                if not user.get("unlocked"):
+                    raise HTTPException(403, "Open the locked folder first.")
+                mine = [r[0] for r in conn.execute(
+                    f"SELECT id FROM assets WHERE locked_by = ? AND id IN ({','.join('?' * len(body.ids))})",
+                    [user["id"], *body.ids])]
+                ids = linking.with_clips(conn, mine)
+                conn.executemany("UPDATE assets SET locked_by = NULL WHERE id = ? AND locked_by = ?",
+                                 [(i, user["id"]) for i in ids])
+        return {"count": len(ids)}
 
     return r

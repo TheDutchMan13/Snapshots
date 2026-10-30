@@ -43,6 +43,12 @@ class Config:
     search_threads: int = 2                # CPU threads content and text search may use
     map_tiles: str = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"  # map pictures ("" = outlines only)
     map_attribution: str = "© OpenStreetMap contributors"
+    extra_libraries: list = field(default_factory=list)  # more photo folders, besides library_path
+    backup_hours: float = 24               # copy the database this often (0 turns backups off)
+    backup_keep: int = 14                  # how many backups to keep
+    backup_dir: Path | None = None         # where backups go (default: "backups" in the data folder)
+    video_encoder: str = "auto"            # how videos are converted: auto, libx264, h264_amf, h264_nvenc, h264_qsv
+    video_cache_gb: float = 20             # converted videos kept for playing, at most this much
     config_file: Path | None = None  # the file these settings were read from, if any
 
     @property
@@ -73,6 +79,18 @@ class Config:
     def motion_dir(self) -> Path:
         return self.data_dir / "motion"
 
+    @property
+    def edited_dir(self) -> Path:
+        return self.data_dir / "edited"
+
+    @property
+    def video_dir(self) -> Path:
+        return self.data_dir / "videos"
+
+    @property
+    def backups_path(self) -> Path:
+        return Path(self.backup_dir) if self.backup_dir else self.data_dir / "backups"
+
     def thumb_path(self, asset_id: int) -> Path:
         return self.thumb_dir / f"{asset_id}.jpg"
 
@@ -85,9 +103,15 @@ class Config:
     def motion_path(self, asset_id: int) -> Path:
         return self.motion_dir / f"{asset_id}.mp4"
 
+    def edited_path(self, asset_id: int) -> Path:
+        return self.edited_dir / f"{asset_id}.jpg"
+
+    def video_path(self, asset_id: int) -> Path:
+        return self.video_dir / f"{asset_id}.mp4"
+
     def ensure_dirs(self) -> None:
         for d in (self.data_dir, self.thumb_dir, self.preview_dir, self.face_dir,
-                  self.model_dir, self.places_dir, self.motion_dir):
+                  self.model_dir, self.places_dir, self.motion_dir, self.edited_dir, self.video_dir):
             d.mkdir(parents=True, exist_ok=True)
 
 
@@ -100,7 +124,9 @@ _FILE_KEYS = {
     "blur_threshold": float, "dark_threshold": float, "event_gap_hours": float, "event_min_items": int,
     "smart_search": bool, "text_search": bool, "search_threads": int,
     "map_tiles": str, "map_attribution": str,
+    "backup_hours": float, "backup_keep": int, "video_encoder": str, "video_cache_gb": float,
 }
+VIDEO_ENCODERS = ("auto", "libx264", "h264_amf", "h264_nvenc", "h264_qsv")
 
 
 def user_config_path() -> Path:
@@ -119,6 +145,25 @@ def save_library_path(library: Path, config_file: Path | None = None) -> Path:
         text = re.sub(r"(?m)^library_path\s*=.*$", lambda _m: line, text, count=1)
     else:
         text = line + "\n" + text
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def _toml_list(paths) -> str:
+    return "[" + ", ".join(json.dumps(str(p), ensure_ascii=False) for p in paths) + "]"
+
+
+def save_extra_libraries(paths, config_file: Path | None = None) -> Path:
+    """Remember the extra photo folders, keeping any other settings already in the file."""
+    path = Path(config_file) if config_file else user_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    line = "extra_libraries = " + _toml_list(paths)
+    text = path.read_text(encoding="utf-8") if path.is_file() else ""
+    pattern = r"(?ms)^extra_libraries\s*=\s*\[.*?\]"
+    if re.search(pattern, text):
+        text = re.sub(pattern, lambda _m: line, text, count=1)
+    else:
+        text = text + ("" if not text or text.endswith("\n") else "\n") + line + "\n"
     path.write_text(text, encoding="utf-8")
     return path
 
@@ -144,12 +189,21 @@ def load_config(config_file: str | os.PathLike | None = None, **overrides) -> Co
             cfg.library_path = Path(data["library_path"])
         if "data_dir" in data:
             cfg.data_dir = Path(data["data_dir"])
+        if "backup_dir" in data:
+            cfg.backup_dir = Path(data["backup_dir"]) if data["backup_dir"] else None
+        if "extra_libraries" in data:
+            extra = data["extra_libraries"]
+            if not isinstance(extra, list) or not all(isinstance(x, str) for x in extra):
+                raise ValueError(f"{path}: 'extra_libraries' should be a list of folders")
+            cfg.extra_libraries = [Path(x) for x in extra if x.strip()]
         for key, kind in _FILE_KEYS.items():
             if key in data:
                 try:
                     setattr(cfg, key, kind(data[key]))
                 except (TypeError, ValueError):
                     raise ValueError(f"{path}: '{key}' should be a {kind.__name__}") from None
+        if cfg.video_encoder not in VIDEO_ENCODERS:
+            raise ValueError(f"{path}: 'video_encoder' should be one of {', '.join(VIDEO_ENCODERS)}")
 
     for key, value in overrides.items():
         if value is None:

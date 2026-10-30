@@ -27,7 +27,7 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-from . import media
+from . import media, libraries
 
 log = logging.getLogger("snapshots.faces")
 
@@ -349,7 +349,7 @@ class FacesJob:
                 self._clusterer_version = self.people_version
                 self.clusterer = Clusterer(conn, self.cfg.face_match_threshold)
             try:
-                found = self.engine.analyze(root / row["path"])
+                found = self.engine.analyze(libraries.full_path(self.cfg, row["path"]) or root / "-missing-")
             except Exception as exc:  # unreadable or vanished: don't try it again and again
                 log.info("no faces read from %s: %s", row["path"], exc)
                 found = []

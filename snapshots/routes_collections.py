@@ -37,13 +37,7 @@ def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
-def _covers(conn, ids) -> dict:
-    """Cache key (part of the file hash) for each cover photo, so its thumbnail URL is right."""
-    ids = [i for i in ids if i]
-    if not ids:
-        return {}
-    marks = ",".join("?" * len(ids))
-    return {r["id"]: r["sha1"][:8] for r in conn.execute(f"SELECT id, sha1 FROM assets WHERE id IN ({marks})", ids)}
+_covers = db.versions  # cache key for each cover photo, so its thumbnail URL is right
 
 
 def router(ctx) -> APIRouter:
@@ -60,7 +54,7 @@ def router(ctx) -> APIRouter:
                 conn.executemany(
                     "INSERT OR IGNORE INTO favorites (user_id, asset_id, created_at)"
                     " SELECT ?, id, ? FROM assets WHERE id = ?",
-                    [(user["id"], _now(), i) for i in body.ids],
+                    [(user["id"], _now(), i) for i in db.open_ids(conn, body.ids)],
                 )
             else:
                 conn.executemany("DELETE FROM favorites WHERE user_id = ? AND asset_id = ?",
@@ -74,7 +68,7 @@ def router(ctx) -> APIRouter:
         current_user(request)
         with db.session(cfg.db_path) as conn:
             conn.executemany("UPDATE assets SET trashed_at = ? WHERE id = ? AND trashed_at IS NULL",
-                             [(_now(), i) for i in linking.with_clips(conn, body.ids)])
+                             [(_now(), i) for i in linking.with_clips(conn, db.open_ids(conn, body.ids))])
         return {"ok": True}
 
     @r.post("/api/trash/restore")
@@ -82,7 +76,7 @@ def router(ctx) -> APIRouter:
         current_user(request)
         with db.session(cfg.db_path) as conn:
             conn.executemany("UPDATE assets SET trashed_at = NULL WHERE id = ?",
-                             [(i,) for i in linking.with_clips(conn, body.ids)])
+                             [(i,) for i in linking.with_clips(conn, db.open_ids(conn, body.ids))])
         worker.poke()  # restored photos may still need their faces found
         return {"ok": True}
 
@@ -94,16 +88,21 @@ def router(ctx) -> APIRouter:
         deleted, failed = 0, []
         with db.session(cfg.db_path) as conn:
             if body.ids is None:
-                rows = conn.execute("SELECT id, path, filename FROM assets WHERE trashed_at IS NOT NULL").fetchall()
+                rows = conn.execute("SELECT id, path, filename FROM assets"
+                                    " WHERE trashed_at IS NOT NULL AND locked_by IS NULL").fetchall()
             else:
-                ids = linking.with_clips(conn, body.ids)
+                ids = linking.with_clips(conn, db.open_ids(conn, body.ids))
                 marks = ",".join("?" * len(ids)) or "NULL"
                 rows = conn.execute(
                     f"SELECT id, path, filename FROM assets WHERE trashed_at IS NOT NULL AND id IN ({marks})",
                     ids,
                 ).fetchall()
             for row in rows:
-                full = original_path(cfg, row["path"])
+                try:
+                    full = original_path(cfg, row["path"])
+                except HTTPException as exc:  # its folder isn't connected (or no longer in the library)
+                    failed.append({"id": row["id"], "filename": row["filename"], "reason": exc.detail})
+                    continue
                 try:
                     if full.exists():
                         os.remove(full)
@@ -121,12 +120,13 @@ def router(ctx) -> APIRouter:
         stats = conn.execute(
             "SELECT COUNT(*) AS n, MIN(a.taken_at) AS first, MAX(a.taken_at) AS last, MAX(a.taken_at || '|' || a.id) AS cover"
             " FROM album_assets aa JOIN assets a ON a.id = aa.asset_id AND a.trashed_at IS NULL"
-            " WHERE aa.album_id = ?",
+            f" AND {db.NOT_LOCKED} WHERE aa.album_id = ?",
             (row["id"],),
         ).fetchone()
         cover = int(stats["cover"].rpartition("|")[2]) if stats["cover"] else None
+        comments = conn.execute("SELECT COUNT(*) FROM comments WHERE album_id = ?", (row["id"],)).fetchone()[0]
         return {
-            "id": row["id"], "name": row["name"], "count": stats["n"],
+            "id": row["id"], "name": row["name"], "count": stats["n"], "comments": comments,
             "first": stats["first"], "last": stats["last"],
             "cover": cover, "cover_v": _covers(conn, [cover]).get(cover),
             "created_at": row["created_at"], "updated_at": row["updated_at"],
@@ -156,7 +156,7 @@ def router(ctx) -> APIRouter:
                 "INSERT INTO albums (name, created_by, created_at, updated_at) VALUES (?, ?, ?, ?)",
                 (name, user["id"], _now(), _now()),
             ).lastrowid
-            _add(conn, album_id, body.ids)
+            _add(conn, album_id, body.ids, user["id"])
             return album_json(conn, get_album(conn, album_id))
 
     @r.get("/api/albums/{album_id}")
@@ -185,19 +185,20 @@ def router(ctx) -> APIRouter:
             conn.execute("DELETE FROM albums WHERE id = ?", (album_id,))
         return {"ok": True}
 
-    def _add(conn, album_id: int, ids) -> None:
+    def _add(conn, album_id: int, ids, user_id: int | None = None) -> None:
         conn.executemany(
-            "INSERT OR IGNORE INTO album_assets (album_id, asset_id, added_at) SELECT ?, id, ? FROM assets WHERE id = ?",
-            [(album_id, _now(), i) for i in ids],
+            "INSERT OR IGNORE INTO album_assets (album_id, asset_id, added_at, added_by)"
+            " SELECT ?, id, ?, ? FROM assets WHERE id = ?",
+            [(album_id, _now(), user_id, i) for i in db.open_ids(conn, ids)],
         )
         conn.execute("UPDATE albums SET updated_at = ? WHERE id = ?", (_now(), album_id))
 
     @r.post("/api/albums/{album_id}/add")
     def add_to_album(album_id: int, body: Ids, request: Request):
-        current_user(request)
+        user = current_user(request)
         with db.session(cfg.db_path) as conn:
             get_album(conn, album_id)
-            _add(conn, album_id, body.ids)
+            _add(conn, album_id, body.ids, user["id"])
             return album_json(conn, get_album(conn, album_id))
 
     @r.post("/api/albums/{album_id}/remove")

@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel
 
 from . import __version__, auth, db
-from .app import current_user, require_admin
+from .app import current_user, require_admin, require_session
 
 
 class Credentials(BaseModel):
@@ -62,7 +62,10 @@ def router(ctx) -> APIRouter:
     def state(request: Request):
         with db.session(cfg.db_path) as conn:
             needs_setup = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0
-        return {"needs_setup": needs_setup, "user": request.state.user, "version": __version__}
+        user = request.state.user
+        if user is not None:
+            user = {"id": user["id"], "username": user["username"], "is_admin": user["is_admin"]}
+        return {"needs_setup": needs_setup, "user": user, "version": __version__}
 
     @r.post("/api/auth/setup")
     def setup(body: Credentials, request: Request, response: Response):
@@ -106,7 +109,7 @@ def router(ctx) -> APIRouter:
 
     @r.post("/api/auth/password")
     def change_password(body: PasswordChange, request: Request):
-        user = current_user(request)
+        user = require_session(request)
         problem = auth.validate_new_password(body.new)
         if problem:
             raise HTTPException(400, problem)
@@ -124,7 +127,10 @@ def router(ctx) -> APIRouter:
     def list_users(request: Request):
         require_admin(request)
         with db.session(cfg.db_path) as conn:
-            return {"users": [_user_json(u) for u in conn.execute("SELECT * FROM users ORDER BY username")]}
+            locked = dict(conn.execute("SELECT locked_by, COUNT(*) FROM assets WHERE locked_by IS NOT NULL"
+                                       " GROUP BY locked_by").fetchall())
+            return {"users": [dict(_user_json(u), locked=locked.get(u["id"], 0))
+                              for u in conn.execute("SELECT * FROM users ORDER BY username")]}
 
     @r.post("/api/users", status_code=201)
     def create_user(body: NewUser, request: Request):

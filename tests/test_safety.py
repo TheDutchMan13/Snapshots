@@ -73,8 +73,8 @@ def test_an_upload_during_a_scan_is_not_forgotten(tmp_path, lib, monkeypatch):
         setup_admin(c)
         real_list = scanner_module.list_media
 
-        def slow_walk(root, skip_dir=None):
-            found, errors = real_list(root, skip_dir)
+        def slow_walk(root, skip_dir=None, prefix=""):
+            found, errors = real_list(root, skip_dir, prefix)
             # While the folder is being walked, someone uploads a photo and puts it in an album.
             r = c.post("/api/upload", files=[("files", ("phone.jpg", jpeg_bytes((5, 6, 7)), "image/jpeg"))])
             new_id = r.json()["results"][0]["id"]

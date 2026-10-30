@@ -13,7 +13,7 @@ import os
 from collections import defaultdict
 from datetime import datetime
 
-from . import media
+from . import libraries, media
 
 log = logging.getLogger("snapshots.linking")
 
@@ -118,9 +118,9 @@ def unstack(conn, stack_ids: list[int]) -> int:
 
 def stack_members(conn, stack_id: int) -> list:
     return conn.execute(
-        "SELECT a.id, a.filename, a.sha1, a.taken_at, a.kind, a.width, a.height, (a.id = s.cover_id) AS cover"
+        "SELECT a.id, a.filename, a.sha1, a.edit_v, a.taken_at, a.kind, a.width, a.height, (a.id = s.cover_id) AS cover"
         " FROM assets a JOIN stacks s ON s.id = a.stack_id"
-        " WHERE a.stack_id = ? AND a.trashed_at IS NULL ORDER BY (a.id = s.cover_id) DESC, a.taken_at, a.id",
+        " WHERE a.stack_id = ? AND a.trashed_at IS NULL AND a.locked_by IS NULL ORDER BY (a.id = s.cover_id) DESC, a.taken_at, a.id",
         (stack_id,),
     ).fetchall()
 
@@ -145,7 +145,8 @@ def add_keywords(conn, asset_id: int, words: list[str]) -> None:
 
 
 class MotionJob:
-    """Looks for videos and keywords inside photos indexed before Snapshots knew about them (version 0.4 and older)."""
+    """Looks inside photos indexed by older versions of Snapshots: for videos and keywords (before 0.5)
+    and for 360° panorama markers (before 0.6)."""
 
     def __init__(self, cfg):
         self.cfg = cfg
@@ -153,10 +154,11 @@ class MotionJob:
         self.state = {"running": False, "pending": 0, "message": None}
 
     def pending(self, conn) -> int:
-        return conn.execute("SELECT COUNT(*) FROM assets WHERE motion_done = 0").fetchone()[0]
+        return conn.execute("SELECT COUNT(*) FROM assets WHERE motion_done = 0 OR pano_done = 0").fetchone()[0]
 
     def run_batch(self, conn, now: float, should_stop, batch: int = 200) -> bool:
-        rows = conn.execute("SELECT id, path FROM assets WHERE motion_done = 0 LIMIT ?", (batch,)).fetchall()
+        rows = conn.execute("SELECT id, path, motion_done, pano_done FROM assets WHERE motion_done = 0 OR pano_done = 0"
+                            " LIMIT ?", (batch,)).fetchall()
         if not rows:
             self.state.update(running=False, pending=0)
             return False
@@ -167,13 +169,21 @@ class MotionJob:
         for row in rows:
             if should_stop():
                 break
-            path = root / row["path"]
-            found = media.find_motion_video(path)
-            words = media.read_keywords(path)
-            if words:  # keywords in photos indexed before Snapshots read them
-                add_keywords(conn, row["id"], words)
-            conn.execute("UPDATE assets SET motion_offset = ?, motion_length = ?, motion_done = 1 WHERE id = ?",
-                         (found[0] if found else None, found[1] if found else None, row["id"]))
+            path = libraries.full_path(self.cfg, row["path"])
+            if path is None or not path.is_file():
+                # Its folder isn't connected. Rather than hold up the rest, it is left as it is.
+                conn.execute("UPDATE assets SET motion_done = 1, pano_done = 1 WHERE id = ?", (row["id"],))
+                continue
+            if not row["motion_done"]:
+                found = media.find_motion_video(path)
+                words = media.read_keywords(path)
+                if words:  # keywords in photos indexed before Snapshots read them
+                    add_keywords(conn, row["id"], words)
+                conn.execute("UPDATE assets SET motion_offset = ?, motion_length = ?, motion_done = 1 WHERE id = ?",
+                             (found[0] if found else None, found[1] if found else None, row["id"]))
+            if not row["pano_done"]:
+                conn.execute("UPDATE assets SET projection = ?, pano_done = 1 WHERE id = ?",
+                             (media.read_projection(path), row["id"]))
         conn.commit()
         self.state["pending"] = self.pending(conn)
         return True

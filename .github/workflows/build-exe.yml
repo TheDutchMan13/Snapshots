@@ -1,7 +1,7 @@
 name: Build Windows exe
 
 # Builds Snapshots.exe on a Windows machine at GitHub.
-#   - Push a tag like v0.5.0 to publish the exe on the repository's Releases page.
+#   - Push a tag like v0.6.0 to publish the exe on the repository's Releases page.
 #   - Or open the Actions tab, pick this workflow and press "Run workflow";
 #     the exe is then attached to the run as a download.
 on:
@@ -81,6 +81,16 @@ jobs:
             $rawThumb = if ($raw -and $raw.has_thumb) { (Invoke-WebRequest "$base/api/assets/$($raw.id)/thumb" -UseBasicParsing -WebSession $web).StatusCode } else { 0 }
             $map   = Invoke-WebRequest "$base/static/vendor/leaflet.js" -UseBasicParsing
             $anon  = try { Invoke-WebRequest "$base/api/status" -UseBasicParsing; 200 } catch { $_.Exception.Response.StatusCode.value__ }
+            # 0.6: an edit (stored, the file untouched), a database backup, and an API key
+            $hdr   = @{ 'X-Snapshots-Request' = '1' }
+            $edit  = Invoke-RestMethod -Method Post "$base/api/assets/1/edits" -Body '{"edits": {"rotate": 90}}' `
+                       -ContentType 'application/json' -Headers $hdr -WebSession $web
+            $editThumb = (Invoke-WebRequest "$base/api/assets/1/thumb?v=$($edit.v)" -UseBasicParsing -WebSession $web).StatusCode
+            $bk    = Invoke-RestMethod -Method Post "$base/api/backups" -Headers $hdr -WebSession $web
+            $key   = Invoke-RestMethod -Method Post "$base/api/keys" -Body '{"name": "smoke test"}' `
+                       -ContentType 'application/json' -Headers $hdr -WebSession $web
+            $byKey = @((Invoke-RestMethod "$base/api/assets" -Headers @{ Authorization = "Bearer $($key.key)" }).items).Count
+            $enc   = Invoke-RestMethod "$base/api/video-encoder" -WebSession $web
           }
           Get-Process -Name Snapshots -ErrorAction SilentlyContinue | Stop-Process -Force
           Write-Host '--- exe output ---'
@@ -97,7 +107,11 @@ jobs:
           if ($raw.taken_at -ne '2024-06-01T12:00:00') { throw "The RAW file's date was not read: $($raw.taken_at)" }
           if ($map.StatusCode -ne 200)   { throw 'The map files are missing from the exe.' }
           if ($anon -ne 401)             { throw 'The library was visible without logging in.' }
-          Write-Host "Smoke test passed: $($status.photos) photos indexed (one RAW), login required, HEIC and RAW support present, map files served."
+          if (-not $edit.edited -or $editThumb -ne 200) { throw "Editing a photo did not work: $($edit | ConvertTo-Json -Compress)" }
+          if (-not $bk.name)             { throw 'The database backup failed.' }
+          if ($byKey -lt 2)              { throw 'An API key could not read the library.' }
+          Write-Host "Video converting: ffmpeg $($enc.ffmpeg), encoder $($enc.using)"
+          Write-Host "Smoke test passed: $($status.photos) photos indexed (one RAW), login required, HEIC and RAW support present, map files served, editing, backups and API keys work."
 
       - name: Smoke test the app window
         shell: pwsh
