@@ -193,6 +193,10 @@ Contributions are welcome. Please open an issue before starting a large change s
 
 The models and place data are downloaded by each installation; they are not part of this repository.
 
+## AI disclaimer
+
+Parts of this project were written with help from an AI assistant (Claude, made by Anthropic). The code and documentation may contain mistakes or behave in unexpected ways. Review and test it before relying on it, especially for anything important.
+
 ## License
 
 Snapshots is free software, licensed under the [GNU General Public License v3.0](LICENSE).
