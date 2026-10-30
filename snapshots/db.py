@@ -309,6 +309,36 @@ MIGRATIONS = [
     CREATE TRIGGER xmp_person_name AFTER UPDATE OF name ON people
         BEGIN UPDATE assets SET xmp_dirty = 1 WHERE id IN (SELECT asset_id FROM faces WHERE person_id = NEW.id); END;
     """,
+    # 8 - version 0.9: stars, colour labels and pick/reject flags; the library health check
+    """
+    ALTER TABLE assets ADD COLUMN rating INTEGER NOT NULL DEFAULT 0;   -- 0 (none) to 5 stars
+    ALTER TABLE assets ADD COLUMN label TEXT;                          -- red, yellow, green, blue or purple
+    ALTER TABLE assets ADD COLUMN flag INTEGER NOT NULL DEFAULT 0;     -- 1 pick, -1 reject, 0 neither
+    CREATE INDEX idx_assets_rating ON assets (rating) WHERE rating > 0;
+    CREATE INDEX idx_assets_label  ON assets (label) WHERE label IS NOT NULL;
+    CREATE INDEX idx_assets_flag   ON assets (flag) WHERE flag != 0;
+    CREATE TRIGGER xmp_rating AFTER UPDATE OF rating, label, flag ON assets
+        BEGIN UPDATE assets SET xmp_dirty = 1 WHERE id = NEW.id; END;
+
+    CREATE TABLE health_runs (
+        id          INTEGER PRIMARY KEY,
+        started_by  INTEGER REFERENCES users (id) ON DELETE SET NULL,
+        started_at  TEXT NOT NULL,
+        finished_at TEXT,
+        stopped     INTEGER NOT NULL DEFAULT 0,  -- stopped before the end
+        total       INTEGER NOT NULL DEFAULT 0,
+        checked     INTEGER NOT NULL DEFAULT 0,
+        bytes       INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE health_issues (
+        run_id   INTEGER NOT NULL REFERENCES health_runs (id) ON DELETE CASCADE,
+        asset_id INTEGER NOT NULL REFERENCES assets (id) ON DELETE CASCADE,
+        status   TEXT NOT NULL,      -- damaged, changed, missing, unreadable or unavailable
+        detail   TEXT,
+        PRIMARY KEY (run_id, asset_id)
+    ) WITHOUT ROWID;
+    CREATE INDEX idx_health_issues_asset ON health_issues (asset_id);
+    """,
 ]
 SCHEMA_VERSION = len(MIGRATIONS)
 
@@ -383,6 +413,9 @@ class Filter:
     locked: bool = False           # the Locked folder: only the asking person's locked items
     people: list[int] | None = None  # all of these people are in it (a smart album)
     words: str = ""                # more words that must match, like q (a smart album's own words)
+    rating: int = 0                # at least this many stars
+    label: str = ""                # this colour label
+    flag: str = ""                 # "pick", "reject" or "unflagged"
 
 
 _MONTHS = {}
@@ -401,6 +434,8 @@ def _like(text: str) -> str:
 
 
 # A Live Photo's clip is shown with its photo, never on its own.
+LABELS = ("red", "yellow", "green", "blue", "purple")   # colour labels, as Lightroom names them
+
 LIVE_PART_HIDDEN = "NOT EXISTS (SELECT 1 FROM assets lp WHERE lp.live_video = a.id)"
 # In a stack, only the first photo still in the library is shown: the cover, or else the oldest
 # other member (by id). The others are reached from it.
@@ -518,6 +553,14 @@ def where_clause(f: Filter, user_id: int | None) -> tuple[str, list]:
     for person in f.people or []:
         where.append("a.id IN (SELECT asset_id FROM faces WHERE person_id = ?)")
         params.append(person)
+    if f.rating:
+        where.append("a.rating >= ?")
+        params.append(int(f.rating))
+    if f.label:
+        where.append("a.label = ?")
+        params.append(f.label)
+    if f.flag:
+        where.append({"pick": "a.flag = 1", "reject": "a.flag = -1"}.get(f.flag, "a.flag = 0"))
     if f.start:
         where.append("a.taken_at >= ?")
         params.append(f.start)
@@ -566,6 +609,7 @@ ASSET_COLUMNS = (
     " a.highlights,"
     " a.keep_quality, a.ocr_text, a.archived_at, a.stack_id, a.live_video, a.motion_offset,"
     " a.description, a.taken_at_file, a.position_edited, a.edits, a.edit_v, a.projection, a.locked_by,"
+    " a.rating, a.label, a.flag,"
     " (SELECT COUNT(*) FROM assets sc WHERE sc.stack_id = a.stack_id AND sc.trashed_at IS NULL"
     "  AND sc.locked_by IS NULL) AS stack_count"
 )

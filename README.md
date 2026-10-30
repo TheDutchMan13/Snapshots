@@ -2,7 +2,7 @@
 
 Snapshots is a self-hosted photo and video library for Windows. Your originals stay on your own drive, and the app indexes them locally for browsing, search, people and places. You can reach your library from your phone over Tailscale, with no cloud account or subscription required.
 
-> **Status:** early development (v0.7). Browsing, search, accounts, albums and smart albums, tags, favourites, archive, trash, people, places, the map, memories, events, clean-up, editing, comments, the locked folder, exports, imports from Immich and Google Photos, offsite copies and webhooks all work. Automatic backup from a phone is not built yet, see [Roadmap](#roadmap).
+> **Status:** early development (v0.9). Browsing, search, accounts with two-step login, albums and smart albums, tags, stars and colour labels, favourites, archive, trash, people, places, the map, memories, events, the year in review, clean-up and the library health check, editing, comments, the locked folder, exports, imports from Immich and Google Photos, offsite copies, XMP files and webhooks all work. Automatic backup from a phone is not built yet, see [Roadmap](#roadmap).
 
 ## What works today
 
@@ -28,6 +28,16 @@ Snapshots is a self-hosted photo and video library for Windows. Your originals s
 - **Videos that don't play** in the app (HEVC from phones, AVI, MKV) are converted once when you open them, with the graphics card (NVIDIA, AMD or Intel) when ffmpeg can use it
 - **Database backups** every day, kept in the data folder or on another drive
 - **API keys** for scripts and other apps
+- **Stars, colour labels, pick and reject**, as in Lightroom: in the viewer press 0 to 5 for stars, 6 to 9 for a colour label, P to pick, X to reject (the same keys work on selected photos). **Filter** in the top bar shows only photos with some stars, a label, or the picks. Smart albums can use them too ("4 stars and up")
+- **Compare** two to four photos side by side, zooming and moving all of them together, and **Cull**: go through a set of photos one at a time with the keyboard, then move the rejects to the trash in one go
+- **Year in review:** the best photos of each year, chosen from favourites, stars, picks, named people and sharpness, without near-copies, spread over the year. Play them as a slideshow, save them as an album, or make a **video** with a slow zoom on each photo and titles (made on your PC; needs ffmpeg)
+- **Library health check** (Clean up, administrators): reads every file again and compares it with the checksum stored when it was added, to find files damaged on disk before backups copy the damage. A damaged or missing file can be put back from the offsite copy with one click. Runs when you ask, or every few days
+- **Storage report** (Clean up): where the space goes, by type, year and folder, the biggest files, what you could get back from the trash and duplicates, Snapshots' own files, and free space on each drive
+- **"Same person?"** questions on the People page and on each person's page for groups of faces that look alike. A "No" is remembered, and automatic grouping respects it. How strictly faces are grouped can be set in Settings
+- **Duplicates** in Clean up, sorted into identical files, look-alikes and bursts, with the space each would free and why each keeper was picked
+- **Two-step login** (optional, per account, in **Login security**): a 6-digit code from an authenticator app after the password, with recovery codes for a lost phone. Wrong passwords are counted per device, so someone guessing at your name elsewhere can't lock you out of your own browser
+- **XMP files** (optional, Settings): descriptions, tags, people's names, stars, labels, favourites and dates and places you changed are written into small `.xmp` files beside the photos, which Lightroom, digiKam, darktable and Immich read. New photos that arrive with one get its details
+- **Where uploads go:** a folder pattern like `Uploads/{year}/{month}` (Settings), by the date the photo was taken
 - **On this day:** photos from today's date in earlier years, at the top of All
 - **Map:** every photo with a location on a world map, grouped into pins with a photo on each. Press **Show these photos** for everything in view
 - **Stacks:** several photos shown as one in the timeline. RAW + JPEG pairs from a camera are stacked automatically, and you can stack bursts from the Clean up page or any photos you select
@@ -125,6 +135,11 @@ Copy `config.example.toml` to `config.toml` and edit it, or use command-line opt
 | | `offsite_target` | | A folder, an rclone `remote:path`, or a restic repository |
 | | `offsite_hours` | `24` | Bring the offsite copy up to date this often |
 | | `offsite_password_file` | | restic only: a file holding the repository's password |
+| | `face_suggest_threshold` | `0.30` | Ask "Same person?" about groups this alike; `0` turns the questions off |
+| | `xmp_sidecars` | `false` | Write `.xmp` files beside photos (also set in the app: Settings) |
+| | `upload_template` | `Uploads/{year}/{month}` | Where uploads are filed; can use `{year}`, `{month}`, `{monthname}`, `{day}`, `{date}`, `{camera}`, `{type}`, `{user}` |
+| | `health_check_days` | `0` | Check every file for damage this often; `0` only when asked (also set in Clean up, Library health) |
+| | `review_seconds` | `4` | Year in review videos: seconds each photo is shown |
 | `--restore-backup FILE` | | | Put a database backup back in place (close Snapshots first), then exit |
 | `--reset-password NAME` | | | Set a new password for an account, then exit |
 | `--window` | | exe: on, source: off | Show Snapshots in its own window |
@@ -156,7 +171,10 @@ Everything runs on your own computer, in the background after a scan, a few phot
 ## Your files and safety
 
 - Snapshots reads your library and writes thumbnails, its database and downloaded models to the **data folder**, which is kept outside your photos.
-- Uploads are saved to `Uploads\<year>\<month>` inside your library.
+- Uploads are saved to `Uploads\<year>\<month>` inside your library (by the date taken; another pattern can be set in Settings).
+- **XMP files** are the one thing Snapshots writes beside your photos, and only when you turn them on. An existing `.xmp` from another program is updated, not replaced. Emptying the trash removes a photo's `.xmp` with it.
+- **The library health check** only reads. Putting back a good copy from the offsite copy replaces the damaged file and keeps the damaged one beside it, ending in `.damaged`.
+- **Year in review videos** are saved in the data folder for download, and in `Year in review` in the library only if you tick that box.
 - **Moving a photo to the trash doesn't touch the file.** It is only hidden, and can be restored. **Emptying the trash deletes the files from your disk**, and only an administrator can do that, after a confirmation.
 - If the library folder is missing (an unplugged drive) or can't be read completely, Snapshots does **not** remove anything from its index, and the trash can't be emptied.
 - Deleting a photo from the library folder yourself removes it from Snapshots on the next scan.
@@ -172,7 +190,7 @@ Everything runs on your own computer, in the background after a scan, a few phot
 
 Everyone logs in, and everyone sees the same library and albums. Favourites are personal. Administrators manage accounts (sidebar, your name, **Accounts**) and are the only ones who can empty the trash.
 
-Passwords are stored as salted scrypt hashes. Sessions last 30 days and end when a password is changed. Repeated wrong passwords are slowed down, and the app is protected against cross-site request forgery. A future phone app can log in through the same API and send its session as `Authorization: Bearer <token>`. Scripts and other apps can use an **API key** instead (your name, **API keys**): it acts as you, except that it can't open your locked folder, change your password or make more keys. Only a hash of each key is stored.
+Passwords are stored as salted scrypt hashes. Sessions last 30 days and end when a password is changed. Repeated wrong passwords are slowed down per device: a browser you've logged in from before keeps its own allowance, so wrong guesses elsewhere can't lock you out of it. **Two-step login** can be turned on by each person (your name, **Login security**) with any authenticator app; recovery codes cover a lost phone, and an administrator can turn it off for someone (Accounts). API keys are not affected by two-step login, and the app is protected against cross-site request forgery. A future phone app can log in through the same API and send its session as `Authorization: Bearer <token>`. Scripts and other apps can use an **API key** instead (your name, **API keys**): it acts as you, except that it can't open your locked folder, change your password or make more keys. Only a hash of each key is stored.
 
 **Imports, webhooks and the offsite copy** are for administrators, since they add albums and names for everyone, copy files, or send information out.
 
@@ -192,7 +210,7 @@ If Windows Security removes the exe after a build (programs made with PyInstalle
 
 ## Upgrading
 
-Replace the exe (or pull the new code) and start it again. Your database is upgraded automatically the first time. Version 0.2 added accounts, so after upgrading from 0.1 you'll be asked to create the administrator account. Version 0.3 only changes how Snapshots opens (its own window instead of a browser tab); your accounts, albums and photos are untouched. You will need to log in once more, because the app window keeps its own login separate from your browser. Version 0.4 then checks every photo once in the background (copies, blur, content and text), which takes a while for a big library; everything keeps working meanwhile. Version 0.5 looks once through your JPEG and HEIC photos for motion photos and keywords (quick: it reads only the start of each file), pairs Live Photos, stacks RAW + JPEG pairs, and picks up RAW files that earlier versions skipped. Version 0.6 looks once through your JPEG and HEIC photos for 360° panoramas (again reading only the start of each file) and makes its first database backup when it starts. Version 0.7 changes nothing on its own: imports, the offsite copy and webhooks only start once you set them up.
+Replace the exe (or pull the new code) and start it again. Your database is upgraded automatically the first time. Version 0.2 added accounts, so after upgrading from 0.1 you'll be asked to create the administrator account. Version 0.3 only changes how Snapshots opens (its own window instead of a browser tab); your accounts, albums and photos are untouched. You will need to log in once more, because the app window keeps its own login separate from your browser. Version 0.4 then checks every photo once in the background (copies, blur, content and text), which takes a while for a big library; everything keeps working meanwhile. Version 0.5 looks once through your JPEG and HEIC photos for motion photos and keywords (quick: it reads only the start of each file), pairs Live Photos, stacks RAW + JPEG pairs, and picks up RAW files that earlier versions skipped. Version 0.6 looks once through your JPEG and HEIC photos for 360° panoramas (again reading only the start of each file) and makes its first database backup when it starts. Version 0.7 changes nothing on its own: imports, the offsite copy and webhooks only start once you set them up. Version 0.8 changes nothing in your files unless you turn on XMP files; new uploads are filed by the date taken. Version 0.9 adds stars, labels and pick/reject (all empty to begin with); the library health check only runs when you ask, or on the schedule you set.
 
 ## Roadmap
 
@@ -216,6 +234,8 @@ Replace the exe (or pull the new code) and start it again. Your database is upgr
 - [x] Smart albums, exports and photo books, trimming videos
 - [x] Importing from Immich and Google Photos
 - [x] Offsite copies of the photos, webhooks
+- [x] "Same person?" suggestions, a duplicates screen, two-step login, XMP files, storage templates
+- [x] Stars, labels, compare and cull, year in review videos, library health check, storage report
 - [ ] Android app with automatic backup
 - [ ] Sharing links for people without an account
 - [ ] Run at startup as a Windows service

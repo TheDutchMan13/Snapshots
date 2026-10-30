@@ -6,7 +6,7 @@ the rule right now are shown, so new photos join it on their own. A rule can ask
 * words (as typed in the search box: names, places, text in photos, tags, dates),
 * what is in the photo (search by content, like "beach"),
 * people (all of them must be in the photo), a tag, photos or videos only, a date range, a place,
-* favourites only (each person sees their own favourites),
+* favourites only (each person sees their own favourites), at least some stars, a colour label,
 * whether archived items count.
 """
 
@@ -72,7 +72,16 @@ def parse_rule(value) -> dict:
         rule["favorite"] = True
     if value.get("hide_archived"):
         rule["hide_archived"] = True
-    if not any(k in rule for k in ("words", "look", "people", "tag", "kind", "start", "end", "country", "favorite")):
+    if value.get("rating"):
+        if not isinstance(value["rating"], int) or not 1 <= value["rating"] <= 5:
+            raise ValueError("Stars should be 1 to 5.")
+        rule["rating"] = value["rating"]
+    if value.get("label"):
+        if value["label"] not in db.LABELS:
+            raise ValueError("Bad colour label.")
+        rule["label"] = value["label"]
+    if not any(k in rule for k in ("words", "look", "people", "tag", "kind", "start", "end", "country", "favorite",
+                                   "rating", "label")):
         raise ValueError("Give the smart album at least one rule, like a person, words or dates.")
     return rule
 
@@ -117,6 +126,13 @@ def to_filter(rule: dict, f: db.Filter, content_search) -> tuple[db.Filter, bool
         g.city = rule.get("city") or None
     if rule.get("favorite"):
         g.favorite = True
+    if rule.get("rating"):
+        g.rating = max(f.rating or 0, rule["rating"])
+    if rule.get("label"):
+        if f.label and f.label != rule["label"]:
+            g.ids = []
+            return g, False
+        g.label = rule["label"]
     if rule.get("hide_archived") and not f.archived:
         g.archived = "hide"
     waiting = False

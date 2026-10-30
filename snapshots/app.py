@@ -132,10 +132,10 @@ def create_app(cfg: Config, start_worker: bool = True) -> FastAPI:
         return response
 
     from . import (routes_auth, routes_collections, routes_explore, routes_imports, routes_library, routes_organize,
-                   routes_people, routes_settings, routes_social, routes_tools)
+                   routes_people, routes_reports, routes_settings, routes_social, routes_tools)
 
     for module in (routes_auth, routes_library, routes_collections, routes_people, routes_explore, routes_organize,
-                   routes_social, routes_settings, routes_imports, routes_tools):
+                   routes_social, routes_settings, routes_imports, routes_tools, routes_reports):
         app.include_router(module.router(ctx))
 
     @app.get("/", include_in_schema=False)

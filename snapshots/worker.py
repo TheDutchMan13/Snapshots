@@ -23,6 +23,7 @@ from .backup import BackupJob
 from .clipsearch import ClipJob
 from .faces import FacesJob
 from .xmp import XmpJob
+from .health import HealthJob
 from .linking import MotionJob
 from .offsite import OffsiteJob
 from .ocr import OcrJob
@@ -40,6 +41,7 @@ class Worker:
         self.motion = MotionJob(cfg)
         self.faces = FacesJob(cfg)
         self.xmp = XmpJob(cfg)
+        self.health = HealthJob(cfg)
         self.quality = QualityJob(cfg)
         self.clip = ClipJob(cfg)
         self.ocr = OcrJob(cfg)
@@ -69,6 +71,7 @@ class Worker:
     def stop(self, timeout: float = 10) -> None:
         self._stopping = True
         self.offsite.stop()
+        self.health.stop()
         self._wake.set()
         if self._thread:
             self._thread.join(timeout)
@@ -105,6 +108,7 @@ class Worker:
             "backup": dict(self.backup.state, enabled=bool(self.cfg.backup_hours and self.cfg.backup_hours > 0)),
             "offsite": dict(self.offsite.state, enabled=self.offsite.enabled()),
             "xmp": dict(self.xmp.state, enabled=self.cfg.xmp_sidecars),
+            "health": dict(self.health.state, running=self.health.running()),
         }
 
     def _jobs(self):
@@ -112,6 +116,7 @@ class Worker:
         return [
             (self.backup, bool(self.cfg.backup_hours and self.cfg.backup_hours > 0)),
             (self.offsite, self.offsite.enabled()),
+            (self.health, bool(self.cfg.health_check_days and self.cfg.health_check_days > 0)),
             (self.motion, True),
             (self.xmp, self.cfg.xmp_sidecars),
             (self.places, self.cfg.places),

@@ -14,7 +14,8 @@ people's names, favourites, and changed dates and places are not locked inside S
 * Items in someone's locked folder never get a sidecar.
 
 Fields: dc:description, dc:subject (tags), Iptc4xmpExt:PersonInImage and lr:hierarchicalSubject
-("People|Name") for named people, xmp:Rating 5 for favourites, exif:DateTimeOriginal and
+("People|Name") for named people, xmp:Rating for stars (5 for a favourite without stars), xmp:Label for
+colour labels, exif:DateTimeOriginal and
 photoshop:DateCreated, exif:GPSLatitude and exif:GPSLongitude.
 
 When a new file arrives with a sidecar already beside it, its description, tags, date and position (when
@@ -31,6 +32,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import libraries, media
+from .db import LABELS
 
 log = logging.getLogger("snapshots.xmp")
 
@@ -57,7 +59,7 @@ def q(name: str) -> str:
     return f"{{{NS[prefix]}}}{local}"
 
 
-OWNED = ["dc:description", "dc:subject", "Iptc4xmpExt:PersonInImage", "lr:hierarchicalSubject", "xmp:Rating",
+OWNED = ["dc:description", "dc:subject", "Iptc4xmpExt:PersonInImage", "lr:hierarchicalSubject", "xmp:Rating", "xmp:Label",
          "exif:DateTimeOriginal", "photoshop:DateCreated", "exif:GPSLatitude", "exif:GPSLongitude",
          "snapshots:Favorite", "snapshots:Written"]
 
@@ -144,8 +146,8 @@ def _gps(value: str) -> float | None:
 
 def read(path: Path) -> dict:
     """What a sidecar says: description, tags, people, rating, date, lat, lon, and whether Snapshots wrote it."""
-    out = {"description": None, "tags": [], "people": [], "rating": None, "taken": None, "lat": None, "lon": None,
-           "ours": False}
+    out = {"description": None, "tags": [], "people": [], "rating": None, "label": None, "taken": None,
+           "lat": None, "lon": None, "ours": False}
     root = _parse(path)
     if root is None:
         return out
@@ -172,6 +174,9 @@ def read(path: Path) -> dict:
                 out["rating"] = int(float(r[0]))
             except ValueError:
                 pass
+        lab = _values(desc, "xmp:Label")
+        if lab and out["label"] is None and lab[0].strip().lower() in LABELS:
+            out["label"] = lab[0].strip().lower()
         for key in ("exif:DateTimeOriginal", "photoshop:DateCreated", "xmp:CreateDate"):
             v = _values(desc, key)
             if v and out["taken"] is None:
@@ -226,11 +231,16 @@ def _set_fields(desc, meta: dict) -> None:
     if meta.get("people"):
         _bag(desc, "Iptc4xmpExt:PersonInImage", meta["people"])
         _bag(desc, "lr:hierarchicalSubject", [f"People|{p}" for p in meta["people"]])
-    if meta.get("favorite"):
+    if meta.get("rating"):
+        ET.SubElement(desc, q("xmp:Rating")).text = str(meta["rating"])
+    elif meta.get("flag") == -1:
+        ET.SubElement(desc, q("xmp:Rating")).text = "-1"
+    elif meta.get("favorite"):
         ET.SubElement(desc, q("xmp:Rating")).text = "5"
+    if meta.get("favorite"):
         ET.SubElement(desc, q("snapshots:Favorite")).text = "True"
-    elif meta.get("keep_rating") is not None:
-        ET.SubElement(desc, q("xmp:Rating")).text = str(meta["keep_rating"])
+    if meta.get("label"):
+        ET.SubElement(desc, q("xmp:Label")).text = meta["label"].capitalize()
     if meta.get("taken"):
         ET.SubElement(desc, q("exif:DateTimeOriginal")).text = meta["taken"]
         ET.SubElement(desc, q("photoshop:DateCreated")).text = meta["taken"]
@@ -303,7 +313,7 @@ def write(path: Path, meta: dict) -> None:
 def meta_for(conn, asset_id: int) -> dict | None:
     """What Snapshots knows about an item that belongs in its sidecar."""
     a = conn.execute("SELECT id, path, kind, taken_at, taken_at_file, lat, lon, position_edited, description,"
-                     " locked_by, trashed_at FROM assets WHERE id = ?", (asset_id,)).fetchone()
+                     " locked_by, trashed_at, rating, label, flag FROM assets WHERE id = ?", (asset_id,)).fetchone()
     if a is None:
         return None
     tags = [r[0] for r in conn.execute(
@@ -319,14 +329,19 @@ def meta_for(conn, asset_id: int) -> dict | None:
         "tags": tags,
         "people": people,
         "favorite": favorite,
+        "rating": a["rating"] or 0,
+        "label": a["label"],
+        "flag": a["flag"],
         "taken": a["taken_at"],
         "lat": a["lat"], "lon": a["lon"],
-        "extra": bool(a["description"] or tags or people or favorite or a["taken_at_file"] or a["position_edited"]),
+        "extra": bool(a["description"] or tags or people or favorite or a["taken_at_file"] or a["position_edited"]
+                      or a["rating"] or a["label"]),
     }
 
 
 def _digest(meta: dict) -> str:
-    keep = {k: meta.get(k) for k in ("description", "tags", "people", "favorite", "taken", "lat", "lon")}
+    keep = {k: meta.get(k) for k in ("description", "tags", "people", "favorite", "rating", "label", "flag", "taken",
+                                     "lat", "lon")}
     return hashlib.sha1(json.dumps(keep, sort_keys=True).encode(), usedforsecurity=False).hexdigest()[:16]
 
 
@@ -339,6 +354,12 @@ def adopt(conn, asset_id: int, side: dict) -> None:
                      (side["description"], asset_id))
     if side.get("tags"):
         linking.add_keywords(conn, asset_id, side["tags"])
+    if side.get("rating") and 1 <= side["rating"] <= 5:
+        conn.execute("UPDATE assets SET rating = ? WHERE id = ? AND rating = 0", (side["rating"], asset_id))
+    elif side.get("rating") == -1:          # Lightroom and others write a reject as rating -1
+        conn.execute("UPDATE assets SET flag = -1 WHERE id = ? AND flag = 0", (asset_id,))
+    if side.get("label"):
+        conn.execute("UPDATE assets SET label = ? WHERE id = ? AND label IS NULL", (side["label"], asset_id))
 
 
 def sync_one(cfg, conn, asset_id: int) -> str:
@@ -359,10 +380,8 @@ def sync_one(cfg, conn, asset_id: int) -> str:
     if exists:
         side = read(path)
         if not side["ours"]:
-            adopt(conn, asset_id, side)
+            adopt(conn, asset_id, side)            # its stars and label come in too
             meta = meta_for(conn, asset_id)
-            if side.get("rating") is not None and not meta["favorite"]:
-                meta["keep_rating"] = side["rating"]   # someone else's star rating stays
     digest = _digest(meta)
     prev = conn.execute("SELECT xmp_hash FROM assets WHERE id = ?", (asset_id,)).fetchone()[0]
     if exists and prev == digest:

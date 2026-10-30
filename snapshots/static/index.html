@@ -22,6 +22,7 @@
     <a class="nav" href="#/places" data-route="places">Places</a>
     <a class="nav" href="#/map" data-route="map">Map</a>
     <a class="nav" href="#/events" data-route="events">Events</a>
+    <a class="nav" href="#/review" data-route="review">Year in review</a>
     <div class="nav-group" aria-hidden="true">Organise</div>
     <a class="nav" href="#/albums" data-route="albums">Albums</a>
     <a class="nav" href="#/tags" data-route="tags">Tags</a>
@@ -52,6 +53,10 @@
       <label class="sr-only" for="search">Search</label>
       <input id="search" type="search" placeholder="Search people, places, things, text or dates" autocomplete="off">
       <button id="new-items" class="chip" type="button" hidden>New photos · Show</button>
+      <span class="marks-wrap">
+        <button id="marks-btn" class="btn" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="marks-pop" title="Show only photos with some stars, a colour label, or picks">Filter</button>
+        <div id="marks-pop" class="menu marks-pop" hidden></div>
+      </span>
       <button id="show-btn" class="btn" type="button" title="Play these photos full screen">Slideshow</button>
       <button id="select-btn" class="btn" type="button" aria-pressed="false">Select</button>
       <button id="rescan" class="btn" type="button">Rescan</button>
@@ -113,6 +118,7 @@
   </button>
   <div id="v-stage" class="v-stage"></div>
   <div id="v-stack" class="v-stack" hidden></div>
+  <div id="v-marks" class="v-marks" hidden></div>
   <button id="v-next" class="v-nav next" type="button" aria-label="Next">
     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5l7 7-7 7" /></svg>
   </button>
@@ -176,6 +182,29 @@
       <button class="v-btn ed-ratio" type="button" data-ratio="1.7778">16:9</button>
     </div>
   </div>
+</dialog>
+
+<dialog id="compare" class="compare" aria-label="Compare photos">
+  <div class="v-bar">
+    <span class="v-title">Compare</span>
+    <span id="cmp-hint" class="cmp-hint">Scroll to zoom all of them together, drag to look around. Click a photo, then press 0–5, P or X.</span>
+    <button id="cmp-fit" class="v-btn" type="button">Fit</button>
+    <button id="cmp-close" class="v-btn" type="button"><span class="v-label">Close</span></button>
+  </div>
+  <div id="cmp-panes" class="cmp-panes"></div>
+</dialog>
+
+<dialog id="cull" class="cull" aria-label="Cull photos">
+  <div class="v-bar">
+    <span id="cull-title" class="v-title">Cull</span>
+    <span id="cull-tally" class="cmp-hint"></span>
+    <span class="cmp-hint">P pick · X reject · U neither · 0–5 stars · ← → move</span>
+    <button id="cull-auto" class="v-btn" type="button" aria-pressed="true" title="After P or X, go to the next photo">Auto-advance</button>
+    <button id="cull-done" class="v-btn primary" type="button">Done</button>
+  </div>
+  <div id="cull-stage" class="cull-stage"></div>
+  <div id="cull-marks" class="v-marks cull-marks"></div>
+  <div id="cull-strip" class="cull-strip" role="listbox" aria-label="Photos"></div>
 </dialog>
 
 <dialog id="modal" class="modal" aria-labelledby="modal-title"></dialog>

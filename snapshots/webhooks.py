@@ -35,6 +35,7 @@ EVENTS = {
     "import.finished": "An import finished",
     "offsite.finished": "The offsite copy finished",
     "backup.failed": "A database backup failed",
+    "health.finished": "The library health check finished",
 }
 RETRY_AFTER = [30, 120, 600, 3600, 6 * 3600]   # seconds; after the last one a delivery is given up
 MAX_ITEMS = 200                                # items listed in one event (more are sent as more events)

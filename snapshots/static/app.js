@@ -15,6 +15,7 @@ const S = {
   lastMonth: null,
   selecting: false,
   selected: new Set(),
+  marks: { rating: 0, label: "", flag: "" },   // the star / label / pick filter, kept from page to page
   lastClicked: -1,
   viewing: -1,
   detail: null,      // full details of the photo open in the viewer
@@ -224,6 +225,7 @@ function parseRoute() {
       if (S.status && S.status.locked && S.status.locked.open) return { name: "locked", view: "grid", filter: { locked: "true" }, locked: true };
       return { name: "locked", view: "locked" };
     case "activity": return { name: "activity", view: "activity" };
+    case "review": return { name: "review", view: "review", year: /^\d{4}$/.test(parts[1] || "") ? +parts[1] : null };
     case "events":
       if (parts[1] && parts[2]) return { name: "events", view: "grid", filter: { start: parts[1], end: parts[2], archived: "hide" }, event: { start: parts[1], end: parts[2] } };
       return { name: "events", view: "events" };
@@ -246,6 +248,8 @@ function parseRoute() {
       return { name: "map", view: "map" };
     case "cleanup":
       if (parts[1] === "quality") return { name: "cleanup", view: "grid", filter: { quality: "true" }, quality: true };
+      if (parts[1] === "storage") return { name: "cleanup", view: "storage" };
+      if (parts[1] === "health") return { name: "cleanup", view: "health" };
       return { name: "cleanup", view: "cleanup" };
     case "albums":
       if (parts[1] && /^\d+$/.test(parts[1])) return { name: "albums", view: "grid", filter: { album: parts[1] }, album: +parts[1] };
@@ -285,6 +289,9 @@ async function render() {
   $("sentinel").hidden = !grid;
   $("select-btn").hidden = !grid;
   $("show-btn").hidden = !grid || S.route.name === "trash";
+  $("marks-btn").hidden = !grid || S.route.name === "trash" || !!S.route.locked;
+  $("marks-pop").hidden = true;
+  renderMarksFilter();
   $("collection").hidden = grid;
   $("empty").hidden = true;
   $("page-head").replaceChildren();
@@ -308,6 +315,12 @@ async function render() {
       await renderEvents();
     } else if (S.route.view === "cleanup") {
       await renderCleanup();
+    } else if (S.route.view === "storage") {
+      await renderStorage();
+    } else if (S.route.view === "health") {
+      await renderHealth();
+    } else if (S.route.view === "review") {
+      await renderReview();
     } else if (S.route.view === "tags") {
       await renderTags();
     } else if (S.route.view === "map") {
@@ -584,6 +597,9 @@ function filterParams(extra) {
     p.set(k, v);
   }
   if (S.q) p.set("q", S.q);
+  if (S.marks.rating) p.set("rating", S.marks.rating);
+  if (S.marks.label) p.set("label", S.marks.label);
+  if (S.marks.flag) p.set("flag", S.marks.flag);
   return p;
 }
 
@@ -616,6 +632,7 @@ function tile(item, index) {
   }
   if (item.stack && item.stack_count > 1) b.classList.add("stacked");
   if (item.favorite) b.insertAdjacentHTML("beforeend", HEART);
+  tileMarks(b, item);
   b.append(el("span", "check"));
   if (S.selected.has(item.id)) { b.classList.add("selected"); b.setAttribute("aria-pressed", "true"); }
   return b;
@@ -840,6 +857,19 @@ function updateSelection() {
   actions.append(button(allArchived ? "Unarchive" : "Archive", "btn", () => setArchived(ids(), !allArchived)));
   if (chosen().some((it) => it.stack)) actions.append(button("Unstack", "btn", () => unstackPhotos(ids())));
   else if (n >= 2) actions.append(button("Stack", "btn", () => stackPhotos(ids())));
+  actions.append(button("Stars & labels", "btn", () => marksDialog(ids())));
+  const photosChosen = () => chosen().filter((it) => it.id && it.kind === "photo");
+  if (n >= 2 && n <= 4) actions.append(button("Compare", "btn", () => {
+    const p = photosChosen();
+    if (p.length < 2) { flashNote("Compare works with photos: choose 2 to 4 photos."); return; }
+    compareItems(p);
+  }));
+  if (n >= 2) actions.append(button("Cull", "btn", () => {
+    const p = photosChosen();
+    if (!p.length) { flashNote("Culling works with photos."); return; }
+    if (p.length < chosen().length) flashNote("Videos are left out of culling.");
+    cullItems(p);
+  }));
   actions.append(button("Edit details", "btn", () => editDetails(ids())));
   actions.append(button("Export", "btn", () => exportDialog({ ids: ids(), count: n })));
   actions.append(button("Move to Locked", "btn", () => setLocked(ids(), true)));
@@ -848,6 +878,379 @@ function updateSelection() {
 
 $("select-btn").addEventListener("click", () => { if (S.selecting) stopSelecting(); else startSelecting(); });
 $("sel-cancel").addEventListener("click", stopSelecting);
+
+
+// ------------------------------------------------------------------ stars, colour labels, pick and reject
+
+const LABELS = ["red", "yellow", "green", "blue", "purple"];
+const LABEL_NAMES = { red: "Red", yellow: "Yellow", green: "Green", blue: "Blue", purple: "Purple" };
+
+/** The small marks on a tile: stars, a colour dot, pick or reject. */
+function tileMarks(b, item) {
+  b.querySelectorAll(".marks").forEach((m) => m.remove());
+  b.classList.toggle("rejected", item.flag === -1);
+  if (!item.rating && !item.label && !item.flag) return;
+  const m = el("span", "marks");
+  if (item.flag === 1) m.append(el("span", "mark-pick", "✓"));
+  if (item.flag === -1) m.append(el("span", "mark-reject", "✕"));
+  if (item.rating) m.append(el("span", "mark-stars", "★".repeat(item.rating)));
+  if (item.label) {
+    const d = el("span", `mark-dot label-${item.label}`);
+    d.title = `${LABEL_NAMES[item.label]} label`;
+    m.append(d);
+  }
+  b.append(m);
+}
+
+function marksText(item) {
+  const parts = [];
+  if (item.rating) parts.push(plural(item.rating, "star"));
+  if (item.label) parts.push(`${LABEL_NAMES[item.label]} label`);
+  if (item.flag === 1) parts.push("Pick");
+  if (item.flag === -1) parts.push("Reject");
+  return parts.join(" · ");
+}
+
+/** Change stars (rating), label ("" removes it) or flag (1, -1, 0) of some items, everywhere they show. */
+async function setMarks(ids, change, quiet = false) {
+  try {
+    await post("/api/marks", { ids, ...change });
+  } catch (err) { flashNote(err.message); return false; }
+  const set = new Set(ids);
+  const apply = (it) => {
+    if (change.rating !== undefined) it.rating = change.rating;
+    if (change.label !== undefined) it.label = change.label || null;
+    if (change.flag !== undefined) it.flag = change.flag;
+  };
+  for (const it of S.items) if (set.has(it.id)) apply(it);
+  $("grid").querySelectorAll(".tile").forEach((t) => {
+    const it = S.items.find((x) => x.id === +t.dataset.id);
+    if (it && set.has(it.id)) tileMarks(t, it);
+  });
+  if (S.detail && set.has(S.detail.id)) { apply(S.detail); renderMarksBar(S.detail); }
+  if (!quiet) {
+    const what = change.rating !== undefined ? (change.rating ? plural(change.rating, "star") : "No stars")
+      : change.label !== undefined ? (change.label ? `${LABEL_NAMES[change.label]} label` : "Label removed")
+      : change.flag === 1 ? "Pick" : change.flag === -1 ? "Reject" : "Pick or reject removed";
+    flashNote(ids.length > 1 ? `${what}: ${plural(ids.length, "item")}` : what);
+  }
+  return true;
+}
+
+/** The change a key stands for, Lightroom style: 0-5 stars, 6-9 labels, P pick, X reject, U neither. */
+function markForKey(e, item) {
+  if (e.ctrlKey || e.metaKey || e.altKey) return null;
+  const k = e.key.toLowerCase();
+  if (/^[0-5]$/.test(k)) return { rating: +k };
+  if (/^[6-9]$/.test(k)) {
+    const label = LABELS[+k - 6];
+    return { label: item && item.label === label ? "" : label };   // the same key again removes it
+  }
+  if (k === "p") return { flag: 1 };
+  if (k === "x") return { flag: -1 };
+  if (k === "u") return { flag: 0 };
+  return null;
+}
+
+/** Stars, labels and pick/reject under the photo in the viewer. */
+function renderMarksBar(item, bar = $("v-marks"), after = null) {
+  if (!item || item.locked || S.route.name === "trash") { bar.hidden = true; return; }
+  const set = (change) => setMarks([item.id], change, true).then((ok) => { if (ok && after) after(); });
+  bar.hidden = false;
+  bar.replaceChildren();
+  const stars = el("span", "mk-stars");
+  stars.setAttribute("role", "group");
+  stars.setAttribute("aria-label", "Stars");
+  for (let n = 1; n <= 5; n++) {
+    const b = button("★", "mk-star" + (n <= (item.rating || 0) ? " on" : ""), () => set({ rating: item.rating === n ? 0 : n }));
+    b.title = `${plural(n, "star")} (key ${n}${item.rating === n ? "; again for none" : ""})`;
+    b.setAttribute("aria-pressed", String(n <= (item.rating || 0)));
+    stars.append(b);
+  }
+  const labels = el("span", "mk-labels");
+  labels.setAttribute("role", "group");
+  labels.setAttribute("aria-label", "Colour label");
+  LABELS.forEach((l, i) => {
+    const b = button("", `mk-label label-${l}` + (item.label === l ? " on" : ""), () => set({ label: item.label === l ? "" : l }));
+    b.title = `${LABEL_NAMES[l]}${i < 4 ? ` (key ${i + 6})` : ""}`;
+    b.setAttribute("aria-label", `${LABEL_NAMES[l]} label`);
+    b.setAttribute("aria-pressed", String(item.label === l));
+    labels.append(b);
+  });
+  const flags = el("span", "mk-flags");
+  const pick = button("✓ Pick", "mk-flag pick" + (item.flag === 1 ? " on" : ""), () => set({ flag: item.flag === 1 ? 0 : 1 }));
+  pick.title = "Pick (key P)";
+  pick.setAttribute("aria-pressed", String(item.flag === 1));
+  const rej = button("✕ Reject", "mk-flag reject" + (item.flag === -1 ? " on" : ""), () => set({ flag: item.flag === -1 ? 0 : -1 }));
+  rej.title = "Reject (key X)";
+  rej.setAttribute("aria-pressed", String(item.flag === -1));
+  flags.append(pick, rej);
+  bar.append(stars, labels, flags);
+}
+
+/** Choose stars, a label or pick/reject for the selected items. */
+async function marksDialog(ids) {
+  await modal({
+    title: `Stars and labels for ${plural(ids.length, "item")}`, ok: null, cancel: "Close",
+    build: (body, ctl) => {
+      body.append(el("p", "muted small", "Tip: with items selected, press 0 to 5 for stars, 6 to 9 for a colour label, P to pick, X to reject."));
+      const row = (label, buttons) => { const r = el("div", "mk-row"); r.append(el("span", "mk-name", label), ...buttons); body.append(r); };
+      const done = async (change) => { if (await setMarks(ids, change)) ctl.close(true); };
+      row("Stars", [0, 1, 2, 3, 4, 5].map((n) => button(n ? "★".repeat(n) : "None", "btn small", () => done({ rating: n }))));
+      row("Label", [...LABELS.map((l) => {
+        const b = button("", `mk-label label-${l}`, () => done({ label: l }));
+        b.setAttribute("aria-label", `${LABEL_NAMES[l]} label`);
+        b.title = LABEL_NAMES[l];
+        return b;
+      }), button("None", "btn small", () => done({ label: "" }))]);
+      row("Flag", [button("✓ Pick", "btn small", () => done({ flag: 1 })), button("✕ Reject", "btn small", () => done({ flag: -1 })),
+        button("Neither", "btn small", () => done({ flag: 0 }))]);
+    },
+  });
+}
+
+/** The filter by stars, label and pick/reject, in the header. */
+function renderMarksFilter() {
+  const btn = $("marks-btn");
+  const f = S.marks;
+  const parts = [];
+  if (f.rating) parts.push(`★${f.rating}+`);
+  if (f.label) parts.push(LABEL_NAMES[f.label]);
+  if (f.flag) parts.push({ pick: "Picks", reject: "Rejects", unflagged: "Unflagged" }[f.flag]);
+  btn.textContent = parts.length ? `Filter: ${parts.join(", ")}` : "Filter";
+  btn.classList.toggle("active", parts.length > 0);
+  btn.setAttribute("aria-expanded", String(!$("marks-pop").hidden));
+  const pop = $("marks-pop");
+  pop.replaceChildren();
+  const group = (title, options, key) => {
+    const g = el("div", "mk-row");
+    g.append(el("span", "mk-name", title));
+    for (const [value, text, cls] of options) {
+      const b = button(text, cls || "chip", () => {
+        S.marks[key] = S.marks[key] === value ? (key === "rating" ? 0 : "") : value;
+        renderMarksFilter();
+        if (S.route.view === "grid") { renderHead(); reload(); }
+      });
+      b.setAttribute("aria-pressed", String(S.marks[key] === value));
+      if (cls) { b.setAttribute("aria-label", `${LABEL_NAMES[value]} label`); b.title = LABEL_NAMES[value]; }
+      g.append(b);
+    }
+    pop.append(g);
+  };
+  group("Stars", [[1, "★1+"], [2, "★2+"], [3, "★3+"], [4, "★4+"], [5, "★5"]], "rating");
+  group("Label", LABELS.map((l) => [l, "", `mk-label label-${l}`]), "label");
+  group("Flag", [["pick", "Picks"], ["reject", "Rejects"], ["unflagged", "Neither"]], "flag");
+  const clear = button("Show everything", "btn small", () => {
+    S.marks = { rating: 0, label: "", flag: "" };
+    renderMarksFilter();
+    if (S.route.view === "grid") { renderHead(); reload(); }
+  });
+  clear.disabled = !parts.length;
+  pop.append(clear);
+}
+$("marks-btn").addEventListener("click", (e) => {
+  e.stopPropagation();
+  $("marks-pop").hidden = !$("marks-pop").hidden;
+  renderMarksFilter();
+});
+document.addEventListener("click", (e) => {
+  const pop = $("marks-pop");
+  if (!pop.hidden && !pop.contains(e.target) && e.target !== $("marks-btn")) { pop.hidden = true; renderMarksFilter(); }
+});
+
+// With items selected in a grid, the same keys as in the viewer change all of them.
+document.addEventListener("keydown", (e) => {
+  if (!S.selecting || !S.selected.size || document.querySelector("dialog[open]")) return;
+  if (e.target.closest && e.target.closest("input, textarea, select")) return;
+  const ids = [...S.selected];
+  const first = S.items.find((it) => it.id === ids[0]);
+  const change = markForKey(e, first);
+  if (!change) return;
+  e.preventDefault();
+  if (change.label !== undefined && ids.length > 1 && first && first.label === change.label) change.label = "";
+  setMarks(ids, change);
+});
+
+
+// ------------------------------------------------------------------ compare and cull
+
+const viewUrl = (it) => `/api/assets/${it.id}/view?v=${it.v || ""}`;
+
+/** Two to four photos side by side, zoomed and moved together. */
+function compareItems(items) {
+  const dlg = $("compare");
+  const panes = $("cmp-panes");
+  panes.replaceChildren();
+  panes.dataset.n = items.length;
+  const view = { scale: 1, x: 0, y: 0 };
+  let active = 0;
+  const imgs = [];
+  const apply = () => imgs.forEach((i) => { i.style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.scale})`; });
+  const paneOf = [];
+  const drawInfo = (k) => {
+    const it = items[k];
+    const info = paneOf[k].querySelector(".cmp-info");
+    info.replaceChildren();
+    info.append(el("strong", null, it.filename),
+      el("span", null, [it.width && it.height ? `${it.width} × ${it.height}` : null, fmtSize(it.size)].filter(Boolean).join(" · ")));
+    const marks = marksText(it);
+    if (marks) info.append(el("span", "cmp-marks", marks));
+    const row = el("span", "cmp-actions");
+    row.append(
+      button("✓ Pick", "btn small" + (it.flag === 1 ? " primary" : ""), async (e) => { e.stopPropagation(); if (await setMarks([it.id], { flag: it.flag === 1 ? 0 : 1 }, true)) { it.flag = it.flag === 1 ? 0 : 1; drawInfo(k); } }),
+      button("Keep only this", "btn small", async (e) => {
+        e.stopPropagation();
+        const others = items.filter((x) => x.id !== it.id).map((x) => x.id);
+        if (!window.confirm(`Move the other ${plural(others.length, "photo")} to the trash?`)) return;
+        await moveToTrash(others);
+        dlg.close();
+      }),
+    );
+    info.append(row);
+  };
+  const setActive = (k) => {
+    active = k;
+    paneOf.forEach((p, i) => p.classList.toggle("active", i === k));
+  };
+  items.forEach((it, k) => {
+    const pane = el("div", "cmp-pane");
+    const box = el("div", "cmp-img");
+    const i = new Image();
+    i.src = viewUrl(it);
+    i.alt = it.filename;
+    i.draggable = false;
+    imgs.push(i);
+    box.append(i);
+    pane.append(box, el("div", "cmp-info"));
+    pane.addEventListener("pointerdown", () => setActive(k));
+    paneOf.push(pane);
+    panes.append(pane);
+    drawInfo(k);
+  });
+  setActive(0);
+  // One zoom and one position for all panes.
+  panes.onwheel = (e) => {
+    e.preventDefault();
+    const old = view.scale;
+    view.scale = Math.min(8, Math.max(1, view.scale * (e.deltaY < 0 ? 1.2 : 1 / 1.2)));
+    if (view.scale === 1) { view.x = 0; view.y = 0; }
+    else { view.x *= view.scale / old; view.y *= view.scale / old; }
+    apply();
+  };
+  let drag = null;
+  panes.onpointerdown = (e) => { if (view.scale > 1) { drag = { x: e.clientX - view.x, y: e.clientY - view.y }; panes.setPointerCapture(e.pointerId); } };
+  panes.onpointermove = (e) => { if (drag) { view.x = e.clientX - drag.x; view.y = e.clientY - drag.y; apply(); } };
+  panes.onpointerup = () => { drag = null; };
+  $("cmp-fit").onclick = () => { view.scale = 1; view.x = 0; view.y = 0; apply(); };
+  $("cmp-close").onclick = () => dlg.close();
+  dlg.onkeydown = async (e) => {
+    if (/^[1-4]$/.test(e.key) && e.altKey) { setActive(Math.min(items.length - 1, +e.key - 1)); return; }
+    const it = items[active];
+    const change = markForKey(e, it);
+    if (change) {
+      e.preventDefault();
+      if (await setMarks([it.id], change)) { Object.assign(it, change.label !== undefined ? { label: change.label || null } : change); drawInfo(active); }
+    } else if (e.key === "ArrowRight" || e.key === "Tab") { e.preventDefault(); setActive((active + 1) % items.length); }
+    else if (e.key === "ArrowLeft") { e.preventDefault(); setActive((active + items.length - 1) % items.length); }
+  };
+  apply();
+  dlg.showModal();
+}
+
+/** Go through photos one at a time, picking and rejecting with the keyboard. */
+function cullItems(items) {
+  if (!items.length) return;
+  const dlg = $("cull");
+  let at = 0;
+  let auto = true;
+  const strip = $("cull-strip");
+  strip.replaceChildren();
+  const thumbs = items.map((it, k) => {
+    const b = el("button", "cull-thumb");
+    b.type = "button";
+    b.setAttribute("role", "option");
+    b.append(img(thumbUrl(it.id, it.v), it.filename));
+    b.addEventListener("click", () => show(k));
+    strip.append(b);
+    return b;
+  });
+  const paintThumb = (k) => {
+    const it = items[k];
+    const b = thumbs[k];
+    b.classList.toggle("pick", it.flag === 1);
+    b.classList.toggle("reject", it.flag === -1);
+    b.setAttribute("aria-selected", String(k === at));
+    tileMarks(b, it);
+  };
+  const tally = () => {
+    const picks = items.filter((it) => it.flag === 1).length, rejects = items.filter((it) => it.flag === -1).length;
+    $("cull-tally").textContent = `${at + 1} of ${items.length} · ${plural(picks, "pick")} · ${plural(rejects, "reject")}`;
+  };
+  const show = (k) => {
+    at = Math.max(0, Math.min(items.length - 1, k));
+    const it = items[at];
+    const stage = $("cull-stage");
+    const i = new Image();
+    i.src = viewUrl(it);
+    i.alt = it.filename;
+    stage.replaceChildren(i);
+    if (items[at + 1]) { const pre = new Image(); pre.src = viewUrl(items[at + 1]); }
+    $("cull-title").textContent = it.filename;
+    thumbs.forEach((_, n) => paintThumb(n));
+    thumbs[at].scrollIntoView({ block: "nearest", inline: "center" });
+    drawBar();
+    tally();
+  };
+  const drawBar = () => renderMarksBar(items[at], $("cull-marks"), () => { paintThumb(at); drawBar(); tally(); });
+  const mark = async (change) => {
+    const it = items[at];
+    if (!(await setMarks([it.id], change, true))) return;
+    if (change.rating !== undefined) it.rating = change.rating;
+    if (change.label !== undefined) it.label = change.label || null;
+    if (change.flag !== undefined) it.flag = change.flag;
+    paintThumb(at);
+    drawBar();
+    tally();
+    if (auto && change.flag !== undefined && change.flag !== 0 && at < items.length - 1) show(at + 1);
+  };
+  dlg.onkeydown = (e) => {
+    if (e.key === "ArrowRight") { e.preventDefault(); show(at + 1); return; }
+    if (e.key === "ArrowLeft") { e.preventDefault(); show(at - 1); return; }
+    const change = markForKey(e, items[at]);
+    if (change) { e.preventDefault(); mark(change); }
+  };
+  $("cull-auto").onclick = () => { auto = !auto; $("cull-auto").setAttribute("aria-pressed", String(auto)); };
+  $("cull-done").onclick = async () => {
+    dlg.close();
+    const rejects = items.filter((it) => it.flag === -1).map((it) => it.id);
+    const picks = items.filter((it) => it.flag === 1).map((it) => it.id);
+    if (!rejects.length && !picks.length) return;
+    await modal({
+      title: "Done culling", ok: null, cancel: "Close",
+      build: (body, ctl) => {
+        body.append(el("p", null, `${plural(picks.length, "pick")} and ${plural(rejects.length, "reject")}.`));
+        const row = el("div", "row-actions");
+        if (rejects.length) row.append(button(`Move the ${plural(rejects.length, "reject")} to the trash`, "btn danger", async () => {
+          await moveToTrash(rejects); ctl.close(true);
+        }));
+        if (picks.length && S.route.view === "grid") row.append(button("Select the picks", "btn", () => {
+          if (!S.selecting) startSelecting();
+          S.selected = new Set(picks);
+          $("grid").querySelectorAll(".tile").forEach((t) => {
+            const on = S.selected.has(+t.dataset.id);
+            t.classList.toggle("selected", on);
+            if (on) t.setAttribute("aria-pressed", "true"); else t.removeAttribute("aria-pressed");
+          });
+          updateSelection();
+          ctl.close(true);
+        }));
+        body.append(row, el("p", "muted small", "Rejects stay in the library until you move them to the trash. To see them again later, use Filter, Rejects."));
+      },
+    });
+  };
+  dlg.showModal();
+  show(0);
+}
 
 // ------------------------------------------------------------------ actions on photos
 
@@ -1528,7 +1931,16 @@ async function renderCleanup() {
   const q = el("a", "cleanup-link");
   q.href = "#/cleanup/quality";
   q.append(el("strong", null, "Blurry or dark photos"), el("span", "muted", sum.low_quality ? plural(sum.low_quality, "photo") : "None found"));
-  frag.append(q);
+  const st2 = el("a", "cleanup-link");
+  st2.href = "#/cleanup/storage";
+  st2.append(el("strong", null, "Storage"), el("span", "muted", "Where the space goes"));
+  frag.append(q, st2);
+  if (S.me && S.me.is_admin) {
+    const hl = el("a", "cleanup-link");
+    hl.href = "#/cleanup/health";
+    hl.append(el("strong", null, "Library health"), el("span", "muted", "Check every file for damage"));
+    frag.append(hl);
+  }
 
   const h = el("h2", "section-title", "Duplicates");
   if (sum.groups) h.append(el("span", "muted", `${plural(sum.extra, "extra item")} · ${fmtSize(sum.space)} could be freed`));
@@ -1667,6 +2079,351 @@ function groupCard(g) {
   card.append(head, row, actions);
   draw();
   return card;
+}
+
+
+// ------------------------------------------------------------------ storage report
+
+function bar(fraction, cls = "") {
+  const b = el("span", "meter " + cls);
+  const f = el("span", "meter-fill");
+  f.style.width = `${Math.max(0.5, Math.min(100, fraction * 100)).toFixed(1)}%`;
+  b.append(f);
+  return b;
+}
+
+async function renderStorage() {
+  headRow("Storage", null, [link("Back to Clean up", "#/cleanup", "btn small")]);
+  $("collection").replaceChildren(el("p", "muted", "Adding it all up…"));
+  let s;
+  try { s = await api("/api/storage"); } catch (err) { showEmpty("Something went wrong", err.message); return; }
+  const refresh = button("Count again", "btn small", async () => {
+    refresh.disabled = true;
+    try { await api("/api/storage?fresh=true"); renderStorage(); } catch (err) { flashNote(err.message); refresh.disabled = false; }
+  });
+  headRow("Storage", `${fmtSize(s.total)} of photos and videos`, [refresh, link("Back to Clean up", "#/cleanup", "btn small")],
+    `Counted ${fmtDateTime(s.made_at)}. Locked folders are not included.`);
+  const frag = document.createDocumentFragment();
+
+  const kinds = el("div", "stat-tiles");
+  for (const [key, label] of [["photos", "Photos"], ["raw", "RAW photos"], ["videos", "Videos"]]) {
+    const k = s.kinds[key];
+    if (!k.items && key === "raw") continue;
+    const t = el("div", "stat-tile");
+    t.append(el("span", "stat-label", label), el("strong", "stat-value", fmtSize(k.bytes)), el("span", "muted small", plural(k.items, "item")));
+    t.append(bar(s.total ? k.bytes / s.total : 0));
+    kinds.append(t);
+  }
+  frag.append(kinds);
+
+  const save = el("div", "stat-tiles");
+  const saving = (label, bytes, text, href) => {
+    const t = el(href ? "a" : "div", "stat-tile" + (href ? " link" : ""));
+    if (href) t.href = href;
+    t.append(el("span", "stat-label", label), el("strong", "stat-value", fmtSize(bytes)), el("span", "muted small", text));
+    save.append(t);
+  };
+  saving("In the trash", s.trash.bytes, s.trash.items ? `${plural(s.trash.items, "item")}. Freed when the trash is emptied.` : "The trash is empty.", s.trash.items ? "#/trash" : null);
+  saving("Duplicates", s.duplicates, s.duplicates ? "Could be freed by keeping one of each." : "None found.", s.duplicates ? "#/cleanup" : null);
+  saving("Snapshots' own files", s.data_total, "Thumbnails, converted videos, faces, backups.", null);
+  frag.append(el("h2", "section-title", "Space you could get back"), save);
+
+  // By year: photos and videos stacked in one bar each
+  frag.append(el("h2", "section-title", "By year"));
+  const maxYear = Math.max(1, ...s.years.map((y) => y.photos + y.videos));
+  const years = el("div", "bars");
+  for (const y of [...s.years].reverse()) {
+    const row = el("a", "bar-row");
+    row.href = `#/?q=${y.year}`;
+    row.addEventListener("click", (e) => { e.preventDefault(); $("search").value = y.year; $("search").dispatchEvent(new Event("input")); });
+    const b = el("span", "meter split");
+    const p1 = el("span", "meter-fill");
+    p1.style.width = `${(y.photos / maxYear * 100).toFixed(1)}%`;
+    const p2 = el("span", "meter-fill video");
+    p2.style.width = `${(y.videos / maxYear * 100).toFixed(1)}%`;
+    b.append(p1, p2);
+    row.append(el("span", "bar-name", y.year), b, el("span", "bar-value", `${fmtSize(y.photos + y.videos)} · ${plural(y.items, "item")}`));
+    years.append(row);
+  }
+  const legend = el("p", "legend muted small");
+  legend.append(el("span", "key photos"), " Photos ", el("span", "key videos"), " Videos");
+  frag.append(legend, years);
+
+  frag.append(el("h2", "section-title", "By folder"));
+  const maxF = Math.max(1, ...s.folders.map((f) => f.bytes));
+  const folders = el("div", "bars");
+  for (const f of s.folders) {
+    const row = el("div", "bar-row");
+    row.append(el("span", "bar-name", f.folder), bar(f.bytes / maxF), el("span", "bar-value", `${fmtSize(f.bytes)} · ${plural(f.items, "item")}`));
+    folders.append(row);
+  }
+  frag.append(folders);
+
+  if (s.biggest.length) {
+    frag.append(el("h2", "section-title", "Biggest files"));
+    const list = el("div", "big-files");
+    for (const it of s.biggest) {
+      const a = el("a", "big-file");
+      a.href = `#/folders/${it.path.split("/").slice(0, -1).map(encodeURIComponent).join("/")}`;
+      a.title = it.path;
+      a.append(img(thumbUrl(it.id, it.v), "", "big-thumb"));
+      const t = el("span", "big-text");
+      t.append(el("strong", null, it.filename), el("span", "muted small", `${fmtSize(it.size)} · ${fmtDay(it.taken_at, { day: "numeric", month: "short", year: "numeric" })}${it.kind === "video" ? " · video" : ""}`));
+      a.append(t);
+      list.append(a);
+    }
+    frag.append(list);
+  }
+
+  frag.append(el("h2", "section-title", "Snapshots' own files"));
+  const data = el("div", "bars");
+  const dataNames = { thumbnails: "Thumbnails", previews: "Previews", videos: "Converted videos", faces: "Face pictures",
+    edited: "Edited copies", motion: "Live Photo clips", models: "Search and face models", places: "Place names",
+    backups: "Database backups", exports: "Exports", database: "Database" };
+  const maxD = Math.max(1, ...Object.values(s.data));
+  for (const [k, v] of Object.entries(s.data).sort((a, b) => b[1] - a[1])) {
+    if (!v) continue;
+    const row = el("div", "bar-row");
+    row.append(el("span", "bar-name", dataNames[k] || k), bar(v / maxD), el("span", "bar-value", fmtSize(v)));
+    data.append(row);
+  }
+  frag.append(data, el("p", "muted small", `Converted videos are kept up to ${fmtSize(s.video_cache_limit)}; the oldest are removed after that. Thumbnails and previews are made again if deleted.`));
+
+  frag.append(el("h2", "section-title", "Drives"));
+  const disks = el("div", "bars");
+  for (const d of s.disks) {
+    const row = el("div", "bar-row");
+    if (!d.available) { row.append(el("span", "bar-name", d.label), el("span", "muted small", "Not connected")); disks.append(row); continue; }
+    const used = d.used / d.total;
+    row.append(el("span", "bar-name", d.label), bar(used, used > 0.9 ? "warn" : ""), el("span", "bar-value", `${fmtSize(d.free)} free of ${fmtSize(d.total)}`));
+    disks.append(row);
+  }
+  frag.append(disks);
+  $("collection").replaceChildren(frag);
+}
+
+// ------------------------------------------------------------------ library health
+
+const HEALTH_NAMES = {
+  damaged: ["Damaged", "The file's content changed although nothing saved it: disk damage, or a bad copy."],
+  unreadable: ["Can't be read", "Windows reported an error reading the file."],
+  missing: ["Missing", "The file is gone from its folder. If the offsite copy has it, Snapshots keeps the item for a week so it can be put back."],
+  changed: ["Saved again", "Another program changed the file since the last scan. Not a problem: Rescan reads it again."],
+  unavailable: ["Drive not connected", "These files' drive wasn't connected, so they weren't checked."],
+};
+
+let healthTimer = null;
+async function renderHealth() {
+  clearTimeout(healthTimer);
+  let st;
+  try { st = await api("/api/library-health"); } catch (err) { showEmpty("Library health", err.message); return; }
+  if (S.route.view !== "health") return;
+  const last = st.last;
+  const actions = [];
+  if (st.running) actions.push(button("Stop", "btn small", async () => { try { await post("/api/library-health/stop"); } catch (_) { /* ignore */ } renderHealth(); }));
+  else actions.push(button(last ? "Check again" : "Check now", "btn small primary", async () => {
+    try { await post("/api/library-health/run"); renderHealth(); } catch (err) { flashNote(err.message); }
+  }));
+  actions.push(link("Back to Clean up", "#/cleanup", "btn small"));
+  headRow("Library health", null, actions, "Reads every photo and video again and compares it with the checksum Snapshots stored, to find files damaged on disk before your backups copy the damage. Nothing is changed.");
+  const frag = document.createDocumentFragment();
+  if (st.running) {
+    const p = st.progress;
+    const box = el("div", "health-run");
+    box.append(el("strong", null, `Checking… ${fmtInt(p.done)} of ${fmtInt(p.total)}`), bar(p.total ? p.done / p.total : 0),
+      el("span", "muted small", `${fmtSize(p.bytes)} read. You can keep using Snapshots meanwhile.`));
+    frag.append(box);
+    healthTimer = setTimeout(() => { if (S.route.view === "health") renderHealth(); }, 1500);
+  }
+  if (st.progress.message) frag.append(el("p", "form-error", st.progress.message));
+  if (last && last.finished_at) {
+    const verdict = el("div", "health-verdict " + (last.problems ? "bad" : "good"));
+    verdict.append(el("strong", null, last.problems ? `${plural(last.problems, "problem")} found` : "Every file is as it should be"),
+      el("span", "muted small", `${fmtInt(last.checked)} of ${fmtInt(last.total)} files checked (${fmtSize(last.bytes)}), ${fmtDateTime(last.finished_at)}${last.stopped ? ". Stopped before the end." : "."}`));
+    if (last.locked_problems) verdict.append(el("span", "muted small", `And ${plural(last.locked_problems, "problem")} in someone's locked folder, not listed here.`));
+    frag.append(verdict);
+    const chips = el("div", "tabs");
+    const counts = last.counts;
+    for (const k of ["damaged", "unreadable", "missing", "changed", "unavailable"]) {
+      if (!counts[k]) continue;
+      const b = button(`${HEALTH_NAMES[k][0]} (${counts[k]})`, "tab", () => { S.healthStatus = S.healthStatus === k ? null : k; renderHealth(); });
+      b.setAttribute("aria-pressed", String(S.healthStatus === k));
+      chips.append(b);
+    }
+    if (chips.children.length) frag.append(chips);
+    const list = el("div", "health-list");
+    frag.append(list);
+    const more = button("Show more", "btn", () => load());
+    more.hidden = true;
+    frag.append(more);
+    let offset = 0;
+    const load = async () => {
+      const q = new URLSearchParams({ offset, limit: 50 });
+      if (S.healthStatus) q.set("status", S.healthStatus);
+      let page;
+      try { page = await api(`/api/library-health/issues?${q}`); } catch (err) { flashNote(err.message); return; }
+      for (const i of page.issues) list.append(healthRow(i));
+      offset = page.next || offset;
+      more.hidden = !page.next;
+    };
+    load();
+  } else if (!st.running) {
+    frag.append(el("p", "muted", "No check has been made yet. A check reads every file once, so it takes a while on a big library."));
+  }
+  const sched = el("div", "health-sched");
+  const [w, days] = field("Check by itself every (days, 0 for only when you ask)", { type: "number", min: "0", max: "365", step: "1", value: String(st.days || 0) });
+  sched.append(w, button("Save", "btn small", async () => {
+    try { await api("/api/library-health/settings", { method: "PUT", json: { days: Number(days.value || 0) } }); flashNote("Saved"); }
+    catch (err) { flashNote(err.message); }
+  }));
+  frag.append(el("h2", "section-title", "Schedule"), sched);
+  if (!st.offsite_folder) frag.append(el("p", "muted small", "Tip: with an offsite copy to a folder (Settings), a damaged file can be put back from the copy here with one click."));
+  $("collection").replaceChildren(frag);
+}
+
+function healthRow(i) {
+  const row = el("div", "health-row " + i.status);
+  const it = i.item;
+  row.append(img(thumbUrl(it.id, it.v), "", "big-thumb"));
+  const t = el("div", "big-text");
+  t.append(el("strong", null, it.filename), el("span", "muted small", it.path),
+    el("span", "health-status", `${HEALTH_NAMES[i.status][0]}: ${i.detail || HEALTH_NAMES[i.status][1]}`));
+  row.append(t);
+  if (i.restorable) {
+    row.append(button("Put back the good copy", "btn small primary", async (e) => {
+      e.target.disabled = true;
+      try { const r = await post(`/api/library-health/restore/${it.id}`); flashNote(r.message); row.remove(); }
+      catch (err) { flashNote(err.message); e.target.disabled = false; }
+    }));
+  }
+  return row;
+}
+
+// ------------------------------------------------------------------ year in review
+
+async function renderReview() {
+  const info = await api("/api/review");
+  if (!info.years.length) { headRow("Year in review"); showEmpty("No photos yet", "Your best photos of each year will show up here."); return; }
+  const year = S.route.year || (info.years.find((y) => y.year < new Date().getFullYear()) || info.years[0]).year;
+  const count = S.reviewCount || 60;
+  const yearsRow = el("div", "tabs review-years");
+  for (const y of info.years.slice(0, 12)) {
+    const b = link(String(y.year), `#/review/${y.year}`, "tab");
+    b.setAttribute("aria-pressed", String(y.year === year));
+    yearsRow.append(b);
+  }
+  headRow(`${year} in review`, null, []);
+  $("page-head").append(yearsRow);
+  $("collection").replaceChildren(el("p", "muted", "Choosing the best photos…"));
+  let pick;
+  try { pick = await post(`/api/review/${year}`, { count }); } catch (err) { showEmpty("Something went wrong", err.message); return; }
+  if (S.route.view !== "review") return;
+  let items = pick.items;
+  const facts = [plural(pick.photos, "photo") + ` from ${year}`];
+  if (pick.places.length) facts.push(pick.places.slice(0, 3).join(", "));
+  if (pick.people.length) facts.push("with " + pick.people.slice(0, 4).join(", "));
+  const frag = document.createDocumentFragment();
+  frag.append(el("p", "muted", `${facts.join(" · ")}. Favourites, stars, picks and named people count most; near-copies and bursts are left out, and the whole year gets a share. Click × to leave a photo out.`));
+  const bar1 = el("div", "row-actions");
+  const sizeSel = el("select");
+  for (const n of [30, 60, 100]) { const o = el("option", null, `${n} photos`); o.value = n; o.selected = n === count; sizeSel.append(o); }
+  sizeSel.addEventListener("change", () => { S.reviewCount = +sizeSel.value; renderReview(); });
+  const play = button("Play", "btn primary", () => {
+    S.items = items.slice(); S.done = true;
+    startSlideshow(0);
+  });
+  const album = button("Save as album", "btn", async () => {
+    const name = await askText("Save as album", "Album name", `${year} in review`, "Save");
+    if (!name) return;
+    try {
+      const a = await post("/api/albums", { name });
+      await post(`/api/albums/${a.id}/add`, { ids: items.map((x) => x.id) });
+      flashNote(`Album “${name}” saved with ${plural(items.length, "photo")}`);
+      location.hash = `#/albums/${a.id}`;
+    } catch (err) { flashNote(err.message); }
+  });
+  const video = button("Make a video", "btn", () => reviewVideo(year, items, info));
+  if (!info.ffmpeg) { video.disabled = true; video.title = "Making a video needs ffmpeg"; }
+  bar1.append(sizeSel, play, album, video);
+  frag.append(bar1);
+  const grid = el("div", "review-grid");
+  const draw = () => {
+    grid.replaceChildren();
+    items.forEach((it, k) => {
+      const cell = el("div", "review-cell");
+      const open = el("button", "review-img");
+      open.type = "button";
+      open.append(img(thumbUrl(it.id, it.v), it.filename));
+      open.title = `${it.filename} · ${fmtDateTime(it.taken_at)}`;
+      open.addEventListener("click", () => { S.items = items.slice(); S.done = true; S.viewing = k; viewer.showModal(); showItem(k); });
+      const x = button("×", "review-x", () => { items = items.filter((y) => y.id !== it.id); draw(); });
+      x.setAttribute("aria-label", `Leave out ${it.filename}`);
+      cell.append(open, x);
+      grid.append(cell);
+    });
+  };
+  draw();
+  frag.append(grid);
+  $("collection").replaceChildren(frag);
+}
+
+async function reviewVideo(year, items, info) {
+  const photos = items.filter((x) => x.kind === "photo");
+  await modal({
+    title: `${year} in review: a video`, ok: "Make the video",
+    build: (body, ctl) => {
+      body.append(el("p", "muted", `${plural(photos.length, "photo")}, each slowly zooming, with a title at the start and the end. Made on this computer; it can take a few minutes.`));
+      const [tw, title] = field("Title", { value: String(year), maxLength: 100 });
+      const grid = el("div", "rule-grid");
+      const sWrap = el("label", "field");
+      sWrap.append(el("span", null, "Size"));
+      const size = el("select");
+      [["720p", "720p (smaller file)"], ["1080p", "1080p (sharper)"]].forEach(([v, t]) => { const o = el("option", null, t); o.value = v; size.append(o); });
+      sWrap.append(size);
+      const [secW, secs] = field("Seconds for each photo", { type: "number", min: "2", max: "10", step: "0.5", value: String(info.seconds || 4) });
+      grid.append(sWrap, secW);
+      const saveWrap = el("label", "field inline");
+      const save = el("input");
+      save.type = "checkbox";
+      saveWrap.append(save, el("span", null, "Also add it to the library (folder “Year in review”)"));
+      const prog = el("div", "export-progress");
+      prog.hidden = true;
+      body.append(tw, grid, saveWrap, prog);
+      const length = () => Math.round(6 + photos.length * Number(secs.value || 4));
+      const est = el("p", "muted small");
+      const upd = () => { est.textContent = `About ${Math.floor(length() / 60)}:${String(length() % 60).padStart(2, "0")} long.`; };
+      secs.addEventListener("input", upd);
+      upd();
+      body.append(est);
+      return { submit: async () => {
+        const job = await post(`/api/review/${year}/video`, { ids: photos.map((x) => x.id), size: size.value, seconds: Number(secs.value || 4), title: title.value.trim(), save: save.checked });
+        prog.hidden = false;
+        const meter = bar(0);
+        const text = el("span", "muted small", "Starting…");
+        prog.replaceChildren(text, meter);
+        for (;;) {
+          await new Promise((r) => setTimeout(r, 1000));
+          const t = await api(`/api/tasks/${job.id}`);
+          meter.firstChild.style.width = `${(t.progress * 100).toFixed(1)}%`;
+          text.textContent = t.done ? "Done" : `Making the video… ${Math.round(t.progress * 100)}%`;
+          if (t.done) {
+            if (t.error) throw new Error(t.error);
+            const a = el("a", "btn primary", "Download the video");
+            a.href = `/api/tasks/${job.id}/file`;
+            a.download = t.result.name;
+            prog.replaceChildren(el("p", null, `${t.result.seconds} seconds, ${t.result.photos} photos.${t.result.id ? " Added to the library too." : ""}`), a);
+            ctl.error("");
+            const form = body.closest("form");
+            const again = form && form.querySelector("button[type=submit]");
+            if (again) again.hidden = true;
+            const cancel = form && [...form.querySelectorAll(".modal-foot .btn")].find((b) => b.type !== "submit");
+            if (cancel) cancel.textContent = "Close";
+            return undefined;   // stay open, so the download button can be used
+          }
+        }
+      } };
+    },
+  });
 }
 
 // ------------------------------------------------------------------ status bar
@@ -1875,6 +2632,7 @@ function showPicture(item) {
     if (item.projection || wide) stage.append(panoButton(item));
   }
   renderDetails(item);
+  renderMarksBar(item);
 }
 
 /** Live Photos and motion photos: play the moment around the photo. */
@@ -2106,6 +2864,10 @@ viewer.addEventListener("keydown", (e) => {
   if ($("v-stage").querySelector(".pano-view") && e.key.startsWith("Arrow")) return;  // looking around
   if (e.key === "ArrowLeft") { e.preventDefault(); step(-1); }
   else if (e.key === "ArrowRight") { e.preventDefault(); step(1); }
+  else if (S.detail && !S.detail.locked && S.route.name !== "trash") {
+    const change = markForKey(e, S.detail);
+    if (change) { e.preventDefault(); setMarks([S.detail.id], change); }
+  }
 });
 viewer.addEventListener("close", () => {
   $("v-stage").replaceChildren(); // stops any playing video

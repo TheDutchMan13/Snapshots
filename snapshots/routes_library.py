@@ -77,12 +77,15 @@ def make_filter_params(cfg):
         stacks: bool = False,
         bbox: str | None = Query(None, pattern=BBOX_PATTERN),
         locked: bool = False,
+        rating: int = Query(0, ge=0, le=5),
+        label: str = Query("", pattern="^(red|yellow|green|blue|purple)?$"),
+        flag: str = Query("", pattern="^(pick|reject|unflagged)?$"),
     ) -> db.Filter:
         return db.Filter(q=q, kind=kind, favorite=favorite, trashed=trashed, album=album, person=person,
                          country=country, state=state, city=city, start=start, end=end,
                          low_quality=analysis.low_quality_sql(cfg) if quality else None,
                          archived=archived, tag=tag, folder=folder, stacks=stacks, bbox=_bbox(bbox),
-                         locked=locked)
+                         locked=locked, rating=rating, label=label, flag=flag)
 
     return filter_params
 
@@ -111,6 +114,9 @@ def asset_dict(row, score: float | None = None) -> dict:
         "edited": bool(row["edits"]),
         "projection": row["projection"],
         "locked": row["locked_by"] is not None,
+        "rating": row["rating"] or 0,
+        "label": row["label"],
+        "flag": row["flag"] or 0,
         "v": db.version(row),  # changes when the file (or its edit) changes, so browsers refetch
     }
     if score is not None:

@@ -209,7 +209,7 @@ def router(ctx) -> APIRouter:
         path = cfg.export_dir / result["file"]
         if not path.is_file():
             raise HTTPException(404, "This file has expired. Export again.")
-        return FileResponse(path, media_type="application/pdf",
+        return FileResponse(path, media_type="video/mp4" if path.suffix == ".mp4" else "application/pdf",
                             headers={"Content-Disposition": _disposition(result["name"]), "Cache-Control": "no-store"})
 
     # ------------------------------------------------------------ trimming videos and stills

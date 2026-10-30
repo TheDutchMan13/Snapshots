@@ -184,6 +184,10 @@ def router(ctx) -> APIRouter:
             parts.append("in " + ", ".join(x for x in (rule.get("city"), rule.get("state"), rule["country"]) if x))
         if rule.get("favorite"):
             parts.append("your favourites")
+        if rule.get("rating"):
+            parts.append(f"{rule['rating']} stars or more" if rule["rating"] < 5 else "5 stars")
+        if rule.get("label"):
+            parts.append(f"{rule['label']} label")
         if rule.get("hide_archived"):
             parts.append("not archived")
         return "; ".join(parts)

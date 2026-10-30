@@ -39,6 +39,13 @@ class LockBody(Ids):
     value: bool = True
 
 
+class MarkBody(Ids):
+    """Stars, a colour label and a pick/reject flag. Only the fields given change."""
+    rating: int | None = Field(None, ge=0, le=5)
+    label: str | None = Field(None, pattern="^(red|yellow|green|blue|purple)?$")   # "" removes it
+    flag: int | None = Field(None, ge=-1, le=1)
+
+
 class PinBody(BaseModel):
     pin: str = Field(min_length=1, max_length=64)
 
@@ -57,6 +64,31 @@ VISIBLE = f"a.trashed_at IS NULL AND a.archived_at IS NULL AND {db.LIVE_PART_HID
 def router(ctx) -> APIRouter:
     cfg = ctx.cfg
     r = APIRouter()
+
+    # ------------------------------------------------------------ stars, colour labels, pick/reject
+
+    @r.post("/api/marks")
+    def set_marks(body: MarkBody, request: Request):
+        current_user(request)
+        sets, params = [], []
+        if body.rating is not None:
+            sets.append("rating = ?")
+            params.append(body.rating)
+        if body.label is not None:
+            sets.append("label = ?")
+            params.append(body.label or None)
+        if body.flag is not None:
+            sets.append("flag = ?")
+            params.append(body.flag)
+        if not sets:
+            raise HTTPException(400, "Nothing to change.")
+        with db.session(cfg.db_path) as conn:
+            ids = db.open_ids(conn, body.ids)
+            for start in range(0, len(ids), 900):
+                chunk = ids[start:start + 900]
+                conn.execute(f"UPDATE assets SET {', '.join(sets)} WHERE id IN ({','.join('?' * len(chunk))})",
+                             params + chunk)
+        return {"updated": len(ids)}
 
     # ------------------------------------------------------------ archive
 

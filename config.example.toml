@@ -89,3 +89,20 @@ search_threads = 2
 # offsite_target = 'E:\Photo copy'          # or "b2-crypt:photos" (rclone), or 'E:\restic-repo' (restic)
 # offsite_hours = 24
 # offsite_password_file = 'C:\Users\me\restic-password.txt'   # restic only
+
+# Ask "Same person?" about groups of faces at least this alike (0 turns the questions off).
+# face_suggest_threshold = 0.30
+
+# Write descriptions, tags, people, stars, labels and changed dates and places into .xmp files
+# beside the photos, for Lightroom, digiKam, darktable and Immich. Also set in the app: Settings.
+# xmp_sidecars = false
+
+# Where uploads are filed, by the date taken. You can use {year} {month} {monthname} {day} {date}
+# {camera} {type} (Photos or Videos) and {user} (who uploaded it).
+# upload_template = "Uploads/{year}/{month}"
+
+# Check every file for damage this often, in days (0: only when you ask, in Clean up, Library health).
+# health_check_days = 0
+
+# Year in review videos: how many seconds each photo is shown.
+# review_seconds = 4

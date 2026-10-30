@@ -123,6 +123,19 @@ jobs:
               if ($off.last -and -not $off.running) { break }
               Start-Sleep -Seconds 1
             }
+            # 0.9: stars, the library health check, the storage report, the year in review, the QR code script
+            Invoke-RestMethod -Method Post "$base/api/marks" -Body '{"ids": [1], "rating": 4, "label": "green"}' `
+              -ContentType 'application/json' -Headers $hdr -WebSession $web | Out-Null
+            $starred = (Invoke-RestMethod "$base/api/assets?rating=4" -WebSession $web).items.Count
+            Invoke-RestMethod -Method Post "$base/api/library-health/run" -Headers $hdr -WebSession $web | Out-Null
+            for ($i = 0; $i -lt 60; $i++) {
+              $hc = Invoke-RestMethod "$base/api/library-health" -WebSession $web
+              if ($hc.last.finished_at -and -not $hc.running) { break }
+              Start-Sleep -Seconds 1
+            }
+            $store = Invoke-RestMethod "$base/api/storage?fresh=true" -WebSession $web
+            $years = (Invoke-RestMethod "$base/api/review" -WebSession $web).years
+            $qr = Invoke-WebRequest "$base/static/vendor/qrcode.js" -WebSession $web -UseBasicParsing
           }
           Get-Process -Name Snapshots -ErrorAction SilentlyContinue | Stop-Process -Force
           Write-Host '--- exe output ---'
@@ -149,8 +162,13 @@ jobs:
           if (-not (Test-Path (Join-Path $copyTo 'Library\a.jpg')) -or -not (Test-Path (Join-Path $copyTo 'Database\snapshots.db'))) {
             throw "The offsite copy was not made: $($off | ConvertTo-Json -Compress)"
           }
+          if ($starred -ne 1)            { throw "Stars were not saved: $starred photos with 4 stars." }
+          if (-not $hc.last.finished_at -or $hc.last.problems -ne 0 -or $hc.last.checked -lt 2) { throw "The library health check failed: $($hc | ConvertTo-Json -Compress -Depth 4)" }
+          if ($store.kinds.photos.items -lt 1 -or -not $store.disks[0].available) { throw "The storage report failed: $($store | ConvertTo-Json -Compress -Depth 3)" }
+          if (-not $years -or $years.Count -lt 1) { throw 'The year in review found no years.' }
+          if ($qr.StatusCode -ne 200)    { throw 'The QR code script for two-step login is missing from the exe.' }
           Write-Host "Video converting: ffmpeg $($enc.ffmpeg), encoder $($enc.using)"
-          Write-Host "Smoke test passed: $($status.photos) photos indexed (one RAW), login required, HEIC and RAW support present, map files served, editing, backups, API keys, smart albums, exports, the photo book and the offsite copy work."
+          Write-Host "Smoke test passed: $($status.photos) photos indexed (one RAW), login required, HEIC and RAW support present, map files served, editing, backups, API keys, smart albums, exports, the photo book, the offsite copy, stars, the health check, the storage report and the year in review work."
 
       - name: Smoke test the app window
         shell: pwsh

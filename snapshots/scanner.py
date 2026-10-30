@@ -379,6 +379,10 @@ class Scanner:
                 )
                 state.skipped_removals = len(gone) + len(kept)
                 gone = []
+            if gone:
+                from .health import awaiting_restore
+                waiting = awaiting_restore(cfg, conn)
+                gone = [p for p in gone if existing[p]["id"] not in waiting]
             for path in gone:
                 delete_asset_row(cfg, conn, existing[path]["id"])
                 state.removed += 1
