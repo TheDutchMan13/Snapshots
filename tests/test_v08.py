@@ -191,8 +191,8 @@ def test_identical_files_and_strictness(tmp_path):
     g = c.get("/api/cleanup/groups", params={"kind": "identical"}).json()["groups"]
     assert len(g) == 2 and all(x["kind"] == "identical" for x in g)
     for group in g:
-        keep = next(i for i in group["items"] if i["id"] == group["keep"])
-        assert "Backup" not in keep["path"]        # the first one added is kept
+        # the first one added (lowest id) is kept, whatever order the folders are listed in
+        assert group["keep"] == min(i["id"] for i in group["items"])
         assert group["why"]
     assert any(i["kind"] == "video" for group in g for i in group["items"])
     assert c.get("/api/cleanup/groups", params={"kind": "nonsense"}).status_code == 422
@@ -212,9 +212,10 @@ def test_resized_copy_is_copies_not_identical(tmp_path):
     c, cfg = started(tmp_path, root)
     setup_admin(c)
     wait_scan(c)
-    wait_for(lambda: c.get("/api/cleanup").json()["status"]["pending"] == 0, timeout=60)
-    groups = c.get("/api/cleanup/groups").json()["groups"]
-    g = next(g for g in groups if {i["filename"] for i in g["items"]} == {"big.jpg", "small.jpg"})
+    def pair_found():
+        groups = c.get("/api/cleanup/groups").json()["groups"]
+        return next((g for g in groups if {i["filename"] for i in g["items"]} == {"big.jpg", "small.jpg"}), None)
+    g = wait_for(pair_found, timeout=90)   # the pictures are compared once they are read: wait for that
     assert g["kind"] == "copies"
     assert next(i for i in g["items"] if i["id"] == g["keep"])["filename"] == "big.jpg"
     assert g["why"] == "Most pixels"
