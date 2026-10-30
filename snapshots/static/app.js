@@ -211,14 +211,34 @@ function parseRoute() {
   const parts = path.split("/").filter(Boolean).map((p) => decodeURIComponent(p));
   const params = new URLSearchParams(query || "");
   const un = (x) => (x === "~" ? "" : x);
+  // The timelines hide archived items and show each stack as one photo.
+  const TIMELINE = { archived: "hide", stacks: "true" };
   switch (parts[0] || "") {
-    case "photos": return { name: "photos", view: "grid", filter: { kind: "photo" } };
-    case "videos": return { name: "videos", view: "grid", filter: { kind: "video" } };
+    case "photos": return { name: "photos", view: "grid", filter: { ...TIMELINE, kind: "photo" } };
+    case "videos": return { name: "videos", view: "grid", filter: { ...TIMELINE, kind: "video" } };
     case "favorites": return { name: "favorites", view: "grid", filter: { favorite: "true" }, title: "Favourites" };
     case "trash": return { name: "trash", view: "grid", filter: { trashed: "true" }, title: "Trash" };
+    case "archive": return { name: "archive", view: "grid", filter: { archived: "only" }, archive: true };
     case "events":
-      if (parts[1] && parts[2]) return { name: "events", view: "grid", filter: { start: parts[1], end: parts[2] }, event: { start: parts[1], end: parts[2] } };
+      if (parts[1] && parts[2]) return { name: "events", view: "grid", filter: { start: parts[1], end: parts[2], archived: "hide" }, event: { start: parts[1], end: parts[2] } };
       return { name: "events", view: "events" };
+    case "memories":
+      if (parts[1] && /^\d{4}-\d{2}-\d{2}$/.test(parts[1])) {
+        return { name: "all", view: "grid", filter: { start: `${parts[1]}T00:00:00`, end: `${parts[1]}T23:59:59`, archived: "hide", stacks: "true" }, memory: parts[1] };
+      }
+      return { name: "all", view: "grid", filter: TIMELINE };
+    case "tags":
+      if (parts[1] && /^\d+$/.test(parts[1])) return { name: "tags", view: "grid", filter: { tag: parts[1] }, tag: +parts[1] };
+      return { name: "tags", view: "tags" };
+    case "folders": {
+      const folder = parts.slice(1).join("/");
+      return { name: "folders", view: "grid", filter: { folder }, folder };
+    }
+    case "map":
+      if (parts[1] === "area" && parts[2] && /^-?[\d.]+(,-?[\d.]+){3}$/.test(parts[2])) {
+        return { name: "map", view: "grid", filter: { bbox: parts[2], archived: "hide", stacks: "true" }, area: parts[2] };
+      }
+      return { name: "map", view: "map" };
     case "cleanup":
       if (parts[1] === "quality") return { name: "cleanup", view: "grid", filter: { quality: "true" }, quality: true };
       return { name: "cleanup", view: "cleanup" };
@@ -236,7 +256,7 @@ function parseRoute() {
         return { name: "places", view: "grid", filter, place: filter };
       }
       return { name: "places", view: "places" };
-    default: return { name: "all", view: "grid", filter: {} };
+    default: return { name: "all", view: "grid", filter: TIMELINE };
   }
 }
 
@@ -264,6 +284,8 @@ async function render() {
   $("page-head").replaceChildren();
   $("page-head").hidden = true;
   $("collection").replaceChildren();
+  $("collection").classList.toggle("full", S.route.view === "map");
+  S.folderInfo = null;
 
   try {
     if (grid) {
@@ -279,6 +301,10 @@ async function render() {
       await renderEvents();
     } else if (S.route.view === "cleanup") {
       await renderCleanup();
+    } else if (S.route.view === "tags") {
+      await renderTags();
+    } else if (S.route.view === "map") {
+      await renderMap();
     }
   } catch (err) {
     showEmpty("Something went wrong", err.message);
@@ -309,6 +335,18 @@ async function renderHead() {
   const r = S.route;
   if (S.q && SEARCHABLE.includes(r.name)) {
     await renderSearchHead();
+  } else if (r.memory) {
+    renderMemoryHead(r.memory);
+  } else if (r.name === "all" && !r.memory) {
+    await renderMemoriesStrip();
+  } else if (r.tag) {
+    await renderTagHead(r.tag);
+  } else if (r.folder !== undefined) {
+    await renderFolderHead(r.folder);
+  } else if (r.area) {
+    headRow("Photos in this area", null, [link("Back to the map", "#/map", "btn small")]);
+  } else if (r.archive) {
+    headRow("Archive", null, [], "Archived photos are hidden from All, Photos, Videos, memories and the map. They still show in albums, people, places, folders and search.");
   } else if (r.event) {
     await renderEventHead(r.event);
   } else if (r.quality) {
@@ -509,7 +547,11 @@ async function mergePerson(person) {
 
 function filterParams(extra) {
   const p = new URLSearchParams(extra);
-  for (const [k, v] of Object.entries(S.route.filter || {})) p.set(k, v);
+  for (const [k, v] of Object.entries(S.route.filter || {})) {
+    // A search also finds archived photos, and each photo of a stack on its own.
+    if (S.q && (k === "archived" || k === "stacks")) continue;
+    p.set(k, v);
+  }
   if (S.q) p.set("q", S.q);
   return p;
 }
@@ -529,7 +571,17 @@ function tile(item, index) {
   } else {
     b.append(el("span", "ph", ext(item.filename)));
   }
-  if (item.kind === "video") b.append(el("span", "badge", "Video"));
+  const badges = [];
+  if (item.kind === "video") badges.push("Video");
+  if (item.live) badges.push("Live");
+  if (item.raw && !item.stack) badges.push("RAW");
+  if (item.stack && item.stack_count > 1) badges.push(`${item.stack_count} in stack`);
+  if (badges.length) {
+    const row = el("span", "badges");
+    badges.forEach((t) => row.append(el("span", "badge", t)));
+    b.append(row);
+  }
+  if (item.stack && item.stack_count > 1) b.classList.add("stacked");
   if (item.favorite) b.insertAdjacentHTML("beforeend", HEART);
   b.append(el("span", "check"));
   if (S.selected.has(item.id)) { b.classList.add("selected"); b.setAttribute("aria-pressed", "true"); }
@@ -652,6 +704,14 @@ function updateEmpty() {
   else if (S.q) showEmpty("No matches", S.search && S.search.content
     ? "No names, places or dates match. Try “What's in the photo” above." : "Try a different word, or clear the search.");
   else if (r.quality) showEmpty("Nothing to tidy up", "No blurry or dark photos were found.");
+  else if (r.archive) showEmpty("Nothing archived", "Archive screenshots, receipts and other photos you want to keep but not see in the timeline. Select them and press Archive.");
+  else if (r.tag) showEmpty("Nothing with this tag", "Select photos anywhere in the library and press Tag.");
+  else if (r.folder !== undefined) {
+    if (S.folderInfo && S.folderInfo.folders.length) { $("empty").hidden = true; return; }
+    showEmpty("Nothing in this folder", "");
+  }
+  else if (r.memory) showEmpty("No photos", "They may have been archived or moved to the trash.");
+  else if (r.area) showEmpty("No photos here", "Go back to the map and try a bigger area.");
   else if (r.event) showEmpty("No photos", "The photos of this event may all be in the trash.");
   else if (r.name === "trash") showEmpty("The trash is empty", "Photos you move to the trash appear here until the trash is emptied.");
   else if (r.name === "favorites") showEmpty("No favourites yet", "Open a photo and press Favourite, or select several and press Favourite.");
@@ -731,10 +791,17 @@ function updateSelection() {
       catch (err) { flashNote(err.message); }
     }));
   }
-  const allFav = ids().every((id) => (S.items.find((it) => it.id === id) || {}).favorite);
+  const chosen = () => ids().map((id) => S.items.find((it) => it.id === id) || {});
+  const allFav = chosen().every((it) => it.favorite);
   actions.append(button(allFav ? "Unfavourite" : "Favourite", "btn", () => setFavorite(ids(), !allFav)));
   actions.append(button("Add to album", "btn", () => addToAlbum(ids())));
   if (r.album) actions.append(button("Remove from album", "btn", () => removeFromAlbum(ids())));
+  actions.append(button("Tag", "btn", () => addTag(ids())));
+  if (r.tag) actions.append(button("Remove tag", "btn", () => removeTag(ids())));
+  const allArchived = chosen().every((it) => it.archived);
+  actions.append(button(allArchived ? "Unarchive" : "Archive", "btn", () => setArchived(ids(), !allArchived)));
+  if (chosen().some((it) => it.stack)) actions.append(button("Unstack", "btn", () => unstackPhotos(ids())));
+  else if (n >= 2) actions.append(button("Stack", "btn", () => stackPhotos(ids())));
   actions.append(button("Move to trash", "btn", () => moveToTrash(ids())));
 }
 
@@ -837,6 +904,81 @@ async function removeFromAlbum(ids) {
     await post(`/api/albums/${S.route.album}/remove`, { ids });
     removeItems(ids);
     renderHead();
+  } catch (err) { flashNote(err.message); }
+}
+
+/** Archived photos leave the timelines. In the Archive, unarchiving takes them out of view. */
+async function setArchived(ids, value) {
+  try {
+    await post("/api/archive", { ids, value });
+    for (const it of S.items) if (ids.includes(it.id)) it.archived = value;
+    const leaves = (S.route.filter || {}).archived === (value ? "hide" : "only");
+    if (leaves) removeItems(ids);
+    if (S.detail && ids.includes(S.detail.id)) { S.detail.archived = value; showArchived(value); }
+    flashNote(value ? `${plural(ids.length, "item")} archived` : `${plural(ids.length, "item")} back in the timeline`);
+    updateSelection();
+  } catch (err) { flashNote(err.message); }
+}
+
+async function pickTag(count) {
+  const { tags } = await api("/api/tags");
+  return modal({
+    title: `Tag ${plural(count, "item")}`, ok: "Add tag", cancel: "Cancel",
+    build: (body, ctl) => {
+      const [wrap, input] = field("Tag", { placeholder: "Type a tag, like “Birthday”", maxLength: 100 });
+      input.setAttribute("list", "tag-names");
+      const list = el("datalist");
+      list.id = "tag-names";
+      tags.forEach((t) => { const o = el("option"); o.value = t.name; list.append(o); });
+      body.append(wrap, list);
+      if (tags.length) {
+        const chips = el("div", "tag-chips");
+        tags.slice(0, 30).forEach((t) => chips.append(button(t.name, "tag-chip", () => ctl.close(t.name))));
+        body.append(el("p", "muted", "Or pick one:"), chips);
+      }
+      return { submit: async () => {
+        const v = input.value.trim();
+        if (!v) throw new Error("Please type a tag.");
+        return v;
+      } };
+    },
+  });
+}
+
+async function addTag(ids) {
+  try {
+    const name = await pickTag(ids.length);
+    if (!name) return;
+    const tag = await post("/api/tags", { name, ids });
+    flashNote(`Tagged ${tag.name}`);
+    if (S.selecting) stopSelecting();
+    if (S.detail && ids.includes(S.detail.id)) loadDetail(S.detail.id);
+  } catch (err) { flashNote(err.message); }
+}
+
+async function removeTag(ids) {
+  try {
+    await post(`/api/tags/${S.route.tag}/remove`, { ids });
+    removeItems(ids);
+    renderHead();
+  } catch (err) { flashNote(err.message); }
+}
+
+async function stackPhotos(ids) {
+  try {
+    await post("/api/stacks", { ids });
+    flashNote(`${plural(ids.length, "photo")} stacked`);
+    stopSelecting();
+    await reload();
+  } catch (err) { flashNote(err.message); }
+}
+
+async function unstackPhotos(ids) {
+  try {
+    const res = await post("/api/stacks/unstack", { ids });
+    flashNote(`${plural(res.stacks, "stack")} taken apart`);
+    stopSelecting();
+    await reload();
   } catch (err) { flashNote(err.message); }
 }
 
@@ -995,6 +1137,262 @@ async function renderEvents() {
   $("collection").replaceChildren(frag);
 }
 
+// ------------------------------------------------------------------ memories
+
+function localDate(d = new Date()) {
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+const yearsAgo = (n) => (n === 1 ? "1 year ago" : `${n} years ago`);
+
+/** "On this day" above the timeline: photos taken on today's date in earlier years. */
+async function renderMemoriesStrip() {
+  let data;
+  try { data = await api(`/api/memories?today=${localDate()}`); } catch (_) { return; }
+  if (S.q || S.route.name !== "all" || S.route.memory || !data.memories.length) return;
+  const head = $("page-head");
+  head.replaceChildren();
+  const box = el("section", "memories");
+  box.setAttribute("aria-label", "On this day");
+  box.append(el("h2", "memories-title", "On this day"));
+  const row = el("div", "memory-row");
+  for (const m of data.memories) {
+    const card = link("", `#/memories/${m.date}`, "memory");
+    card.append(img(thumbUrl(m.cover, m.cover_v)));
+    const label = el("span", "memory-label");
+    label.append(el("strong", null, yearsAgo(m.years_ago)), el("span", null, plural(m.count, "item")));
+    card.append(label);
+    row.append(card);
+  }
+  box.append(row);
+  head.append(box);
+  head.hidden = false;
+}
+
+function renderMemoryHead(day) {
+  const d = new Date(`${day}T12:00:00`);
+  const title = isNaN(d) ? day : d.toLocaleDateString(undefined, { day: "numeric", month: "long", year: "numeric" });
+  const ago = new Date().getFullYear() - Number(day.slice(0, 4));
+  headRow(title, ago > 0 ? yearsAgo(ago) : null, [
+    button("Save as album", "btn small", async () => {
+      const name = await askText("Save as album", "Album name", title, "Create album");
+      if (!name) return;
+      try {
+        const ids = await allIds();
+        const album = await post("/api/albums", { name, ids });
+        flashNote(`Album “${album.name}” created with ${plural(ids.length, "item")}`);
+      } catch (err) { flashNote(err.message); }
+    }),
+    link("Back to All", "#/", "btn small"),
+  ]);
+}
+
+// ------------------------------------------------------------------ tags
+
+async function renderTags() {
+  const { tags } = await api("/api/tags");
+  headRow("Tags", tags.length ? plural(tags.length, "tag") : null, [], tags.length
+    ? "Tags are shared by everyone. Keywords that other programs (Lightroom, digiKam, Windows Photo Gallery) saved in your photos appear here too."
+    : null);
+  if (!tags.length) {
+    showEmpty("No tags yet", "Press Select, pick some photos and press Tag. Keywords saved in your photos by other programs show up here too.");
+    return;
+  }
+  const cards = el("div", "cards");
+  for (const t of tags) {
+    const card = link("", `#/tags/${t.id}`, "card");
+    const box = el("div", "card-img");
+    if (t.cover) box.append(img(thumbUrl(t.cover, t.cover_v))); else box.textContent = "Empty";
+    card.append(box, el("div", "card-title", t.name), el("div", "card-meta", plural(t.count, "item")));
+    cards.append(card);
+  }
+  $("collection").replaceChildren(cards);
+}
+
+async function renderTagHead(id) {
+  const tag = await api(`/api/tags/${id}`);
+  headRow(tag.name, plural(tag.count, "item"), [
+    button("Rename", "btn small", async () => {
+      const name = await askText("Rename tag", "Tag", tag.name);
+      if (!name) return;
+      try {
+        const t = await patch(`/api/tags/${tag.id}`, { name });
+        if (t.id !== tag.id) { flashNote(`Put together with ${t.name}`); location.hash = `#/tags/${t.id}`; } else renderHead();
+      } catch (err) { flashNote(err.message); }
+    }),
+    button("Delete tag", "btn small", async () => {
+      const ok = await confirmBox("Delete this tag?", `“${tag.name}” will be removed from every photo. The photos stay in your library.`, "Delete tag", true);
+      if (!ok) return;
+      try { await del(`/api/tags/${tag.id}`); location.hash = "#/tags"; } catch (err) { flashNote(err.message); }
+    }),
+    link("All tags", "#/tags", "btn small"),
+  ]);
+}
+
+// ------------------------------------------------------------------ folders
+
+const folderHash = (path) => "#/folders" + (path ? "/" + path.split("/").map(encodeURIComponent).join("/") : "");
+
+async function renderFolderHead(path) {
+  const info = await api(`/api/folders?path=${encodeURIComponent(path)}`);
+  if (S.route.folder !== path) return;
+  S.folderInfo = info;
+  const crumbs = el("nav", "crumbs");
+  crumbs.setAttribute("aria-label", "Folder");
+  const parts = path ? path.split("/") : [];
+  const root = (S.status && S.status.library_path) ? S.status.library_path.split(/[\\/]/).filter(Boolean).pop() : "Library";
+  const items = [[root || "Library", ""], ...parts.map((p, i) => [p, parts.slice(0, i + 1).join("/")])];
+  items.forEach(([name, at], i) => {
+    if (i) crumbs.append(el("span", "crumb-sep", "/"));
+    if (i === items.length - 1) { const h = el("h1", null, name); crumbs.append(h); }
+    else crumbs.append(link(name, folderHash(at)));
+  });
+  headRow(crumbs, info.items ? plural(info.items, "item") + " here" : null);
+  if (info.folders.length) {
+    const list = el("div", "folders");
+    for (const f of info.folders) {
+      const a = link("", folderHash(f.path), "folder");
+      const pic = el("span", "folder-pic");
+      if (f.cover) pic.append(img(thumbUrl(f.cover, f.cover_v)));
+      const text = el("span", "folder-text");
+      text.append(el("span", "folder-name", f.name), el("small", null, plural(f.count, "item")));
+      a.append(pic, text);
+      list.append(a);
+    }
+    $("page-head").append(list);
+  }
+}
+
+// ------------------------------------------------------------------ map
+
+let mapLibs = null;
+function loadMapLibs() {
+  if (mapLibs) return mapLibs;
+  const css = (href) => { const l = document.createElement("link"); l.rel = "stylesheet"; l.href = href; document.head.append(l); };
+  const js = (src) => new Promise((ok, fail) => {
+    const t = document.createElement("script");
+    t.src = src; t.onload = ok; t.onerror = () => fail(new Error("The map could not be loaded."));
+    document.head.append(t);
+  });
+  css("/static/vendor/leaflet.css");
+  css("/static/vendor/MarkerCluster.css");
+  mapLibs = js("/static/vendor/leaflet.js")
+    .then(() => Promise.all([js("/static/vendor/leaflet.markercluster.js"), js("/static/vendor/topojson-client.min.js")]))
+    .catch((err) => { mapLibs = null; throw err; });
+  return mapLibs;
+}
+
+let worldShapes = null;
+async function loadWorld() {
+  if (!worldShapes) {
+    const topo = await (await fetch("/static/vendor/countries-50m.json")).json();
+    const shapes = topojson.feature(topo, topo.objects.countries);
+    // The shapes are made for a round globe. On a flat map, a coastline that crosses the date line
+    // (Fiji, the east tip of Russia) would be drawn the long way round, as a line across the world:
+    // keep each outline's longitudes continuous instead. Antarctica circles the pole and is left out.
+    const unwrap = (ring) => {
+      let prev = null;
+      return ring.map(([lon, lat]) => {
+        if (prev !== null) { while (lon - prev > 180) lon -= 360; while (lon - prev < -180) lon += 360; }
+        prev = lon;
+        return [lon, lat];
+      });
+    };
+    shapes.features = shapes.features.filter((f) => f.id !== "010" && f.geometry);
+    for (const f of shapes.features) {
+      const g = f.geometry;
+      if (g.type === "Polygon") g.coordinates = g.coordinates.map(unwrap);
+      else if (g.type === "MultiPolygon") g.coordinates = g.coordinates.map((poly) => poly.map(unwrap));
+    }
+    worldShapes = shapes;
+  }
+  return worldShapes;
+}
+
+const MAP_VIEW_KEY = "snapshots.mapView";
+function savedMapView() {
+  try { return JSON.parse(localStorage.getItem(MAP_VIEW_KEY) || "null"); } catch (_) { return null; }
+}
+
+async function renderMap() {
+  const [data] = await Promise.all([api("/api/map"), loadMapLibs()]);
+  if (S.route.view !== "map") return;
+  headRow("Map", data.points.length ? plural(data.points.length, "item") + " with a location" : null, [],
+    data.tiles ? null : "Showing country outlines only. Set map_tiles in config.toml for detailed maps.");
+  if (!data.points.length) {
+    showEmpty("Nothing on the map yet", "Photos taken with location turned on show up here.");
+    return;
+  }
+  const box = el("div", "map-box");
+  const mapEl = el("div", "map");
+  mapEl.setAttribute("aria-label", "Map of your photos");
+  const bar = el("div", "map-bar");
+  const count = el("span", "map-count");
+  const show = button("Show these photos", "btn small primary");
+  bar.append(count, show);
+  box.append(mapEl, bar);
+  $("collection").replaceChildren(box);
+
+  const map = L.map(mapEl, { worldCopyJump: true, minZoom: 2, maxZoom: 19, zoomControl: true });
+  map.attributionControl.setPrefix(false);
+  // Country outlines sit under the map pictures: they show when the pictures can't be fetched (offline).
+  map.createPane("world").style.zIndex = 150;
+  const world = await loadWorld();
+  L.geoJSON(world, { pane: "world", interactive: false, style: { className: "map-country", weight: 1, fillOpacity: 1 } }).addTo(map);
+  if (data.tiles) {
+    L.tileLayer(data.tiles, { maxZoom: 19, attribution: data.attribution || "", className: "map-tiles", referrerPolicy: "no-referrer" }).addTo(map);
+  } else {
+    map.attributionControl.addAttribution("Country shapes: Natural Earth");
+  }
+
+  const pinIcon = (id, v, label) => L.divIcon({
+    className: "pin", iconSize: [44, 44], iconAnchor: [22, 22],
+    html: `<img class="pin-img" src="${thumbUrl(id, v)}" alt="" loading="lazy">${label ? `<span class="pin-count">${label}</span>` : ""}`,
+  });
+  const clusters = L.markerClusterGroup({
+    showCoverageOnHover: false, maxClusterRadius: 60, spiderfyOnMaxZoom: true, chunkedLoading: true,
+    iconCreateFunction: (c) => {
+      const first = c.getAllChildMarkers()[0].options.photo;
+      return pinIcon(first.id, first.v, fmtInt(c.getChildCount()));
+    },
+  });
+  const markers = data.points.map(([id, lat, lon, v]) => {
+    const m = L.marker([lat, lon], { icon: pinIcon(id, v), photo: { id, v }, keyboard: false });
+    m.on("click", () => {
+      const d = 0.0005;
+      location.hash = `#/map/area/${[lat - d, lon - d, lat + d, lon + d].map((x) => x.toFixed(5)).join(",")}`;
+    });
+    return m;
+  });
+  clusters.addLayers(markers);
+  map.addLayer(clusters);
+
+  const saved = savedMapView();
+  if (saved) map.setView(saved.center, saved.zoom);
+  else map.fitBounds(L.latLngBounds(data.points.map((p) => [p[1], p[2]])).pad(0.1), { maxZoom: 12 });
+
+  const update = () => {
+    const b = map.getBounds();
+    const n = data.points.reduce((k, p) => k + (b.contains([p[1], p[2]]) ? 1 : 0), 0);
+    count.textContent = n ? `${plural(n, "item")} in view` : "Nothing in view";
+    show.disabled = !n;
+    try { localStorage.setItem(MAP_VIEW_KEY, JSON.stringify({ center: map.getCenter(), zoom: map.getZoom() })); } catch (_) { /* fine */ }
+  };
+  map.on("moveend", update);
+  update();
+  show.addEventListener("click", () => {
+    const b = map.getBounds();
+    const clamp = (x, lo, hi) => Math.min(hi, Math.max(lo, x));
+    const wrap = (x) => ((((x + 180) % 360) + 360) % 360) - 180;
+    const span = b.getEast() - b.getWest();
+    const west = span >= 360 ? -180 : wrap(b.getWest()), east = span >= 360 ? 180 : wrap(b.getEast());
+    const area = [clamp(b.getSouth(), -90, 90), west, clamp(b.getNorth(), -90, 90), east].map((x) => x.toFixed(5)).join(",");
+    location.hash = `#/map/area/${area}`;
+  });
+  // The map was drawn before its box had its final size.
+  setTimeout(() => map.invalidateSize(), 0);
+}
+
 // ------------------------------------------------------------------ clean up page
 
 async function renderCleanup() {
@@ -1100,6 +1498,15 @@ function groupCard(g) {
         refreshStatus();
       } catch (err) { flashNote(err.message); }
     }),
+    button(g.kind === "burst" ? "Stack them" : "Stack them instead", "btn small", async () => {
+      const ids = g.items.map((i) => i.id);
+      const first = [...keep][0];
+      try {
+        await post("/api/stacks", { ids: [first, ...ids.filter((i) => i !== first)], cover: first });
+        card.remove();
+        flashNote(`${plural(ids.length, "photo")} stacked: they show as one in the timeline`);
+      } catch (err) { flashNote(err.message); }
+    }),
     button("These are different", "btn small", async () => {
       try { await post("/api/cleanup/not-duplicates", { ids: g.items.map((i) => i.id) }); card.remove(); }
       catch (err) { flashNote(err.message); }
@@ -1157,6 +1564,7 @@ function renderStatus() {
   $("st-work").textContent = work.join(" · ");
   const notes = [];
   if (!st.heif) notes.push("HEIC photos need pillow-heif");
+  if (st.raw === false) notes.push("RAW files need rawpy");
   if (st.videos && !st.ffmpeg) notes.push("Video thumbnails need ffmpeg");
   if (st.faces.message && st.faces.enabled) notes.push(st.faces.message);
   if (st.places.message && st.places.enabled) notes.push(st.places.message);
@@ -1260,20 +1668,35 @@ function showFavorite(on) {
   $("v-fav").title = on ? "Remove from favourites" : "Add to favourites";
 }
 
+function showArchived(on) {
+  $("v-archive").querySelector(".v-label").textContent = on ? "Unarchive" : "Archive";
+  $("v-archive").title = on ? "Put back in the timeline" : "Hide from the timeline, keep everywhere else";
+}
+
 function showItem(index) {
   const item = S.items[index];
   if (!item) return;
   S.viewing = index;
-  S.detail = { ...item };
-  $("v-title").textContent = item.filename;
-  $("v-download").href = `/api/assets/${item.id}/original?download=true`;
+  showPicture({ ...item });
   $("v-prev").disabled = index === 0;
   $("v-next").disabled = index === S.items.length - 1 && S.done;
+  renderStackStrip(null);
+  loadDetail(item.id);
+  if (index >= S.items.length - 6) loadMore();
+}
+
+/** Show one photo or video in the viewer (a grid item, or another photo of its stack). */
+function showPicture(item) {
+  S.detail = item;
+  $("v-title").textContent = item.filename;
+  $("v-download").href = `/api/assets/${item.id}/original?download=true`;
   showFavorite(item.favorite);
+  showArchived(item.archived);
   const trashed = S.route.name === "trash";
   $("v-trash").querySelector(".v-label").textContent = trashed ? "Restore" : "Move to trash";
   $("v-fav").hidden = trashed;
   $("v-album").hidden = trashed;
+  $("v-archive").hidden = trashed;
 
   const stage = $("v-stage");
   stage.replaceChildren();
@@ -1291,10 +1714,61 @@ function showItem(index) {
     i.src = src;
     i.addEventListener("error", () => stage.replaceChildren(el("p", "msg", "This file cannot be displayed. Use Download.")));
     stage.append(i);
+    if (item.live) stage.append(liveButton(item));
   }
   renderDetails(item);
-  loadDetail(item.id);
-  if (index >= S.items.length - 6) loadMore();
+}
+
+/** Live Photos and motion photos: play the moment around the photo. */
+function liveButton(item) {
+  const b = button("", "live-btn");
+  b.append(el("span", "live-dot"), el("span", null, "Live"));
+  b.title = "Play the moment around this photo";
+  b.setAttribute("aria-pressed", "false");
+  b.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const stage = $("v-stage");
+    const old = stage.querySelector("video.live");
+    if (old) { old.remove(); b.setAttribute("aria-pressed", "false"); return; }
+    const v = document.createElement("video");
+    v.className = "live";
+    v.src = `/api/assets/${item.id}/motion?v=${item.v}`;
+    v.autoplay = true;
+    v.playsInline = true;
+    const done = () => { v.remove(); b.setAttribute("aria-pressed", "false"); };
+    v.addEventListener("ended", done);
+    v.addEventListener("error", () => { done(); flashNote("This clip cannot be played here. It may need a video codec Windows doesn't have."); });
+    v.addEventListener("click", done);
+    stage.insertBefore(v, b);
+    b.setAttribute("aria-pressed", "true");
+  });
+  return b;
+}
+
+/** The other photos of a stack, under the picture. */
+function renderStackStrip(detail) {
+  const strip = $("v-stack");
+  const items = detail && detail.stack_items && detail.stack_items.length > 1 ? detail.stack_items : null;
+  strip.hidden = !items;
+  strip.replaceChildren();
+  if (!items) return;
+  for (const it of items) {
+    const b = button("", "stack-item");
+    b.append(img(thumbUrl(it.id, it.v), it.filename));
+    if (it.cover) b.append(el("span", "stack-cover", "Cover"));
+    b.title = it.filename;
+    b.setAttribute("aria-label", it.filename);
+    b.setAttribute("aria-current", String(S.detail && S.detail.id === it.id));
+    b.addEventListener("click", async () => {
+      if (S.detail && S.detail.id === it.id) return;
+      try {
+        const full = await api(`/api/assets/${it.id}`);
+        showPicture(full);
+        renderStackStrip(full);
+      } catch (err) { flashNote(err.message); }
+    });
+    strip.append(b);
+  }
 }
 
 async function loadDetail(id) {
@@ -1303,6 +1777,7 @@ async function loadDetail(id) {
     if (!S.detail || S.detail.id !== id) return;
     S.detail = full;
     renderDetails(full);
+    renderStackStrip(full);
   } catch (_) { /* the basic details are already shown */ }
 }
 
@@ -1347,6 +1822,34 @@ function renderDetails(item) {
     });
     row("Albums", box);
   }
+  if (item.tags) {
+    const box = el("div", "tag-chips");
+    for (const t of item.tags) {
+      const chip = el("span", "tag-chip dark");
+      chip.append(link(t.name, `#/tags/${t.id}`));
+      const x = button("×", null, async () => {
+        try { await post(`/api/tags/${t.id}/remove`, { ids: [item.id] }); loadDetail(item.id); } catch (err) { flashNote(err.message); }
+      });
+      x.setAttribute("aria-label", `Remove the tag ${t.name}`);
+      chip.append(x);
+      box.append(chip);
+    }
+    box.append(button("+ Tag", "tag-add", () => addTag([item.id])));
+    row("Tags", box);
+  }
+  if (item.stack_items && item.stack_items.length > 1) {
+    const box = el("div", "stack-actions");
+    box.append(el("span", null, `${plural(item.stack_items.length, "photo")} in this stack `));
+    const isCover = item.stack_items.some((s) => s.id === item.id && s.cover);
+    if (!isCover) box.append(button("Make cover", "btn small", async () => {
+      try { await post(`/api/stacks/${item.stack}/cover`, { cover: item.id }); flashNote("Cover changed"); loadDetail(item.id); }
+      catch (err) { flashNote(err.message); }
+    }));
+    box.append(button("Unstack", "btn small", async () => {
+      try { await post("/api/stacks/unstack", { ids: [item.id] }); viewer.close(); await reload(); } catch (err) { flashNote(err.message); }
+    }));
+    row("Stack", box);
+  }
   if (item.text) {
     const t = el("div", "photo-text", item.text.length > 600 ? item.text.slice(0, 600) + "…" : item.text);
     row("Text in photo", t);
@@ -1361,7 +1864,13 @@ function renderDetails(item) {
   row("Size", fmtSize(item.size));
   if (item.width && item.height) row("Dimensions", `${item.width} × ${item.height}`);
   if (item.camera) row("Camera", item.camera);
-  row("Location in library", item.path);
+  if (item.folder !== undefined) {
+    const where = el("span");
+    where.append(link(item.folder || "Library folder", folderHash(item.folder)), document.createTextNode(` / ${item.filename}`));
+    row("Location in library", where);
+  } else {
+    row("Location in library", item.path);
+  }
 }
 
 async function step(delta) {
@@ -1398,6 +1907,15 @@ $("v-fav").addEventListener("click", () => {
   if (S.detail) setFavorite([S.detail.id], !S.detail.favorite);
 });
 $("v-album").addEventListener("click", () => { if (S.detail) addToAlbum([S.detail.id]); });
+$("v-archive").addEventListener("click", async () => {
+  if (!S.detail) return;
+  const id = S.detail.id, index = S.viewing, value = !S.detail.archived;
+  const leaves = (S.route.filter || {}).archived === (value ? "hide" : "only");
+  await setArchived([id], value);
+  if (!leaves) return;
+  if (!S.items.length) { viewer.close(); return; }
+  showItem(Math.min(index, S.items.length - 1));
+});
 $("v-trash").addEventListener("click", async () => {
   if (!S.detail) return;
   const id = S.detail.id;
@@ -1413,6 +1931,7 @@ viewer.addEventListener("keydown", (e) => {
 });
 viewer.addEventListener("close", () => {
   $("v-stage").replaceChildren(); // stops any playing video
+  renderStackStrip(null);
   S.detail = null;
   const t = document.querySelector(`.tile[data-index="${S.viewing}"]`);
   if (t) t.focus({ preventScroll: false });

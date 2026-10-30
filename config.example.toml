@@ -57,3 +57,9 @@ smart_search = true
 text_search = true
 # How many CPU threads these two may use.
 search_threads = 2
+
+# Where the map's pictures come from. OpenStreetMap is used by default, which means your computer asks
+# OpenStreetMap's servers for the areas of the map you look at (not for your photos' locations).
+# "" shows only the country outlines that come with Snapshots and fetches nothing.
+# map_tiles = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+# map_attribution = "© OpenStreetMap contributors"

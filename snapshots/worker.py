@@ -2,7 +2,7 @@
 
 In order of priority it:
 1. rescans the folder when asked, and automatically every `scan_interval_minutes`;
-2. looks up place names for photos with a GPS position;
+2. finds videos inside photos indexed by older versions (motion photos), and looks up place names for photos with a GPS position;
 3. measures photos for the Clean up page (copies, bursts, blur, darkness);
 4. finds faces in new photos and groups them into people;
 5. prepares search by content;
@@ -20,6 +20,7 @@ from .config import Config
 from .analysis import QualityJob
 from .clipsearch import ClipJob
 from .faces import FacesJob
+from .linking import MotionJob
 from .ocr import OcrJob
 from .places import PlacesJob
 from .scanner import Scanner
@@ -32,6 +33,7 @@ class Worker:
         self.cfg = cfg
         self.scanner = Scanner(cfg)
         self.places = PlacesJob(cfg)
+        self.motion = MotionJob(cfg)
         self.faces = FacesJob(cfg)
         self.quality = QualityJob(cfg)
         self.clip = ClipJob(cfg)
@@ -97,6 +99,7 @@ class Worker:
     def _jobs(self):
         """Background jobs in order of priority, with whether each is switched on."""
         return [
+            (self.motion, True),
             (self.places, self.cfg.places),
             (self.quality, self.cfg.photo_checks),
             (self.faces, self.cfg.faces),

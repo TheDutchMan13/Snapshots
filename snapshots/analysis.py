@@ -222,7 +222,8 @@ class DuplicateFinder:
     def _version(self, conn):
         return tuple(conn.execute(
             "SELECT COUNT(*), COALESCE(MAX(id), 0), COALESCE(SUM(dhash % 1000003), 0),"
-            " (SELECT COUNT(*) FROM not_duplicates), COALESCE(SUM(trashed_at IS NOT NULL), 0)"
+            " (SELECT COUNT(*) FROM not_duplicates), COALESCE(SUM(trashed_at IS NOT NULL), 0),"
+            " COALESCE(SUM(coalesce(stack_id, 0) % 1000003), 0)"
             " FROM assets WHERE dhash IS NOT NULL"
         ).fetchone())
 
@@ -243,7 +244,7 @@ class DuplicateFinder:
 
     def _compute(self, conn) -> list[dict]:
         rows = [dict(r) for r in conn.execute(
-            "SELECT id, dhash, taken_at, width, height, size, sharpness FROM assets"
+            "SELECT id, dhash, taken_at, width, height, size, sharpness, stack_id FROM assets"
             " WHERE dhash IS NOT NULL AND trashed_at IS NULL AND kind = 'photo'"
         )]
         by_id = {r["id"]: r for r in rows}
@@ -252,6 +253,9 @@ class DuplicateFinder:
         dismissed = {(a, b) for a, b in conn.execute("SELECT a, b FROM not_duplicates")}
         uf = _Union()
         for a, b in (copies | bursts) - dismissed:
+            sa, sb = by_id[a]["stack_id"], by_id[b]["stack_id"]
+            if sa is not None and sa == sb:
+                continue  # stacked together on purpose (a RAW + JPEG pair, say)
             uf.join(a, b)
         members = defaultdict(list)
         for i in list(uf.parent):
@@ -406,7 +410,8 @@ class EventFinder:
 
     def _version(self, conn):
         return tuple(conn.execute(
-            "SELECT COUNT(*), COALESCE(MAX(id), 0), COUNT(city), COALESCE(SUM(LENGTH(taken_at) + id % 97), 0)"
+            "SELECT COUNT(*), COALESCE(MAX(id), 0), COUNT(city), COALESCE(SUM(LENGTH(taken_at) + id % 97), 0),"
+            " COUNT(archived_at), COUNT(live_video)"
             " FROM assets WHERE trashed_at IS NULL"
         ).fetchone())
 
@@ -415,8 +420,9 @@ class EventFinder:
         with self._lock:
             if key != self._key:
                 rows = [dict(r) for r in conn.execute(
-                    "SELECT id, taken_at, lat, lon, city, state, country, sharpness FROM assets"
-                    " WHERE trashed_at IS NULL ORDER BY taken_at, id"
+                    "SELECT a.id, a.taken_at, a.lat, a.lon, a.city, a.state, a.country, a.sharpness FROM assets a"
+                    " WHERE a.trashed_at IS NULL AND a.archived_at IS NULL"
+                    " AND NOT EXISTS (SELECT 1 FROM assets lp WHERE lp.live_video = a.id) ORDER BY a.taken_at, a.id"
                 )]
                 self._events = find_events(rows, self.cfg.event_gap_hours, min_items=self.cfg.event_min_items)
                 self._key = key

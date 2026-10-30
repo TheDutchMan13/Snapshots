@@ -6,7 +6,7 @@ from datetime import datetime
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from . import db
+from . import db, linking
 from .app import current_user, require_admin
 from .routes_library import library_root, original_path
 from .scanner import delete_asset_row
@@ -74,14 +74,15 @@ def router(ctx) -> APIRouter:
         current_user(request)
         with db.session(cfg.db_path) as conn:
             conn.executemany("UPDATE assets SET trashed_at = ? WHERE id = ? AND trashed_at IS NULL",
-                             [(_now(), i) for i in body.ids])
+                             [(_now(), i) for i in linking.with_clips(conn, body.ids)])
         return {"ok": True}
 
     @r.post("/api/trash/restore")
     def restore(body: Ids, request: Request):
         current_user(request)
         with db.session(cfg.db_path) as conn:
-            conn.executemany("UPDATE assets SET trashed_at = NULL WHERE id = ?", [(i,) for i in body.ids])
+            conn.executemany("UPDATE assets SET trashed_at = NULL WHERE id = ?",
+                             [(i,) for i in linking.with_clips(conn, body.ids)])
         worker.poke()  # restored photos may still need their faces found
         return {"ok": True}
 
@@ -95,10 +96,11 @@ def router(ctx) -> APIRouter:
             if body.ids is None:
                 rows = conn.execute("SELECT id, path, filename FROM assets WHERE trashed_at IS NOT NULL").fetchall()
             else:
-                marks = ",".join("?" * len(body.ids)) or "NULL"
+                ids = linking.with_clips(conn, body.ids)
+                marks = ",".join("?" * len(ids)) or "NULL"
                 rows = conn.execute(
                     f"SELECT id, path, filename FROM assets WHERE trashed_at IS NOT NULL AND id IN ({marks})",
-                    body.ids,
+                    ids,
                 ).fetchall()
             for row in rows:
                 full = original_path(cfg, row["path"])
@@ -110,6 +112,7 @@ def router(ctx) -> APIRouter:
                     continue
                 delete_asset_row(cfg, conn, row["id"])
                 deleted += 1
+            linking.tidy_stacks(conn)
         return {"deleted": deleted, "failed": failed}
 
     # ------------------------------------------------------------ albums

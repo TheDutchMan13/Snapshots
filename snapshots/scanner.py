@@ -15,7 +15,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 
-from . import db, media
+from . import db, linking, media
 from .config import Config
 
 log = logging.getLogger("snapshots.scanner")
@@ -106,6 +106,7 @@ def delete_asset_row(cfg: Config, conn, asset_id: int) -> None:
     conn.execute("DELETE FROM assets WHERE id = ?", (asset_id,))
     _unlink(cfg.thumb_path(asset_id))
     _unlink(cfg.preview_path(asset_id))
+    _unlink(cfg.motion_path(asset_id))
 
 
 def index_file(cfg: Config, conn, rel: str, full: Path, digest: str | None = None) -> int:
@@ -128,18 +129,21 @@ def index_file(cfg: Config, conn, rel: str, full: Path, digest: str | None = Non
     info = media.read_photo_info(full) if kind == "photo" else media.read_video_info(full)
     taken = info["taken"] or media.date_from_filename(full.name) or datetime.fromtimestamp(st.st_mtime)
     has_position = info["lat"] is not None
+    motion = media.find_motion_video(full) if kind == "photo" else None
     values = (
         full.name, kind, st.st_size, st.st_mtime_ns, digest, taken.isoformat(timespec="seconds"),
         info["width"], info["height"], info["camera"], info["lat"], info["lon"],
         0 if has_position else 1,           # geo_done: nothing to look up without a position
         0 if kind == "photo" else 1,        # faces_done: faces are found in photos only
+        motion[0] if motion else None, motion[1] if motion else None,
     )
     if prev is None:
         cur = conn.execute(
             """
             INSERT INTO assets (filename, kind, size, mtime_ns, sha1, taken_at, width, height, camera,
-                                lat, lon, geo_done, faces_done, path, has_thumb, added_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+                                lat, lon, geo_done, faces_done, motion_offset, motion_length, motion_done,
+                                path, has_thumb, added_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 0, ?)
             """,
             values + (rel, now()),
         )
@@ -149,12 +153,16 @@ def index_file(cfg: Config, conn, rel: str, full: Path, digest: str | None = Non
         asset_id = prev["id"]
         forget_faces(cfg, conn, asset_id)
         _unlink(cfg.preview_path(asset_id))
+        _unlink(cfg.motion_path(asset_id))
+        for (owner,) in conn.execute("SELECT id FROM assets WHERE live_video = ?", (asset_id,)).fetchall():
+            _unlink(cfg.motion_path(owner))  # a Live Photo's clip changed: its playable copy is stale
         conn.execute("DELETE FROM clip_vectors WHERE asset_id = ?", (asset_id,))
         conn.execute("DELETE FROM not_duplicates WHERE a = ? OR b = ?", (asset_id, asset_id))
         conn.execute(
             """
             UPDATE assets SET filename = ?, kind = ?, size = ?, mtime_ns = ?, sha1 = ?, taken_at = ?,
                 width = ?, height = ?, camera = ?, lat = ?, lon = ?, geo_done = ?, faces_done = ?,
+                motion_offset = ?, motion_length = ?, motion_done = 1,
                 city = NULL, state = NULL, country = NULL, has_thumb = 0,
                 dhash = NULL, sharpness = NULL, brightness = NULL, highlights = NULL, quality_done = 0, keep_quality = 0,
                 clip_done = 0, ocr_done = 0, ocr_text = NULL,
@@ -163,6 +171,8 @@ def index_file(cfg: Config, conn, rel: str, full: Path, digest: str | None = Non
             """,
             values + (asset_id,),
         )
+    if info.get("keywords"):
+        linking.add_keywords(conn, asset_id, info["keywords"])
     _make_thumb(cfg, conn, asset_id, kind, full)
     return asset_id
 
@@ -300,5 +310,11 @@ class Scanner:
                 delete_asset_row(cfg, conn, existing[path]["id"])
                 state.removed += 1
             conn.commit()
+            try:
+                linking.link_pairs(conn, cfg)
+                conn.commit()
+            except Exception:
+                log.exception("could not link Live Photos and RAW + JPEG pairs")
+                conn.rollback()
         finally:
             conn.close()

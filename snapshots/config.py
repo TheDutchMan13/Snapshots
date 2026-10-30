@@ -41,6 +41,8 @@ class Config:
     smart_search: bool = True              # search by what is in a photo (downloads a 154 MB model)
     text_search: bool = True               # read text in photos so it can be searched (11 MB model)
     search_threads: int = 2                # CPU threads content and text search may use
+    map_tiles: str = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"  # map pictures ("" = outlines only)
+    map_attribution: str = "© OpenStreetMap contributors"
     config_file: Path | None = None  # the file these settings were read from, if any
 
     @property
@@ -67,6 +69,10 @@ class Config:
     def places_dir(self) -> Path:
         return self.data_dir / "places"
 
+    @property
+    def motion_dir(self) -> Path:
+        return self.data_dir / "motion"
+
     def thumb_path(self, asset_id: int) -> Path:
         return self.thumb_dir / f"{asset_id}.jpg"
 
@@ -76,9 +82,12 @@ class Config:
     def face_path(self, face_id: int) -> Path:
         return self.face_dir / f"{face_id}.jpg"
 
+    def motion_path(self, asset_id: int) -> Path:
+        return self.motion_dir / f"{asset_id}.mp4"
+
     def ensure_dirs(self) -> None:
         for d in (self.data_dir, self.thumb_dir, self.preview_dir, self.face_dir,
-                  self.model_dir, self.places_dir):
+                  self.model_dir, self.places_dir, self.motion_dir):
             d.mkdir(parents=True, exist_ok=True)
 
 
@@ -90,6 +99,7 @@ _FILE_KEYS = {
     "photo_checks": bool, "duplicate_distance": int, "burst_seconds": int, "burst_distance": int,
     "blur_threshold": float, "dark_threshold": float, "event_gap_hours": float, "event_min_items": int,
     "smart_search": bool, "text_search": bool, "search_threads": int,
+    "map_tiles": str, "map_attribution": str,
 }
 
 

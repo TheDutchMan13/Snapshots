@@ -2,14 +2,22 @@
 
 Snapshots is a self-hosted photo and video library for Windows. Your originals stay on your own drive, and the app indexes them locally for browsing, search, people and places. You can reach your library from your phone over Tailscale, with no cloud account or subscription required.
 
-> **Status:** early development (v0.4). Browsing, search, accounts, albums, favourites, trash, people, places, events and clean-up all work. Automatic backup from a phone is not built yet, see [Roadmap](#roadmap).
+> **Status:** early development (v0.5). Browsing, search, accounts, albums, tags, favourites, archive, trash, people, places, the map, memories, events and clean-up all work. Automatic backup from a phone is not built yet, see [Roadmap](#roadmap).
 
 ## What works today
 
 - Runs natively on Windows, with no Docker or WSL, packaged as a single `Snapshots.exe` that opens in its own app window (no browser tab, no black console window)
 - **Keeps itself up to date:** rescans the library every 15 minutes (adjustable), and photos you move or rename keep their albums, favourites and faces
 - **Accounts:** everyone logs in. The first account is the administrator, who can add accounts for the family
-- **Albums** shared by everyone, **favourites** for each person, and a **trash** you can restore from
+- **Albums** and **tags** shared by everyone, **favourites** for each person, and a **trash** you can restore from
+- **Archive:** hide screenshots, receipts and the like from the timeline without deleting them. They still show in albums, people, places, folders and search
+- **Folders:** browse the library by its real folders
+- **On this day:** photos from today's date in earlier years, at the top of All
+- **Map:** every photo with a location on a world map, grouped into pins with a photo on each. Press **Show these photos** for everything in view
+- **Stacks:** several photos shown as one in the timeline. RAW + JPEG pairs from a camera are stacked automatically, and you can stack bursts from the Clean up page or any photos you select
+- **Live Photos and motion photos:** iPhone Live Photos (a photo and a short clip with the same name) and the motion photos Google Pixel and Samsung phones save are shown as one photo. Press **Live** in the viewer to play the moment
+- **Camera RAW files** (DNG, CR2, CR3, NEF, ARW, ORF, RW2, RAF, PEF and more) are shown like any photo, with their date, camera and position
+- **Keywords** that Lightroom, digiKam or Windows Photo Gallery saved in your photos become tags
 - **People:** faces are found and grouped automatically, on your own computer. Name someone, merge two groups of the same person, or hide someone
 - **Places:** photos with a GPS position are labelled with the nearest town, worked out offline
 - **Events:** days out and trips are found automatically from when and where photos were taken, and can be saved as albums
@@ -89,6 +97,8 @@ Copy `config.example.toml` to `config.toml` and edit it, or use command-line opt
 | | `smart_search` | `true` | Search by what's in a photo (downloads 154 MB once) |
 | | `text_search` | `true` | Read text in photos (downloads 11 MB once) |
 | | `search_threads` | `2` | CPU threads the two above may use |
+| | `map_tiles` | OpenStreetMap | Where the map's pictures come from; `""` shows country outlines only, with nothing fetched |
+| | `map_attribution` | `© OpenStreetMap contributors` | Credit shown on the map for `map_tiles` |
 | `--reset-password NAME` | | | Set a new password for an account, then exit |
 | `--window` | | exe: on, source: off | Show Snapshots in its own window |
 | `--open` / `--browser` | | off | Use your web browser instead of the app window |
@@ -105,6 +115,9 @@ Everything runs on your own computer, in the background after a scan, a few phot
 - **Blurry and dark photos** are found by measuring fine detail in the sharpest part of each photo, in the direction camera shake would blur, and the light level. A photo only counts as too dark if even its brightest parts are dim, so night and concert photos with lights are left alone. In the test, none of the 400 normal photos was flagged.
 - **Search by what's in a photo** uses OpenAI's CLIP model (ViT-B/32, 8-bit, about 154 MB). Each photo is learned once from its thumbnail, at about 60 ms per photo. Searches show the best matches first. It is good at things, scenes and activities, but it is approximate: for a description of one particular photo, the right one was the first result 57% of the time and in the first five 84% of the time.
 - **Text in photos** is read with PaddleOCR's English models (about 11 MB). In a test, 97% of words on signs in photos were read exactly. Text-heavy photos take about a quarter of a second each, and this runs last.
+- **RAW files** are read with LibRaw. Thumbnails and the viewer use the full-size JPEG preview that cameras store inside every RAW file, so they are quick and look like what the camera showed; a RAW file without one is developed at half size. The original RAW file is what **Download** gives you.
+- **Live Photos** are recognised by name: a photo and a `.mov` or `.mp4` clip (up to 30 MB) with the same name in the same folder. **Motion photos** are recognised from the information the phone writes into the photo, and the video is copied out of it the first time you play it. iPhone clips are usually HEVC, which the Windows app window can't play without an extra codec, so when ffmpeg is installed they are converted to H.264 once.
+- **The map** draws pictures from OpenStreetMap while you look at it, so your computer asks OpenStreetMap's servers for the areas you view (not for your photos' locations). Set `map_tiles = ""` to use only the country outlines that come with Snapshots, with nothing fetched, or point it at your own tile server.
 
 ## Your files and safety
 
@@ -113,6 +126,8 @@ Everything runs on your own computer, in the background after a scan, a few phot
 - **Moving a photo to the trash doesn't touch the file.** It is only hidden, and can be restored. **Emptying the trash deletes the files from your disk**, and only an administrator can do that, after a confirmation.
 - If the library folder is missing (an unplugged drive) or can't be read completely, Snapshots does **not** remove anything from its index, and the trash can't be emptied.
 - Deleting a photo from the library folder yourself removes it from Snapshots on the next scan.
+- A Live Photo's clip goes to the trash, comes back and is deleted together with its photo.
+- Archiving, tagging and stacking change nothing in your files.
 
 ## Accounts and remote access
 
@@ -134,7 +149,7 @@ If Windows Security removes the exe after a build (programs made with PyInstalle
 
 ## Upgrading
 
-Replace the exe (or pull the new code) and start it again. Your database is upgraded automatically the first time. Version 0.2 added accounts, so after upgrading from 0.1 you'll be asked to create the administrator account. Version 0.3 only changes how Snapshots opens (its own window instead of a browser tab); your accounts, albums and photos are untouched. You will need to log in once more, because the app window keeps its own login separate from your browser. Version 0.4 then checks every photo once in the background (copies, blur, content and text), which takes a while for a big library; everything keeps working meanwhile.
+Replace the exe (or pull the new code) and start it again. Your database is upgraded automatically the first time. Version 0.2 added accounts, so after upgrading from 0.1 you'll be asked to create the administrator account. Version 0.3 only changes how Snapshots opens (its own window instead of a browser tab); your accounts, albums and photos are untouched. You will need to log in once more, because the app window keeps its own login separate from your browser. Version 0.4 then checks every photo once in the background (copies, blur, content and text), which takes a while for a big library; everything keeps working meanwhile. Version 0.5 looks once through your JPEG and HEIC photos for motion photos and keywords (quick: it reads only the start of each file), pairs Live Photos, stacks RAW + JPEG pairs, and picks up RAW files that earlier versions skipped.
 
 ## Roadmap
 
@@ -147,8 +162,11 @@ Replace the exe (or pull the new code) and start it again. Your database is upgr
 - [x] Events and trips
 - [x] Duplicate and burst finder, blurry and dark photos
 - [x] Search by what is in a photo, and by text in photos
+- [x] Archive, folders, tags, stacks and memories
+- [x] Map view
+- [x] RAW files, Live Photos and motion photos
 - [ ] Android app with automatic backup
-- [ ] Map view (could use offline map tiles)
+- [ ] Sharing links for people without an account
 - [ ] Run at startup as a Windows service
 
 ## Development
@@ -167,6 +185,7 @@ The tests build small libraries of generated images, so they don't touch your ph
 | `snapshots/faces.py` | Finds faces and groups them into people |
 | `snapshots/places.py` | Offline nearest-town lookup from GeoNames |
 | `snapshots/analysis.py` | Copies, bursts, blurry and dark photos, and events |
+| `snapshots/linking.py` | Live Photos, motion photos, RAW + JPEG stacks, keywords as tags |
 | `snapshots/clipsearch.py` | Search by what is in a photo (CLIP) |
 | `snapshots/ocr.py` | Reading text in photos |
 | `snapshots/downloads.py` | Downloading models once and checking their SHA-256 |
@@ -176,6 +195,7 @@ The tests build small libraries of generated images, so they don't touch your ph
 | `snapshots/db.py` | SQLite schema, upgrades, search and paging |
 | `snapshots/app.py`, `routes_*.py` | Web server and JSON API |
 | `snapshots/static/` | The web interface (plain HTML, CSS and JavaScript, no build step) |
+| `snapshots/static/vendor/` | Leaflet and the country outlines for the map (licences in `LICENSES.txt`) |
 | `snapshots.spec`, `build.bat` | Build recipe for `Snapshots.exe` |
 | `.github/workflows/build-exe.yml` | Builds the exe on GitHub, then starts it and checks the window opens and closes properly |
 
@@ -189,9 +209,11 @@ Contributions are welcome. Please open an issue before starting a large change s
 - Search by content: [CLIP](https://github.com/openai/CLIP) by OpenAI, MIT licence, in the ONNX version by [Xenova](https://huggingface.co/Xenova/clip-vit-base-patch32)
 - Text reading: [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR), Apache 2.0 licence, in the ONNX version by [RapidOCR](https://huggingface.co/SWHL/RapidOCR)
 - [ONNX Runtime](https://onnxruntime.ai/), MIT licence
+- RAW files: [LibRaw](https://www.libraw.org/) (LGPL 2.1 or CDDL) through [rawpy](https://github.com/letmaik/rawpy) (MIT)
+- Map: [Leaflet](https://leafletjs.com/) (BSD 2-clause) and [Leaflet.markercluster](https://github.com/Leaflet/Leaflet.markercluster) (MIT); map pictures © [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors; country outlines from [Natural Earth](https://www.naturalearthdata.com/) (public domain) via [world-atlas](https://github.com/topojson/world-atlas) (ISC)
 - [OpenCV](https://opencv.org/), [Pillow](https://python-pillow.org/), [pillow-heif](https://github.com/bigcat88/pillow_heif), [FastAPI](https://fastapi.tiangolo.com/)
 
-The models and place data are downloaded by each installation; they are not part of this repository.
+The models and place data are downloaded by each installation; they are not part of this repository. The map's code and country outlines are included, in `snapshots/static/vendor`.
 
 ## AI disclaimer
 

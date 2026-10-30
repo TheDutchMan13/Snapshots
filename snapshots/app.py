@@ -27,9 +27,21 @@ def _static_dir() -> Path:
 STATIC_DIR = _static_dir()
 _RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
 _CSP = (
-    "default-src 'self'; img-src 'self' data:; media-src 'self'; "
+    "default-src 'self'; img-src 'self' data:{tiles}; media-src 'self'; "
     "style-src 'self'; script-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
 )
+
+
+def tile_source(template: str) -> str:
+    """The web address map pictures come from, for the security policy ("" if none)."""
+    m = re.match(r"^(https?://)([^/]+)/", template or "")
+    if not m:
+        return ""
+    host = m.group(2)
+    host = re.sub(r"^\{[a-z]\}\.", "*.", host)  # {s}.tile.example.org: any of its servers
+    if "{" in host or "}" in host or "'" in host or ";" in host or " " in host:
+        return ""
+    return m.group(1) + host
 # API addresses anyone may call without logging in.
 PUBLIC_API = {"/api/health", "/api/auth/state", "/api/auth/login", "/api/auth/setup"}
 
@@ -75,6 +87,8 @@ def create_app(cfg: Config, start_worker: bool = True) -> FastAPI:
     app = FastAPI(title="Snapshots", version=__version__, lifespan=lifespan,
                   docs_url=None, redoc_url=None, openapi_url=None)
     app.state.ctx = ctx
+    tiles = tile_source(cfg.map_tiles)
+    csp = _CSP.format(tiles=" " + tiles if tiles else "")
 
     @app.middleware("http")
     async def guard(request: Request, call_next):
@@ -99,15 +113,16 @@ def create_app(cfg: Config, start_worker: bool = True) -> FastAPI:
                 return JSONResponse({"detail": "Please log in."}, status_code=401)
         response = await call_next(request)
         response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["Content-Security-Policy"] = _CSP
+        response.headers["Content-Security-Policy"] = csp
         response.headers["Referrer-Policy"] = "no-referrer"
         if path.startswith("/api/") and "cache-control" not in response.headers:
             response.headers["Cache-Control"] = "no-store"
         return response
 
-    from . import routes_auth, routes_collections, routes_explore, routes_library, routes_people
+    from . import (routes_auth, routes_collections, routes_explore, routes_library, routes_organize,
+                   routes_people)
 
-    for module in (routes_auth, routes_library, routes_collections, routes_people, routes_explore):
+    for module in (routes_auth, routes_library, routes_collections, routes_people, routes_explore, routes_organize):
         app.include_router(module.router(ctx))
 
     @app.get("/", include_in_schema=False)

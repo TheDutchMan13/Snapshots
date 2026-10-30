@@ -1,7 +1,7 @@
 name: Build Windows exe
 
 # Builds Snapshots.exe on a Windows machine at GitHub.
-#   - Push a tag like v0.4.0 to publish the exe on the repository's Releases page.
+#   - Push a tag like v0.5.0 to publish the exe on the repository's Releases page.
 #   - Or open the Actions tab, pick this workflow and press "Run workflow";
 #     the exe is then attached to the run as a download.
 on:
@@ -43,6 +43,8 @@ jobs:
           $conf = Join-Path $env:RUNNER_TEMP 'smoke.toml'
           New-Item -ItemType Directory -Force $lib | Out-Null
           python -c "from PIL import Image; Image.new('RGB', (64, 64), (10, 120, 160)).save(r'$lib\a.jpg')"
+          # A camera RAW file (a small DNG): thumbnails for RAW files come from LibRaw, a native library in the exe.
+          python -c "import sys; sys.path[:0] = ['.', 'tests']; from helpers import make_dng; from pathlib import Path; make_dng(Path(r'$lib\camera.dng'))"
           # No downloads in the smoke test: faces and places are checked by the Python tests.
           [IO.File]::WriteAllText($conf, "faces = false`nplaces = false`nsmart_search = false`ntext_search = false`nscan_interval_minutes = 0`n")
 
@@ -65,7 +67,7 @@ jobs:
               -Headers $hdr -WebSession $web | Out-Null
             for ($i = 0; $i -lt 60; $i++) {
               $s = Invoke-RestMethod "$base/api/status" -WebSession $web
-              if ($s.photos -ge 1 -and -not $s.scan.running) { $status = $s; break }
+              if ($s.photos -ge 2 -and -not $s.scan.running) { $status = $s; break }
               Start-Sleep -Seconds 1
             }
           }
@@ -74,6 +76,10 @@ jobs:
             $page  = Invoke-WebRequest "$base/" -UseBasicParsing
             $js    = Invoke-WebRequest "$base/static/app.js" -UseBasicParsing
             $thumb = Invoke-WebRequest "$base/api/assets/1/thumb" -UseBasicParsing -WebSession $web
+            $items = (Invoke-RestMethod "$base/api/assets" -WebSession $web).items
+            $raw   = $items | Where-Object { $_.filename -eq 'camera.dng' }
+            $rawThumb = if ($raw -and $raw.has_thumb) { (Invoke-WebRequest "$base/api/assets/$($raw.id)/thumb" -UseBasicParsing -WebSession $web).StatusCode } else { 0 }
+            $map   = Invoke-WebRequest "$base/static/vendor/leaflet.js" -UseBasicParsing
             $anon  = try { Invoke-WebRequest "$base/api/status" -UseBasicParsing; 200 } catch { $_.Exception.Response.StatusCode.value__ }
           }
           Get-Process -Name Snapshots -ErrorAction SilentlyContinue | Stop-Process -Force
@@ -86,8 +92,12 @@ jobs:
           if ($login.StatusCode -ne 200 -or $page.Content -notmatch 'Snapshots') { throw 'The web pages are not served.' }
           if ($js.StatusCode    -ne 200) { throw 'Bundled web files are missing from the exe.' }
           if ($thumb.StatusCode -ne 200) { throw 'Thumbnails are not being made.' }
+          if (-not $status.raw)          { throw 'RAW support (rawpy) is missing from the exe.' }
+          if ($rawThumb -ne 200)         { throw "The RAW file was not read: $($raw | ConvertTo-Json -Compress)" }
+          if ($raw.taken_at -ne '2024-06-01T12:00:00') { throw "The RAW file's date was not read: $($raw.taken_at)" }
+          if ($map.StatusCode -ne 200)   { throw 'The map files are missing from the exe.' }
           if ($anon -ne 401)             { throw 'The library was visible without logging in.' }
-          Write-Host "Smoke test passed: $($status.photos) photo indexed, login required, HEIC support present."
+          Write-Host "Smoke test passed: $($status.photos) photos indexed (one RAW), login required, HEIC and RAW support present, map files served."
 
       - name: Smoke test the app window
         shell: pwsh

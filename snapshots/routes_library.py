@@ -9,7 +9,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
 
-from . import __version__, analysis, db, media
+from . import __version__, analysis, db, linking, media
 from pydantic import BaseModel
 
 from .app import current_user, require_admin, safe_filename
@@ -23,6 +23,19 @@ class ScanBody(BaseModel):
 
 
 TIME_PATTERN = r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$"
+BBOX_PATTERN = r"^-?[\d.]+,-?[\d.]+,-?[\d.]+,-?[\d.]+$"
+
+
+def _bbox(text: str | None):
+    if not text:
+        return None
+    try:
+        south, west, north, east = (float(x) for x in text.split(","))
+    except ValueError:
+        raise HTTPException(400, "Bad map area") from None
+    if not (-90 <= south <= north <= 90 and -180 <= west <= 180 and -180 <= east <= 180):
+        raise HTTPException(400, "Bad map area")
+    return south, west, north, east
 
 
 def make_filter_params(cfg):
@@ -41,10 +54,16 @@ def make_filter_params(cfg):
         start: str | None = Query(None, pattern=TIME_PATTERN),  # each parameter needs its own Query()
         end: str | None = Query(None, pattern=TIME_PATTERN),
         quality: bool = False,
+        archived: str = Query("", pattern="^(hide|only)?$"),
+        tag: int | None = None,
+        folder: str | None = Query(None, max_length=1000),
+        stacks: bool = False,
+        bbox: str | None = Query(None, pattern=BBOX_PATTERN),
     ) -> db.Filter:
         return db.Filter(q=q, kind=kind, favorite=favorite, trashed=trashed, album=album, person=person,
                          country=country, state=state, city=city, start=start, end=end,
-                         low_quality=analysis.low_quality_sql(cfg) if quality else None)
+                         low_quality=analysis.low_quality_sql(cfg) if quality else None,
+                         archived=archived, tag=tag, folder=folder, stacks=stacks, bbox=_bbox(bbox))
 
     return filter_params
 
@@ -65,6 +84,11 @@ def asset_dict(row, score: float | None = None) -> dict:
         "trashed": row["trashed_at"] is not None,
         "place": {"city": row["city"], "state": row["state"], "country": row["country"]} if row["country"] else None,
         "has_position": row["lat"] is not None,
+        "archived": row["archived_at"] is not None,
+        "live": bool(row["live_video"] or row["motion_offset"]),
+        "stack": row["stack_id"] if row["stack_id"] and row["stack_count"] > 1 else None,
+        "stack_count": row["stack_count"] if row["stack_id"] else 0,
+        "raw": media.is_raw(row["filename"]),
         "v": row["sha1"][:8],  # changes when the file changes, so browsers refetch
     }
     if score is not None:
@@ -171,6 +195,18 @@ def router(ctx) -> APIRouter:
                     (asset_id,),
                 )
             ]
+            out["tags"] = [
+                {"id": t["id"], "name": t["name"]}
+                for t in conn.execute(
+                    "SELECT t.id, t.name FROM tags t JOIN asset_tags at ON at.tag_id = t.id"
+                    " WHERE at.asset_id = ? ORDER BY t.name COLLATE NOCASE", (asset_id,))
+            ]
+            out["stack_items"] = [
+                {"id": m["id"], "filename": m["filename"], "v": m["sha1"][:8], "cover": bool(m["cover"]),
+                 "kind": m["kind"], "taken_at": m["taken_at"], "width": m["width"], "height": m["height"]}
+                for m in linking.stack_members(conn, row["stack_id"])
+            ] if row["stack_id"] else []
+        out["folder"] = row["path"].rpartition("/")[0]
         return out
 
     @r.get("/api/assets/{asset_id}/thumb")
@@ -194,6 +230,38 @@ def router(ctx) -> APIRouter:
         if not preview.is_file() and not media.make_preview(full, preview):
             raise HTTPException(415, "This file cannot be displayed.")
         return FileResponse(preview, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=3600"})
+
+    @r.get("/api/assets/{asset_id}/motion")
+    def get_motion(asset_id: int, request: Request):
+        """The moving part of a Live Photo or motion photo, as a video the app can play."""
+        row = get_row(asset_id, current_user(request)["id"])
+        headers = {"Cache-Control": "private, max-age=3600"}
+        cached = cfg.motion_path(asset_id)
+        if cached.is_file():
+            return FileResponse(cached, media_type="video/mp4", headers=headers)
+        if row["live_video"]:
+            with db.session(cfg.db_path) as conn:
+                clip = conn.execute("SELECT path FROM assets WHERE id = ?", (row["live_video"],)).fetchone()
+            full = original_path(cfg, clip["path"]) if clip else None
+            if full is None or not full.is_file():
+                raise HTTPException(404, "The clip is no longer on disk.")
+            if media.make_playable(full, cached):
+                return FileResponse(cached, media_type="video/mp4", headers=headers)
+            # .mov and .mp4 are the same kind of file; "video/mp4" plays in more places
+            return FileResponse(full, media_type="video/mp4", headers=headers)
+        if row["motion_offset"]:
+            with db.session(cfg.db_path) as conn:
+                length = conn.execute("SELECT motion_length FROM assets WHERE id = ?", (asset_id,)).fetchone()[0]
+            full = original_path(cfg, row["path"])
+            raw = cached.with_name(f"{asset_id}.raw.mp4")
+            if not full.is_file() or not media.extract_motion_video(full, row["motion_offset"], length, raw):
+                raise HTTPException(404, "The video could not be read from the photo.")
+            if not media.make_playable(raw, cached):
+                os.replace(raw, cached)
+            else:
+                raw.unlink(missing_ok=True)
+            return FileResponse(cached, media_type="video/mp4", headers=headers)
+        raise HTTPException(404, "This photo has no moving part.")
 
     @r.get("/api/assets/{asset_id}/original")
     def get_original(asset_id: int, request: Request, download: bool = False):
@@ -266,6 +334,8 @@ def router(ctx) -> APIRouter:
         current_user(request)
         root = library_root(cfg)
         results = [save_upload(f, root) for f in files]
+        with db.session(cfg.db_path) as conn:  # a Live Photo's photo and clip may arrive together
+            linking.link_pairs(conn, cfg)
         worker.poke()  # new photos may need places and faces
         return {"results": results}
 
@@ -276,7 +346,8 @@ def router(ctx) -> APIRouter:
         user = current_user(request)
         with db.session(cfg.db_path) as conn:
             counts = {row["kind"]: row["c"] for row in conn.execute(
-                "SELECT kind, COUNT(*) AS c FROM assets WHERE trashed_at IS NULL GROUP BY kind")}
+                f"SELECT kind, COUNT(*) AS c FROM assets a WHERE trashed_at IS NULL AND {db.LIVE_PART_HIDDEN}"
+                " GROUP BY kind")}
             trashed = conn.execute("SELECT COUNT(*) FROM assets WHERE trashed_at IS NOT NULL").fetchone()[0]
         root = cfg.library_path
         out = {
@@ -289,6 +360,7 @@ def router(ctx) -> APIRouter:
             "trashed": trashed,
             "ffmpeg": media.has_ffmpeg(),
             "heif": media.HEIF,
+            "raw": media.RAW,
             "scan_interval_minutes": cfg.scan_interval_minutes,
         }
         out.update(worker.status())

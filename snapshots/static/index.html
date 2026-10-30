@@ -16,10 +16,16 @@
     <a class="nav" href="#/photos" data-route="photos">Photos</a>
     <a class="nav" href="#/videos" data-route="videos">Videos</a>
     <a class="nav" href="#/favorites" data-route="favorites">Favourites</a>
-    <a class="nav" href="#/albums" data-route="albums">Albums</a>
+    <div class="nav-group" aria-hidden="true">Explore</div>
     <a class="nav" href="#/people" data-route="people">People</a>
     <a class="nav" href="#/places" data-route="places">Places</a>
+    <a class="nav" href="#/map" data-route="map">Map</a>
     <a class="nav" href="#/events" data-route="events">Events</a>
+    <div class="nav-group" aria-hidden="true">Organise</div>
+    <a class="nav" href="#/albums" data-route="albums">Albums</a>
+    <a class="nav" href="#/tags" data-route="tags">Tags</a>
+    <a class="nav" href="#/folders" data-route="folders">Folders</a>
+    <a class="nav" href="#/archive" data-route="archive">Archive</a>
     <a class="nav" href="#/cleanup" data-route="cleanup">Clean up</a>
     <a class="nav" href="#/trash" data-route="trash">Trash</a>
     <div class="side-foot">
@@ -43,7 +49,7 @@
       <button id="rescan" class="btn" type="button">Rescan</button>
       <button id="upload-btn" class="btn primary" type="button">Upload</button>
       <input id="upload-input" class="sr-only" type="file" multiple tabindex="-1"
-             accept="image/*,video/*,.heic,.heif,.avif,.mkv,.m4v,.3gp" aria-label="Choose files to upload">
+             accept="image/*,video/*,.heic,.heif,.avif,.mkv,.m4v,.3gp,.dng,.cr2,.cr3,.crw,.nef,.nrw,.arw,.srf,.sr2,.orf,.rw2,.raf,.pef,.srw,.3fr,.erf,.kdc,.dcr,.mrw,.mos,.iiq,.rwl,.x3f" aria-label="Choose files to upload">
     </header>
 
     <main id="scroller" class="content" tabindex="-1">
@@ -85,6 +91,7 @@
       <span class="v-label">Favourite</span>
     </button>
     <button id="v-album" class="v-btn" type="button"><span class="v-label">Add to album</span></button>
+    <button id="v-archive" class="v-btn" type="button"><span class="v-label">Archive</span></button>
     <button id="v-trash" class="v-btn" type="button"><span class="v-label">Move to trash</span></button>
     <button id="v-info" class="v-btn" type="button" aria-pressed="false"><span class="v-label">Info</span></button>
     <a id="v-download" class="v-btn" href="#" download><span class="v-label">Download</span></a>
@@ -94,6 +101,7 @@
     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7" /></svg>
   </button>
   <div id="v-stage" class="v-stage"></div>
+  <div id="v-stack" class="v-stack" hidden></div>
   <button id="v-next" class="v-nav next" type="button" aria-label="Next">
     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5l7 7-7 7" /></svg>
   </button>

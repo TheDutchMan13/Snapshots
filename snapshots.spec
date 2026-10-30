@@ -17,6 +17,13 @@ datas += heif_datas
 binaries += heif_binaries
 hiddenimports += heif_hidden
 
+# rawpy (camera RAW files) wraps LibRaw, a native library; collect it the same way.
+if importlib.util.find_spec("rawpy") is not None:
+    raw_datas, raw_binaries, raw_hidden = collect_all("rawpy")
+    datas += raw_datas
+    binaries += raw_binaries
+    hiddenimports += raw_hidden
+
 # The app window: pywebview draws it with Microsoft's WebView2 through pythonnet. PyInstaller has
 # hooks for all three; the Windows-only parts are named here so a missing one fails loudly.
 # Search by content and text reading run on onnxruntime; its hook collects the native library.
