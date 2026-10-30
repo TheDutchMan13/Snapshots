@@ -11,7 +11,18 @@
   password or PIN, and open the locked folder.
 * The locked folder opens with a PIN (stored like a password) for a few minutes at a time, and only
   in the session where it was typed.
+* Two-step login (optional, per account) asks for a 6-digit code from an authenticator app (TOTP,
+  RFC 6238) after the password. Each code works once. Ten one-time recovery codes are given when it is
+  turned on, for a lost phone; an administrator can also turn it off for someone.
+* Lockouts: wrong passwords are counted per device. A browser that has logged in before carries a
+  "known device" cookie and has its own allowance, so someone guessing at your user name from elsewhere
+  can't lock you out of your own browser. Unknown devices share one allowance per user name, and each
+  network address has one too.
 """
+
+import base64
+import struct
+import urllib.parse
 
 import hashlib
 import hmac
@@ -22,6 +33,11 @@ from collections import defaultdict, deque
 from datetime import datetime, timedelta
 
 COOKIE = "snapshots_session"
+DEVICE_COOKIE = "snapshots_device"
+DEVICE_DAYS = 400
+TOTP_STEP = 30
+TICKET_SECONDS = 5 * 60
+TICKET_TRIES = 5
 CSRF_HEADER = "x-snapshots-request"
 SESSION_DAYS = 30
 MIN_PASSWORD = 8
@@ -201,3 +217,145 @@ class LoginThrottle:
         with self._lock:
             for key in keys:
                 self._failures.pop(key, None)
+
+
+# ---------------------------------------------------------------- known devices
+
+def remember_device(conn, user_id: int, token: str | None, user_agent: str | None) -> str:
+    """Mark this browser as one the user logs in from. Returns the (possibly new) device token."""
+    stamp = datetime.now().isoformat(timespec="seconds")
+    if token:
+        cur = conn.execute("UPDATE known_devices SET last_used_at = ?, user_agent = ? WHERE token_hash = ? AND user_id = ?",
+                           (stamp, (user_agent or "")[:200], _token_hash(token), user_id))
+        if cur.rowcount:
+            return token
+    token = token if token and len(token) >= 32 else secrets.token_urlsafe(32)
+    conn.execute("INSERT OR REPLACE INTO known_devices (token_hash, user_id, created_at, last_used_at, user_agent)"
+                 " VALUES (?, ?, ?, ?, ?)", (_token_hash(token), user_id, stamp, stamp, (user_agent or "")[:200]))
+    return token
+
+
+def is_known_device(conn, token: str | None, username: str) -> bool:
+    if not token:
+        return False
+    return conn.execute(
+        "SELECT 1 FROM known_devices d JOIN users u ON u.id = d.user_id WHERE d.token_hash = ? AND u.username = ?",
+        (_token_hash(token), username.strip())).fetchone() is not None
+
+
+def throttle_keys(known: bool, username: str, device_token: str | None, address: str) -> tuple[str, ...]:
+    """Which allowances a login attempt counts against (see the module notes)."""
+    name = username.strip().lower()
+    if known:
+        return (f"device:{_token_hash(device_token or '')}:{name}",)
+    return (f"user:{name}", f"addr:{address}")
+
+
+# ---------------------------------------------------------------- two-step login (TOTP)
+
+def new_totp_secret() -> str:
+    return base64.b32encode(secrets.token_bytes(20)).decode("ascii")
+
+
+def _b32(secret: str) -> bytes:
+    s = secret.strip().replace(" ", "").upper()
+    return base64.b32decode(s + "=" * (-len(s) % 8))
+
+
+def totp_at(secret: str, step: int, digits: int = 6) -> str:
+    mac = hmac.new(_b32(secret), struct.pack(">Q", step), hashlib.sha1).digest()
+    offset = mac[-1] & 0x0F
+    value = struct.unpack(">I", mac[offset:offset + 4])[0] & 0x7FFFFFFF
+    return str(value % 10 ** digits).zfill(digits)
+
+
+def check_totp(secret: str, code: str, last_step: int | None, now: float | None = None) -> int | None:
+    """The time step the code belongs to (allowing one step of clock drift either way), or None.
+    A step at or before last_step is refused, so a code can't be used twice."""
+    code = "".join(c for c in (code or "") if c.isdigit())
+    if len(code) != 6:
+        return None
+    step = int((time.time() if now is None else now) // TOTP_STEP)
+    for s in (step - 1, step, step + 1):
+        if last_step is not None and s <= last_step:
+            continue
+        if hmac.compare_digest(totp_at(secret, s), code):
+            return s
+    return None
+
+
+def otpauth_uri(secret: str, username: str, issuer: str = "Snapshots") -> str:
+    label = urllib.parse.quote(f"{issuer}:{username}", safe=":@")
+    return (f"otpauth://totp/{label}?secret={secret}&issuer={urllib.parse.quote(issuer)}"
+            f"&algorithm=SHA1&digits=6&period={TOTP_STEP}")
+
+
+def _recovery_hash(code: str) -> str:
+    return _token_hash("".join(c for c in code.lower() if c.isalnum()))
+
+
+def new_recovery_codes(conn, user_id: int, n: int = 10) -> list[str]:
+    """Replace the user's recovery codes. Returns them (shown only this once)."""
+    alphabet = "abcdefghjkmnpqrstuvwxyz23456789"
+    codes = ["".join(secrets.choice(alphabet) for _ in range(5)) + "-" + "".join(secrets.choice(alphabet) for _ in range(5))
+             for _ in range(n)]
+    conn.execute("DELETE FROM recovery_codes WHERE user_id = ?", (user_id,))
+    conn.executemany("INSERT INTO recovery_codes (user_id, code_hash) VALUES (?, ?)",
+                     [(user_id, _recovery_hash(c)) for c in codes])
+    return codes
+
+
+def use_recovery_code(conn, user_id: int, code: str) -> bool:
+    cur = conn.execute("UPDATE recovery_codes SET used_at = ? WHERE user_id = ? AND code_hash = ? AND used_at IS NULL",
+                       (datetime.now().isoformat(timespec="seconds"), user_id, _recovery_hash(code)))
+    return cur.rowcount == 1
+
+
+def check_second_step(conn, user_id: int, code: str) -> str | None:
+    """'totp' or 'recovery' if the code is right (and records that it was used), else None."""
+    row = conn.execute("SELECT totp_secret, totp_last FROM users WHERE id = ?", (user_id,)).fetchone()
+    if row is None or not row["totp_secret"]:
+        return None
+    step = check_totp(row["totp_secret"], code, row["totp_last"])
+    if step is not None:
+        # Only one request can claim a step: the condition makes a replayed code fail.
+        cur = conn.execute("UPDATE users SET totp_last = ? WHERE id = ? AND (totp_last IS NULL OR totp_last < ?)",
+                           (step, user_id, step))
+        return "totp" if cur.rowcount == 1 else None
+    if any(c.isalpha() for c in code or "") and use_recovery_code(conn, user_id, code):
+        return "recovery"
+    return None
+
+
+class Tickets:
+    """Password accepted, code still to come: a short-lived ticket links the two steps."""
+
+    def __init__(self):
+        self._items: dict[str, dict] = {}
+        self._lock = threading.Lock()
+
+    def create(self, user_id: int, keys: tuple[str, ...]) -> str:
+        ticket = secrets.token_urlsafe(24)
+        now = time.time()
+        with self._lock:
+            for t in [t for t, v in self._items.items() if v["expires"] < now]:
+                del self._items[t]
+            self._items[ticket] = {"user_id": user_id, "keys": keys, "expires": now + TICKET_SECONDS, "tries": 0}
+        return ticket
+
+    def get(self, ticket: str) -> dict | None:
+        with self._lock:
+            item = self._items.get(ticket or "")
+            if item is None or item["expires"] < time.time() or item["tries"] >= TICKET_TRIES:
+                self._items.pop(ticket or "", None)
+                return None
+            return dict(item)
+
+    def failed(self, ticket: str) -> None:
+        with self._lock:
+            if ticket in self._items:
+                self._items[ticket]["tries"] += 1
+
+    def done(self, ticket: str) -> None:
+        with self._lock:
+            self._items.pop(ticket, None)

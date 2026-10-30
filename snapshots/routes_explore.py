@@ -34,30 +34,44 @@ def router(ctx) -> APIRouter:
 
     # ------------------------------------------------------------ clean up
 
+    def pick(groups, kind):
+        return [g for g in groups if g["kind"] == kind] if kind else groups
+
     @r.get("/api/cleanup")
-    def cleanup_summary(request: Request):
+    def cleanup_summary(request: Request, strictness: str = Query("normal", pattern="^(strict|normal|loose)$")):
         current_user(request)
         with db.session(cfg.db_path) as conn:
-            groups = duplicates.groups(conn) if cfg.photo_checks else []
+            groups = duplicates.groups(conn, strictness) if cfg.photo_checks else []
             low = conn.execute(
                 f"SELECT COUNT(*) FROM assets a WHERE a.trashed_at IS NULL AND {db.NOT_LOCKED}"
                 f" AND {analysis.low_quality_sql(cfg)}"
             ).fetchone()[0] if cfg.photo_checks else 0
+        kinds = {}
+        for k in ("identical", "copies", "burst"):
+            gs = pick(groups, k)
+            kinds[k] = {"groups": len(gs), "extra": sum(len(g["ids"]) - 1 for g in gs),
+                        "space": sum(g["space"] for g in gs)}
         return {
             "enabled": cfg.photo_checks,
+            "strictness": strictness,
             "groups": len(groups),
-            "copies": sum(1 for g in groups if g["kind"] == "copies"),
-            "bursts": sum(1 for g in groups if g["kind"] == "burst"),
+            "copies": kinds["copies"]["groups"],
+            "bursts": kinds["burst"]["groups"],
+            "identical": kinds["identical"]["groups"],
+            "kinds": kinds,
             "extra": sum(len(g["ids"]) - 1 for g in groups),
+            "space": sum(g["space"] for g in groups),
             "low_quality": low,
             "status": worker.status()["checks"],
         }
 
     @r.get("/api/cleanup/groups")
-    def cleanup_groups(request: Request, offset: int = Query(0, ge=0), limit: int = Query(30, ge=1, le=100)):
+    def cleanup_groups(request: Request, offset: int = Query(0, ge=0), limit: int = Query(30, ge=1, le=100),
+                       strictness: str = Query("normal", pattern="^(strict|normal|loose)$"),
+                       kind: str | None = Query(None, pattern="^(identical|copies|burst)$")):
         user = current_user(request)
         with db.session(cfg.db_path) as conn:
-            groups = duplicates.groups(conn)
+            groups = pick(duplicates.groups(conn, strictness), kind)
             page = groups[offset: offset + limit]
             rows = _rows_by_id(conn, [i for g in page for i in g["ids"]], user["id"])
         out = []
@@ -67,7 +81,7 @@ def router(ctx) -> APIRouter:
                 continue
             for it in items:
                 it["sharpness"] = rows[it["id"]]["sharpness"]
-            out.append({"kind": g["kind"], "keep": g["keep"], "items": items})
+            out.append({"kind": g["kind"], "keep": g["keep"], "why": g["why"], "space": g["space"], "items": items})
         return {"groups": out, "total": len(groups), "next": offset + limit if offset + limit < len(groups) else None}
 
     @r.post("/api/cleanup/resolve")

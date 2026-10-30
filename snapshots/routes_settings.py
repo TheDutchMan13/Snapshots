@@ -8,7 +8,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from . import auth, backup, db, libraries, media, offsite, webhooks
+from . import auth, backup, db, libraries, media, offsite, storage, webhooks
 from .app import current_user, require_admin, require_session
 from .config import OFFSITE_METHODS, save_extra_libraries, save_settings
 from .scanner import delete_asset_row
@@ -31,6 +31,14 @@ class OffsiteBody(BaseModel):
 class WebhookBody(BaseModel):
     url: str = Field(min_length=1, max_length=1000)
     events: list[str] = Field(min_length=1, max_length=20)
+
+
+class XmpBody(BaseModel):
+    enabled: bool
+
+
+class StorageBody(BaseModel):
+    template: str = Field(max_length=300)
 
 
 class WebhookChange(BaseModel):
@@ -69,7 +77,47 @@ def router(ctx) -> APIRouter:
             },
             "video": {"encoder": cfg.video_encoder, "cache_gb": cfg.video_cache_gb, "ffmpeg": media.has_ffmpeg()},
             "offsite": offsite_json(),
+            "xmp": xmp_json(),
+            "storage": storage_json(cfg.upload_template),
         }
+
+    def xmp_json() -> dict:
+        return dict(worker.xmp.state, enabled=cfg.xmp_sidecars)
+
+    def storage_json(template: str) -> dict:
+        problem = storage.template_problem(template)
+        return {"template": template, "problem": problem, "examples": [] if problem else storage.examples(template),
+                "variables": storage.VARIABLES}
+
+    @r.put("/api/settings/xmp")
+    def save_xmp(body: XmpBody, request: Request):
+        require_admin(request)
+        save_settings({"xmp_sidecars": body.enabled}, cfg.config_file)
+        turned_on = body.enabled and not cfg.xmp_sidecars
+        cfg.xmp_sidecars = body.enabled
+        if turned_on:
+            with db.session(cfg.db_path) as conn:
+                worker.xmp.mark_all(conn)    # every item is looked at once; most need no sidecar
+            worker.xmp.state.update(written=0, failed=0, message=None)
+            worker.xmp.retry_at = 0
+            worker.poke()
+        return xmp_json()
+
+    @r.post("/api/settings/storage/preview")
+    def preview_storage(body: StorageBody, request: Request):
+        require_admin(request)
+        return storage_json(body.template.strip())
+
+    @r.put("/api/settings/storage")
+    def save_storage(body: StorageBody, request: Request):
+        require_admin(request)
+        template = body.template.strip()
+        problem = storage.template_problem(template)
+        if problem:
+            raise HTTPException(400, problem)
+        save_settings({"upload_template": template}, cfg.config_file)
+        cfg.upload_template = template
+        return storage_json(template)
 
     def offsite_json() -> dict:
         job = worker.offsite

@@ -30,6 +30,7 @@ class Config:
     face_match_threshold: float = 0.50     # higher = stricter grouping (more, smaller groups)
     min_faces_per_person: int = 3          # unnamed groups smaller than this are not listed
     face_merge_threshold: float = 0.42     # merge two groups this alike on average (0 turns it off)
+    face_suggest_threshold: float = 0.30   # suggest (not make) merges of groups this alike on average
     photo_checks: bool = True              # find copies, bursts, blurry and dark photos
     duplicate_distance: int = 8            # copies differ in at most this many of 64 fingerprint bits
     burst_seconds: int = 30                # photos this close in time ...
@@ -53,6 +54,8 @@ class Config:
     offsite_target: str = ""               # a folder (folder), an rclone remote:path, or a restic repository
     offsite_hours: float = 24              # how often the copy is brought up to date
     offsite_password_file: Path | None = None  # restic: a file holding the repository password
+    xmp_sidecars: bool = False             # write descriptions, tags, people and dates to .xmp files beside photos
+    upload_template: str = "Uploads/{year}/{month}"  # where uploads and imported files are filed
     config_file: Path | None = None  # the file these settings were read from, if any
 
     @property
@@ -127,13 +130,14 @@ class Config:
 _FILE_KEYS = {
     "host": str, "port": int, "index_on_start": bool, "scan_interval_minutes": int,
     "faces": bool, "places": bool, "face_threads": int, "face_match_threshold": float,
-    "min_faces_per_person": int, "face_merge_threshold": float,
+    "min_faces_per_person": int, "face_merge_threshold": float, "face_suggest_threshold": float,
     "photo_checks": bool, "duplicate_distance": int, "burst_seconds": int, "burst_distance": int,
     "blur_threshold": float, "dark_threshold": float, "event_gap_hours": float, "event_min_items": int,
     "smart_search": bool, "text_search": bool, "search_threads": int,
     "map_tiles": str, "map_attribution": str,
     "backup_hours": float, "backup_keep": int, "video_encoder": str, "video_cache_gb": float,
     "offsite_method": str, "offsite_target": str, "offsite_hours": float,
+    "xmp_sidecars": bool, "upload_template": str,
 }
 VIDEO_ENCODERS = ("auto", "libx264", "h264_amf", "h264_nvenc", "h264_qsv")
 OFFSITE_METHODS = ("", "folder", "rclone", "restic")
@@ -242,6 +246,10 @@ def load_config(config_file: str | os.PathLike | None = None, **overrides) -> Co
             raise ValueError(f"{path}: 'video_encoder' should be one of {', '.join(VIDEO_ENCODERS)}")
         if cfg.offsite_method not in OFFSITE_METHODS:
             raise ValueError(f"{path}: 'offsite_method' should be \"\", folder, rclone or restic")
+        from .storage import template_problem  # here, not at the top: storage imports this module
+        problem = template_problem(cfg.upload_template)
+        if problem:
+            raise ValueError(f"{path}: 'upload_template': {problem}")
 
     for key, value in overrides.items():
         if value is None:

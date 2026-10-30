@@ -541,6 +541,11 @@ async function renderPersonHead(id) {
       } catch (err) { flashNote(err.message); }
     }),
   ]);
+  if (!person.hidden) {
+    suggestionStrip(person.id).then((strip) => {
+      if (strip && S.route.person === id) $("page-head").append(strip);
+    });
+  }
 }
 
 async function mergePerson(person) {
@@ -1083,6 +1088,63 @@ async function renderPeople() {
     grid.append(a);
   }
   coll.replaceChildren(grid);
+  if (!hidden) suggestionStrip(null).then((strip) => { if (strip) coll.prepend(strip); });
+}
+
+/** "Same person?" questions: for everyone (person = null) or for one person. Null when there are none. */
+async function suggestionStrip(person) {
+  let data;
+  try { data = await api(`/api/people/suggestions?limit=${person ? 6 : 12}${person ? `&person=${person}` : ""}`); }
+  catch (_) { return null; }
+  if (!data.suggestions.length) return null;
+  const box = el("section", "suggest");
+  const h = el("h2", "section-title", person ? "Might also be them" : "Same person?");
+  h.append(el("span", "muted", person ? "Faces that look alike" : `${plural(data.total, "question")} to help group faces`));
+  box.append(h);
+  const row = el("div", "suggest-row");
+  box.append(row);
+  const nameOf = (p) => p.name || "Unnamed";
+  for (const sg of data.suggestions) {
+    // On a person's page, "them" is always on the left.
+    let { a, b } = sg;
+    if (person && b.id === person) [a, b] = [b, a];
+    const card = el("div", "suggest-card");
+    const faces = el("div", "suggest-faces");
+    for (const p of [a, b]) {
+      const f = link("", `#/people/${p.id}`, "suggest-face");
+      f.title = `${nameOf(p)} · ${plural(p.photos, "photo")}`;
+      f.append(p.face_id ? img(faceUrl(p.face_id), "", "avatar") : el("span", "avatar"));
+      f.append(el("span", p.name ? null : "unnamed", nameOf(p)), el("small", null, plural(p.photos, "photo")));
+      faces.append(f);
+    }
+    const named = a.name || b.name;
+    const q = sg.kind === "is_this" || (named && !(a.name && b.name))
+      ? `Is this ${named || "the same person"}?`
+      : sg.same_name ? `Both are called ${a.name}. One person?` : "Same person?";
+    card.append(faces, el("p", "suggest-q", q));
+    if (!sg.likely) card.append(el("p", "muted small", "Not very alike"));
+    const done = (text) => { card.remove(); if (text) flashNote(text); if (!row.children.length) box.remove(); };
+    // The named (or bigger) person keeps their name: the other one joins them.
+    const [keep, gone] = (b.name && !a.name) || (!a.name && !b.name && b.photos > a.photos) ? [b, a] : [a, b];
+    const acts = el("div", "suggest-acts");
+    acts.append(
+      button("Yes", "btn small primary", async () => {
+        try {
+          await post(`/api/people/${gone.id}/merge`, { into: keep.id });
+          done(`Put together${keep.name ? ` as ${keep.name}` : ""}`);
+          if (person && gone.id === person) location.hash = `#/people/${keep.id}`;
+          else if (person) render();
+        } catch (err) { flashNote(err.message); }
+      }),
+      button("No", "btn small", async () => {
+        try { await post("/api/people/not-same", { a: a.id, b: b.id }); done(); } catch (err) { flashNote(err.message); }
+      }),
+      button("Skip", "btn small", () => done()),
+    );
+    card.append(acts);
+    row.append(card);
+  }
+  return box;
 }
 
 // ------------------------------------------------------------------ places page
@@ -1440,8 +1502,23 @@ async function renderMap() {
 
 // ------------------------------------------------------------------ clean up page
 
+const CLEANUP_KINDS = [
+  ["", "All"],
+  ["identical", "Identical files"],
+  ["copies", "Look alike"],
+  ["burst", "Bursts"],
+];
+const CLEANUP_HELP = {
+  "": "Each group's best item is marked to keep. Click items to change what to keep. Nothing is deleted: the rest go to the trash, and the files are only removed from your disk when the trash is emptied.",
+  identical: "The very same file, more than once (in two folders, say). Keeping one loses nothing.",
+  copies: "Photos that look the same: a smaller or re-saved copy, or the same picture from another app. The one with the most pixels is kept.",
+  burst: "Photos taken seconds apart. Keep your favourite, or stack them so they show as one.",
+};
+
 async function renderCleanup() {
-  const sum = await api("/api/cleanup");
+  const kind = S.cleanupKind || "";
+  const strictness = S.cleanupStrictness || "normal";
+  const sum = await api(`/api/cleanup?strictness=${strictness}`);
   const st = sum.status || {};
   headRow("Clean up", null, [], !sum.enabled ? "Photo checks are turned off in the settings."
     : st.pending ? `Still checking photos: ${plural(st.pending, "photo")} to go.` : null);
@@ -1453,23 +1530,48 @@ async function renderCleanup() {
   q.append(el("strong", null, "Blurry or dark photos"), el("span", "muted", sum.low_quality ? plural(sum.low_quality, "photo") : "None found"));
   frag.append(q);
 
-  const h = el("h2", "section-title", "Copies and bursts");
-  if (sum.groups) h.append(el("span", "muted", `${plural(sum.groups, "group")} · ${plural(sum.extra, "extra photo")}`));
+  const h = el("h2", "section-title", "Duplicates");
+  if (sum.groups) h.append(el("span", "muted", `${plural(sum.extra, "extra item")} · ${fmtSize(sum.space)} could be freed`));
   frag.append(h);
-  if (!sum.groups) {
-    frag.append(el("p", "muted", "No copies or bursts found."));
+
+  const bar = el("div", "cleanup-bar");
+  const tabs = el("div", "tabs");
+  for (const [k, label] of CLEANUP_KINDS) {
+    const n = k ? sum.kinds[k].groups : sum.groups;
+    const t = button(n ? `${label} (${n})` : label, "tab", () => { S.cleanupKind = k; renderCleanup(); });
+    t.setAttribute("aria-pressed", String(k === kind));
+    tabs.append(t);
+  }
+  const strictWrap = el("label", "field inline compact");
+  strictWrap.append(el("span", null, "Look-alikes"));
+  const sel = el("select");
+  for (const [v, label] of [["strict", "Nearly identical only"], ["normal", "Normal"], ["loose", "Also similar shots"]]) {
+    const o = el("option", null, label);
+    o.value = v;
+    o.selected = v === strictness;
+    sel.append(o);
+  }
+  sel.addEventListener("change", () => { S.cleanupStrictness = sel.value; renderCleanup(); });
+  strictWrap.append(sel);
+  bar.append(tabs, strictWrap);
+  frag.append(bar);
+
+  const info = kind ? sum.kinds[kind] : { groups: sum.groups, extra: sum.extra, space: sum.space };
+  frag.append(el("p", "muted", CLEANUP_HELP[kind]));
+  if (!info.groups) {
+    frag.append(el("p", "muted", kind ? "None found." : "No duplicates found."));
     $("collection").replaceChildren(frag);
     return;
   }
-  frag.append(el("p", "muted", "In each group the best photo (most pixels, then sharpest) is marked to keep. Click photos to change what to keep. Nothing is deleted: the rest go to the trash."));
-  const bulk = button(`Keep the best of every group`, "btn", async () => {
-    const ok = await confirmBox(`Move ${plural(sum.extra, "photo")} to the trash?`,
-      "Each group keeps its best photo. The others can be restored from the trash until it is emptied.", "Move to trash");
+  const params = `strictness=${strictness}${kind ? `&kind=${kind}` : ""}`;
+  const bulk = button(`Keep the best of every group (frees ${fmtSize(info.space)})`, "btn", async () => {
+    const ok = await confirmBox(`Move ${plural(info.extra, "item")} to the trash?`,
+      "Each group keeps its best item. The others can be restored from the trash until it is emptied.", "Move to trash");
     if (!ok) return;
     try {
       let moved = 0;
       for (;;) {
-        const page = await api("/api/cleanup/groups?limit=100");
+        const page = await api(`/api/cleanup/groups?limit=100&${params}`);
         if (!page.groups.length) break;
         for (const g of page.groups) {
           const res = await post("/api/cleanup/resolve", { keep: [g.keep], trash: g.items.map((i) => i.id).filter((i) => i !== g.keep) });
@@ -1477,7 +1579,7 @@ async function renderCleanup() {
         }
         if (page.groups.length < 100 && !page.next) break;
       }
-      flashNote(`${plural(moved, "photo")} moved to the trash`);
+      flashNote(`${plural(moved, "item")} moved to the trash`);
       refreshStatus();
       render();
     } catch (err) { flashNote(err.message); }
@@ -1493,7 +1595,7 @@ async function renderCleanup() {
   async function loadGroups() {
     more.disabled = true;
     try {
-      const page = await api(`/api/cleanup/groups?offset=${offset}&limit=20`);
+      const page = await api(`/api/cleanup/groups?offset=${offset}&limit=20&${params}`);
       page.groups.forEach((g) => list.append(groupCard(g)));
       offset = page.next || offset + page.groups.length;
       more.hidden = !page.next;
@@ -1507,8 +1609,11 @@ function groupCard(g) {
   const card = el("section", "dup-group");
   const keep = new Set([g.keep]);
   const head = el("div", "dup-head");
-  head.append(el("strong", null, g.kind === "burst" ? "Burst" : "Copies"),
-    el("span", "muted", `${fmtDateTime(g.items[0].taken_at)} · ${plural(g.items.length, "photo")}`));
+  const label = { identical: "Identical files", burst: "Burst", copies: "Look alike" }[g.kind] || "Copies";
+  head.append(el("strong", null, label),
+    el("span", "muted", `${fmtDateTime(g.items[0].taken_at)} · ${plural(g.items.length, "item")}` +
+      (g.space ? ` · ${fmtSize(g.space)} to free` : "")));
+  if (g.why) head.append(el("span", "dup-why", `Kept: ${g.why.toLowerCase()}`));
   const row = el("div", "dup-row");
   const draw = () => row.querySelectorAll(".dup-item").forEach((d) => {
     const on = keep.has(+d.dataset.id);
@@ -1524,6 +1629,8 @@ function groupCard(g) {
     b.append(img(thumbUrl(it.id, it.v), it.filename), el("span", "dup-flag"));
     const meta = el("span", "dup-meta");
     meta.append(el("span", null, it.width && it.height ? `${it.width} × ${it.height}` : it.filename), el("span", null, fmtSize(it.size)));
+    const folder = (it.path || "").split("/").slice(0, -1).join("/");
+    meta.append(el("span", "dup-folder", folder || libraryName()));
     if (it.id === g.keep) meta.append(el("span", "best", "Best"));
     b.append(meta);
     b.addEventListener("click", () => {
@@ -1539,11 +1646,11 @@ function groupCard(g) {
       try {
         await post("/api/cleanup/resolve", { keep: [...keep], trash });
         card.remove();
-        flashNote(trash.length ? `${plural(trash.length, "photo")} moved to the trash` : "Kept them all");
+        flashNote(trash.length ? `${plural(trash.length, "item")} moved to the trash` : "Kept them all");
         refreshStatus();
       } catch (err) { flashNote(err.message); }
     }),
-    button(g.kind === "burst" ? "Stack them" : "Stack them instead", "btn small", async () => {
+    g.kind === "identical" ? "" : button(g.kind === "burst" ? "Stack them" : "Stack them instead", "btn small", async () => {
       const ids = g.items.map((i) => i.id);
       const first = [...keep][0];
       try {
@@ -2044,6 +2151,8 @@ menu.addEventListener("click", async (e) => {
     setPin();
   } else if (action === "keys") {
     manageKeys();
+  } else if (action === "security") {
+    loginSecurity();
   } else if (action === "settings") {
     manageSettings();
   } else if (action === "import") {
@@ -2082,7 +2191,7 @@ async function manageUsers() {
           for (const u of users) {
             const rowEl = el("div", "user-row");
             const who = el("div", "who");
-            who.append(el("div", null, u.username), el("div", "role", u.is_admin ? "Administrator" : "Member"));
+            who.append(el("div", null, u.username), el("div", "role", (u.is_admin ? "Administrator" : "Member") + (u.two_step ? " · two-step login" : "")));
             rowEl.append(who);
             rowEl.append(button("Reset password", "btn small", async () => {
               const pw = window.prompt(`New password for ${u.username} (8 characters or more):`);
@@ -2090,6 +2199,13 @@ async function manageUsers() {
               try { await patch(`/api/users/${u.id}`, { password: pw }); ctl.error(""); flashNote(`Password changed for ${u.username}`); }
               catch (err) { ctl.error(err.message); }
             }));
+            if (u.two_step) {
+              rowEl.append(button("Turn off two-step", "btn small", async () => {
+                if (!window.confirm(`Turn off two-step login for ${u.username}? Use this when they lost their phone and their recovery codes. They can turn it on again.`)) return;
+                try { await patch(`/api/users/${u.id}`, { two_step_off: true }); ctl.error(""); flashNote(`Two-step login is off for ${u.username}`); draw(); }
+                catch (err) { ctl.error(err.message); }
+              }));
+            }
             rowEl.append(button(u.is_admin ? "Make member" : "Make administrator", "btn small", async () => {
               try { await patch(`/api/users/${u.id}`, { is_admin: !u.is_admin }); ctl.error(""); draw(); }
               catch (err) { ctl.error(err.message); }
@@ -2997,6 +3113,160 @@ async function manageKeys() {
   });
 }
 
+// ------------------------------------------------------------------ login security
+
+let qrLib = null;
+function loadQr() {
+  qrLib = qrLib || new Promise((ok, fail) => {
+    const t = document.createElement("script");
+    t.src = "/static/vendor/qrcode.js";
+    t.onload = ok;
+    t.onerror = () => { qrLib = null; fail(new Error("The QR code could not be drawn.")); };
+    document.head.append(t);
+  });
+  return qrLib;
+}
+
+/** A QR code on a canvas (dark squares on white, which phones read best in either theme). */
+async function qrCanvas(text) {
+  await loadQr();
+  const qr = window.qrcode(0, "M");
+  qr.addData(text);
+  qr.make();
+  const n = qr.getModuleCount(), cell = 5, quiet = 4;
+  const canvas = el("canvas", "qr");
+  canvas.width = canvas.height = (n + quiet * 2) * cell;
+  const g = canvas.getContext("2d");
+  g.fillStyle = "#fff";
+  g.fillRect(0, 0, canvas.width, canvas.height);
+  g.fillStyle = "#000";
+  for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) {
+    if (qr.isDark(r, c)) g.fillRect((c + quiet) * cell, (r + quiet) * cell, cell, cell);
+  }
+  canvas.setAttribute("role", "img");
+  canvas.setAttribute("aria-label", "QR code to scan with an authenticator app");
+  return canvas;
+}
+
+function recoveryBlock(codes) {
+  const box = el("div", "key-fresh");
+  box.append(el("strong", null, "Your recovery codes. Keep them somewhere safe, away from your phone: each one logs you in once if you lose the phone. They won't be shown again."));
+  const list = el("pre", "recovery-codes", codes.join("\n"));
+  const copy = button("Copy codes", "btn small", async () => {
+    try { await navigator.clipboard.writeText(codes.join("\n")); copy.textContent = "Copied"; } catch (_) { /* select by hand */ }
+  });
+  box.append(list, copy);
+  return box;
+}
+
+async function loginSecurity() {
+  await modal({
+    title: "Login security", ok: null, cancel: "Close", wide: true,
+    build: (body, ctl) => {
+      const two = el("section");
+      const devs = el("section");
+      body.append(two, devs);
+
+      const drawTwo = async () => {
+        let st;
+        try { st = await api("/api/auth/two-step"); } catch (err) { ctl.error(err.message); return; }
+        two.replaceChildren(el("h3", "section-title small", "Two-step login"));
+        if (!st.enabled) {
+          two.append(el("p", "muted", "After your password, Snapshots also asks for a 6-digit code from an app on your phone (Google Authenticator, Microsoft Authenticator, 2FAS, Aegis, 1Password…). Someone who learns your password still can't get in."));
+          two.append(button("Turn on two-step login", "btn primary", () => startTwo()));
+          return;
+        }
+        two.append(el("p", null, "On. You'll be asked for a code from your authenticator app when you log in on a new device or after logging out."));
+        two.append(el("p", "muted", st.recovery_left
+          ? `${plural(st.recovery_left, "recovery code")} left.`
+          : "No recovery codes left: make new ones, or you'll need an administrator if you lose your phone."));
+        const [pw, pwIn] = field("Your password (to make new codes or turn this off)", { type: "password", autocomplete: "current-password" });
+        const row = el("div", "row-actions");
+        row.append(
+          button("New recovery codes", "btn", async () => {
+            try {
+              const res = await post("/api/auth/two-step/recovery", { password: pwIn.value });
+              pwIn.value = ""; ctl.error("");
+              await drawTwo();
+              two.append(recoveryBlock(res.recovery_codes));
+            } catch (err) { ctl.error(err.message); }
+          }),
+          button("Turn off", "btn danger", async () => {
+            try {
+              await post("/api/auth/two-step/off", { password: pwIn.value });
+              ctl.error(""); flashNote("Two-step login is off");
+              drawTwo();
+            } catch (err) { ctl.error(err.message); }
+          }),
+        );
+        two.append(pw, row);
+      };
+
+      const startTwo = async () => {
+        let res;
+        try { res = await post("/api/auth/two-step/start"); } catch (err) { ctl.error(err.message); return; }
+        two.replaceChildren(el("h3", "section-title small", "Two-step login"));
+        two.append(el("p", null, "1. In your authenticator app, add an account and scan this code."));
+        const qrBox = el("div", "qr-box");
+        try { qrBox.append(await qrCanvas(res.uri)); } catch (err) { qrBox.append(el("p", "muted", err.message)); }
+        const secret = el("p", "muted small");
+        secret.append("Can't scan? Type this key instead: ", el("code", "secret", res.secret.replace(/(.{4})/g, "$1 ").trim()));
+        qrBox.append(secret);
+        two.append(qrBox);
+        two.append(el("p", null, "2. Type the 6-digit code the app shows for Snapshots."));
+        const [cw, code] = field("Code", { inputMode: "numeric", autocomplete: "one-time-code", maxLength: 7 });
+        const row = el("div", "row-actions");
+        row.append(
+          button("Turn on", "btn primary", async () => {
+            try {
+              const done = await post("/api/auth/two-step/confirm", { code: code.value });
+              ctl.error("");
+              await drawTwo();
+              two.append(recoveryBlock(done.recovery_codes));
+              flashNote("Two-step login is on. Your other devices have been logged out.");
+              drawDevs();
+            } catch (err) { ctl.error(err.message); }
+          }),
+          button("Cancel", "btn", () => drawTwo()),
+        );
+        two.append(cw, row);
+        code.focus();
+      };
+
+      const drawDevs = async () => {
+        let list;
+        try { ({ devices: list } = await api("/api/auth/devices")); } catch (err) { ctl.error(err.message); return; }
+        devs.replaceChildren(el("h3", "section-title small", "Devices you log in from"));
+        devs.append(el("p", "muted", "Wrong passwords typed on other devices can lock those out for a while, but never these: each has its own allowance. Forget a device you no longer use."));
+        if (!list.length) devs.append(el("p", "muted", "None yet."));
+        for (const d of list) {
+          const r = el("div", "user-row");
+          const who = el("div", "who");
+          who.append(el("div", null, deviceName(d.user_agent) + (d.this ? " (this device)" : "")),
+            el("div", "role", `First used ${fmtDay(d.created_at, { day: "numeric", month: "short", year: "numeric" })}` +
+              ` · last ${fmtDay(d.last_used_at, { day: "numeric", month: "short", year: "numeric" })}`));
+          r.append(who, button("Forget", "btn small", async () => {
+            try { await del(`/api/auth/devices/${d.id}`); drawDevs(); } catch (err) { ctl.error(err.message); }
+          }));
+          devs.append(r);
+        }
+      };
+      drawTwo();
+      drawDevs();
+    },
+  });
+}
+
+/** "Chrome on Windows", from a browser's user agent text. */
+function deviceName(ua) {
+  ua = ua || "";
+  const browser = /Edg\//.test(ua) ? "Edge" : /OPR\//.test(ua) ? "Opera" : /Firefox\//.test(ua) ? "Firefox"
+    : /Chrome\//.test(ua) ? "Chrome" : /Safari\//.test(ua) ? "Safari" : /python|httpx|curl/i.test(ua) ? "A script" : "A browser";
+  const os = /Windows/.test(ua) ? "Windows" : /Android/.test(ua) ? "Android" : /iPhone|iPad/.test(ua) ? "iPhone or iPad"
+    : /Mac OS X/.test(ua) ? "Mac" : /Linux/.test(ua) ? "Linux" : "";
+  return os ? `${browser} on ${os}` : browser;
+}
+
 // ------------------------------------------------------------------ smart albums
 
 /** Make a smart album (album = null) or change one's rules. preset: a starting rule. */
@@ -3493,6 +3763,131 @@ async function importDialog() {
 
 // ------------------------------------------------------------------ settings: offsite copy and webhooks
 
+function storageSection(ctl) {
+  const box = el("div");
+  const draw = (o) => {
+    box.replaceChildren(el("p", "muted", "Uploaded photos and videos are filed in folders inside the library, by the date they were taken (or the day they arrived if the file doesn't say). Files already in the library are never moved."));
+    const [wrap, input] = field("Folder pattern", { value: o.template, maxLength: 200, spellcheck: false });
+    const preview = el("div", "template-preview");
+    const names = el("p", "muted small");
+    names.append("You can use: ");
+    Object.entries(o.variables).forEach(([k, ex], i) => {
+      if (i) names.append(", ");
+      const b = button(`{${k}}`, "linklike chip-var", () => {
+        const at = input.selectionStart ?? input.value.length;
+        input.value = input.value.slice(0, at) + `{${k}}` + input.value.slice(input.selectionEnd ?? at);
+        input.focus();
+        show();
+      });
+      b.title = ex;
+      names.append(b);
+    });
+    let timer = null;
+    const paint = (r) => {
+      preview.replaceChildren();
+      if (r.problem) { preview.append(el("p", "form-error", r.problem)); return; }
+      preview.append(el("span", "muted small", "For example: "));
+      r.examples.forEach((x, i) => {
+        if (i) preview.append(el("span", "muted small", " or "));
+        preview.append(el("code", null, `${x}/`));
+      });
+    };
+    const show = () => {
+      clearTimeout(timer);
+      timer = setTimeout(async () => {
+        try { paint(await post("/api/settings/storage/preview", { template: input.value })); } catch (_) { /* closed */ }
+      }, 200);
+    };
+    input.addEventListener("input", show);
+    paint(o);
+    const presets = el("div", "row-actions");
+    for (const [label, t] of [["Year / month", "Uploads/{year}/{month}"], ["Year / month name", "Uploads/{year}/{monthname}"],
+      ["Year / date", "Uploads/{year}/{date}"], ["Person / year", "Uploads/{user}/{year}"]]) {
+      presets.append(button(label, "btn small", () => { input.value = t; show(); }));
+    }
+    const save = button("Save", "btn small primary", async () => {
+      try { draw(await api("/api/settings/storage", { method: "PUT", json: { template: input.value } })); ctl.error(""); flashNote("Upload folders saved"); }
+      catch (err) { ctl.error(err.message); }
+    });
+    box.append(wrap, names, preview, presets, save);
+  };
+  return { box, draw };
+}
+
+function xmpSection(ctl) {
+  const box = el("div");
+  const draw = (o) => {
+    box.replaceChildren(el("p", "muted", "Write descriptions, tags, people's names, favourites, and dates and places you changed into small .xmp files beside the photos (photo.jpg.xmp). Lightroom, digiKam, darktable and Immich read them, so this work isn't locked inside Snapshots. The photos themselves are never changed; another program's .xmp file is updated, not replaced."));
+    const wrap = el("label", "field inline");
+    const on = el("input");
+    on.type = "checkbox";
+    on.checked = o.enabled;
+    wrap.append(on, el("span", null, "Write .xmp files"));
+    on.addEventListener("change", async () => {
+      try {
+        draw(await api("/api/settings/xmp", { method: "PUT", json: { enabled: on.checked } }));
+        ctl.error("");
+        flashNote(on.checked ? "Writing .xmp files for photos with details" : ".xmp files turned off (the ones written stay)");
+      } catch (err) { on.checked = !on.checked; ctl.error(err.message); }
+    });
+    box.append(wrap);
+    if (o.enabled) {
+      const line = el("p", "small", o.pending ? `Checking ${plural(o.pending, "item")}…` : `${plural(o.written || 0, "file")} written since this was turned on.`);
+      if (o.failed) line.append(el("span", "form-error", ` ${plural(o.failed, "file")} could not be written. ${o.message || ""}`));
+      box.append(line);
+    }
+    box.append(el("p", "muted small", "New photos that arrive with an .xmp file beside them get its description, tags, people's names, and date and place (if the photo has none)."));
+  };
+  return { box, draw };
+}
+
+function facesSection(ctl) {
+  const box = el("div");
+  const draw = async (st) => {
+    try { st = st || await api("/api/settings/faces"); } catch (err) { ctl.error(err.message); return; }
+    box.replaceChildren(el("p", "muted", "How alike two faces must be to be grouped as one person. Stricter makes fewer mistakes but splits people into more groups; looser does the opposite. Either way, People asks “Same person?” when it isn't sure."));
+    const grid = el("div", "rule-grid");
+    const sWrap = el("label", "field");
+    sWrap.append(el("span", null, "Grouping"));
+    const strict = el("select");
+    [["stricter", "Stricter"], ["normal", "Normal"], ["looser", "Looser"], ...(st.strictness === "custom" ? [["custom", "Custom (config.toml)"]] : [])]
+      .forEach(([v, t]) => { const op = el("option", null, t); op.value = v; strict.append(op); });
+    strict.value = st.strictness;
+    sWrap.append(strict);
+    const [mWrap, min] = field("Show unnamed people in at least (faces)", { type: "number", min: "1", max: "50", value: String(st.min_faces) });
+    grid.append(sWrap, mWrap);
+    const sugWrap = el("label", "field inline");
+    const sug = el("input");
+    sug.type = "checkbox";
+    sug.checked = st.suggest;
+    sugWrap.append(sug, el("span", null, "Ask “Same person?” about groups that look alike"));
+    const save = button("Save", "btn small primary", async () => {
+      try {
+        const body = { min_faces: Number(min.value || 3), suggest: sug.checked };
+        if (strict.value !== "custom") body.strictness = strict.value;
+        const changed = strict.value !== st.strictness;
+        const res = await api("/api/settings/faces", { method: "PUT", json: body });
+        ctl.error("");
+        draw(res);
+        flashNote(changed ? "Saved. New faces use it; “Group again” applies it to faces already found." : "Saved");
+      } catch (err) { ctl.error(err.message); }
+    });
+    const again = button(st.regrouping ? "Grouping again…" : "Group unnamed faces again", "btn small", async () => {
+      const ok = await confirm2();
+      if (!ok) return;
+      try { draw(await post("/api/people/regroup")); flashNote("Grouping faces again in the background"); } catch (err) { ctl.error(err.message); }
+    });
+    again.disabled = st.regrouping;
+    const acts = el("div", "row-actions");
+    acts.append(save, again);
+    box.append(grid, sugWrap, acts,
+      el("p", "muted small", "Group again: the faces of people without a name are grouped from scratch with the current setting. Named people and hidden people stay as they are, though more faces may join them."));
+  };
+  // A second dialog would close the settings: ask in the page instead.
+  const confirm2 = () => Promise.resolve(window.confirm("Group the faces of unnamed people again? Named and hidden people stay as they are. Answers to “Same person?” about unnamed groups are forgotten."));
+  return { box, draw };
+}
+
 function offsiteSection(ctl) {
   const box = el("div");
   const draw = (o) => {
@@ -3691,7 +4086,13 @@ async function manageSettings() {
           draw(); refreshStatus();
         } catch (err) { ctl.error(err.message); }
       });
-      body.append(a, add, el("p", "muted small", "Snapshots only reads these folders. Nothing in them is changed, except by Delete permanently in the trash."));
+      body.append(a, add, el("p", "muted small", "Snapshots only reads these folders. Nothing in them is changed, except by Delete permanently in the trash (and .xmp files beside photos, if you turn those on below)."));
+      const store = storageSection(ctl);
+      const side = xmpSection(ctl);
+      const faceSet = facesSection(ctl);
+      body.append(el("h3", "section-title small", "Where uploads go"), store.box);
+      body.append(el("h3", "section-title small", "XMP files beside photos"), side.box);
+      body.append(el("h3", "section-title small", "Face grouping"), faceSet.box);
       body.append(el("h3", "section-title small", "Backups"), backups);
       body.append(el("h3", "section-title small", "Videos"), video);
       const off = offsiteSection(ctl);
@@ -3699,7 +4100,14 @@ async function manageSettings() {
       body.append(el("h3", "section-title small", "Offsite copy of the photos"), off.box);
       body.append(el("h3", "section-title small", "Webhooks"), hooks.box);
       body.append(el("p", "muted small cfg-note", ""));
-      draw().then(() => { if (data) off.draw(data.offsite); if (data && data.offsite.state.running) off.refresh(); });
+      draw().then(() => {
+        if (!data) return;
+        off.draw(data.offsite);
+        if (data.offsite.state.running) off.refresh();
+        store.draw(data.storage);
+        side.draw(data.xmp);
+      });
+      faceSet.draw();
       hooks.draw();
     },
   });
@@ -3714,4 +4122,10 @@ async function manageSettings() {
   S.me = state.user;
   await refreshStatus();
   await render();
+  let left = null;
+  try { left = sessionStorage.getItem("snapshots-recovery-left"); sessionStorage.removeItem("snapshots-recovery-left"); } catch (_) { /* fine */ }
+  if (left !== null) {
+    flashNote(+left > 0 ? `You used a recovery code: ${plural(+left, "code")} left. Make new ones in Login security if you lost your phone.`
+      : "You used your last recovery code. Make new ones now in Login security.");
+  }
 })();

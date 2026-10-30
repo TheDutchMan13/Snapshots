@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__, db, webhooks
-from .auth import COOKIE, CSRF_HEADER, LoginThrottle, user_for_token
+from .auth import COOKIE, CSRF_HEADER, LoginThrottle, Tickets, user_for_token
 from .config import Config
 from .worker import Worker
 
@@ -43,7 +43,7 @@ def tile_source(template: str) -> str:
         return ""
     return m.group(1) + host
 # API addresses anyone may call without logging in.
-PUBLIC_API = {"/api/health", "/api/auth/state", "/api/auth/login", "/api/auth/setup"}
+PUBLIC_API = {"/api/health", "/api/auth/state", "/api/auth/login", "/api/auth/login/code", "/api/auth/setup"}
 
 
 def safe_filename(name: str | None) -> str:
@@ -84,7 +84,7 @@ def create_app(cfg: Config, start_worker: bool = True) -> FastAPI:
     db.init(cfg.db_path)
     worker = Worker(cfg)
     sender = webhooks.Sender(cfg)
-    ctx = SimpleNamespace(cfg=cfg, worker=worker, throttle=LoginThrottle(), pin_throttle=LoginThrottle(limit=5),
+    ctx = SimpleNamespace(cfg=cfg, worker=worker, throttle=LoginThrottle(), pin_throttle=LoginThrottle(limit=5), tickets=Tickets(), pending_totp={},
                           webhooks=sender)
 
     @asynccontextmanager

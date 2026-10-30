@@ -1,11 +1,14 @@
 """People (groups of faces) and places."""
 
+import threading
+
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from . import db, webhooks
-from .app import current_user
+from . import db, faces, webhooks
+from .app import current_user, require_admin
+from .config import save_settings
 
 
 class PersonUpdate(BaseModel):
@@ -16,6 +19,49 @@ class PersonUpdate(BaseModel):
 
 class MergeBody(BaseModel):
     into: int
+
+
+class PairBody(BaseModel):
+    a: int
+    b: int
+
+
+class FaceSettings(BaseModel):
+    strictness: str | None = Field(default=None, pattern="^(stricter|normal|looser)$")
+    min_faces: int | None = Field(default=None, ge=1, le=50)
+    suggest: bool | None = None
+
+
+# How strictly faces are grouped: (match a face to a person, merge two groups, suggest a merge).
+STRICTNESS = {"stricter": (0.55, 0.47, 0.34), "normal": (0.50, 0.42, 0.30), "looser": (0.45, 0.38, 0.27)}
+
+
+class Suggester:
+    """Face suggestions, worked out again only when faces or people changed."""
+
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self._lock = threading.Lock()
+        self._key = None
+        self._items: list[dict] = []
+
+    def _version(self, conn):
+        return tuple(conn.execute(
+            "SELECT (SELECT COUNT(*) || ':' || COALESCE(SUM(person_id), 0) || ':' || COALESCE(MAX(id), 0) FROM faces),"
+            " (SELECT COUNT(*) || ':' || SUM(hidden) || ':' || COALESCE(SUM(length(name) * id), 0) FROM people),"
+            " (SELECT COUNT(*) FROM people_not_same),"
+            " (SELECT COALESCE(SUM(trashed_at IS NOT NULL), 0) || ':' || COALESCE(SUM(locked_by IS NOT NULL), 0) FROM assets)"
+        ).fetchone()) + (self.cfg.min_faces_per_person, self.cfg.face_suggest_threshold)
+
+    def items(self, conn) -> list[dict]:
+        if self.cfg.face_suggest_threshold <= 0:
+            return []
+        key = self._version(conn)
+        with self._lock:
+            if key != self._key:
+                self._items = faces.suggestions(conn, self.cfg.min_faces_per_person, self.cfg.face_suggest_threshold)
+                self._key = key
+            return self._items
 
 
 def _person_json(row) -> dict:
@@ -37,6 +83,7 @@ _PEOPLE_SQL = """
 def router(ctx) -> APIRouter:
     cfg, worker = ctx.cfg, ctx.worker
     r = APIRouter()
+    suggester = Suggester(cfg)
 
     def get_person(conn, person_id: int):
         row = conn.execute(_PEOPLE_SQL + " WHERE p.id = ? GROUP BY p.id", (person_id,)).fetchone()
@@ -45,6 +92,82 @@ def router(ctx) -> APIRouter:
                 return {"id": person_id, "name": None, "hidden": False, "photos": 0, "face_id": None}
             raise HTTPException(404, "No such person.")
         return _person_json(row)
+
+    def faces_status() -> dict:
+        strict = next((k for k, v in STRICTNESS.items()
+                       if abs(v[0] - cfg.face_match_threshold) < 1e-6 and abs(v[1] - cfg.face_merge_threshold) < 1e-6),
+                      "custom")
+        return {"strictness": strict, "min_faces": cfg.min_faces_per_person,
+                "suggest": cfg.face_suggest_threshold > 0, "regrouping": worker.faces.recluster_requested}
+
+    @r.get("/api/people/suggestions")
+    def people_suggestions(request: Request, person: int | None = None, limit: int = 30):
+        """'Same person?' and 'Is this them?' questions, most likely first."""
+        current_user(request)
+        with db.session(cfg.db_path) as conn:
+            items = suggester.items(conn)
+            if person is not None:
+                items = [i for i in items if person in (i["a"], i["b"])]
+            total = len(items)
+            items = items[:max(1, min(limit, 100))]
+            ids = {i["a"] for i in items} | {i["b"] for i in items}
+            people = {}
+            for pid in ids:
+                try:
+                    people[pid] = get_person(conn, pid)
+                except HTTPException:
+                    pass
+        likely = (cfg.face_suggest_threshold + cfg.face_merge_threshold) / 2
+        out = [{"kind": i["kind"], "a": people[i["a"]], "b": people[i["b"]], "same_name": i["same_name"],
+                "likely": i["score"] >= likely or i["same_name"]}
+               for i in items if i["a"] in people and i["b"] in people and people[i["b"]]["face_id"]]
+        return {"suggestions": out, "total": total}
+
+    @r.post("/api/people/not-same")
+    def not_same(body: PairBody, request: Request):
+        """'These are different people': stop suggesting them, and never merge them automatically."""
+        current_user(request)
+        if body.a == body.b:
+            raise HTTPException(400, "That is the same person.")
+        with db.session(cfg.db_path) as conn:
+            for pid in (body.a, body.b):
+                get_person(conn, pid)
+            faces.mark_apart(conn, body.a, body.b)
+        return {"ok": True}
+
+    @r.get("/api/settings/faces")
+    def face_settings(request: Request):
+        require_admin(request)
+        return faces_status()
+
+    @r.put("/api/settings/faces")
+    def save_face_settings(body: FaceSettings, request: Request):
+        require_admin(request)
+        values = {}
+        if body.strictness:
+            match, merge, suggest = STRICTNESS[body.strictness]
+            values.update(face_match_threshold=match, face_merge_threshold=merge)
+            if cfg.face_suggest_threshold > 0:
+                values["face_suggest_threshold"] = suggest
+        if body.min_faces is not None:
+            values["min_faces_per_person"] = body.min_faces
+        if body.suggest is not None:
+            strict = body.strictness or faces_status()["strictness"]
+            values["face_suggest_threshold"] = STRICTNESS.get(strict, STRICTNESS["normal"])[2] if body.suggest else 0.0
+        if values:
+            save_settings(values, cfg.config_file)
+            for k, v in values.items():
+                setattr(cfg, k, v)
+            worker.faces.invalidate()
+        return faces_status()
+
+    @r.post("/api/people/regroup")
+    def regroup_faces(request: Request):
+        """Group the faces of unnamed people again with the current strictness. Named people stay."""
+        require_admin(request)
+        worker.faces.recluster_requested = True
+        worker.poke()
+        return faces_status()
 
     @r.get("/api/people")
     def list_people(request: Request, hidden: bool = False):
@@ -97,6 +220,7 @@ def router(ctx) -> APIRouter:
             if src is None or dst is None:
                 raise HTTPException(404, "No such person.")
             conn.execute("UPDATE faces SET person_id = ? WHERE person_id = ?", (body.into, person_id))
+            faces.move_apart(conn, person_id, body.into)
             if not dst["name"] and src["name"]:
                 conn.execute("UPDATE people SET name = ? WHERE id = ?", (src["name"], body.into))
             conn.execute("DELETE FROM people WHERE id = ?", (person_id,))

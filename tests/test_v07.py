@@ -747,7 +747,7 @@ def test_upgrade_from_06_database(tmp_path):
     conn.close()
     db.init(path)
     conn = sqlite3.connect(path)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION == 6
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
     assert conn.execute("SELECT name, rule FROM albums").fetchall() == [("Old", None)]
     for table in ("face_hints", "imports", "webhooks", "webhook_deliveries"):
         conn.execute(f"SELECT * FROM {table}")

@@ -333,6 +333,13 @@ def regroup(conn, threshold: float, min_faces: int = 2) -> int:
     link = (S @ S.T) / np.outer(n, n)
     np.fill_diagonal(link, -1)
     link[np.outer(named, named)] = -1          # two names: the person decided, leave them
+    pos = {pid: k for k, pid in enumerate(ids)}
+    apart: dict[int, set[int]] = {}            # someone said these are different people
+    for a, b in conn.execute("SELECT a, b FROM people_not_same"):
+        if a in pos and b in pos:
+            apart.setdefault(pos[a], set()).add(pos[b])
+            apart.setdefault(pos[b], set()).add(pos[a])
+            link[pos[a], pos[b]] = link[pos[b], pos[a]] = -1
     alive = np.ones(len(ids), bool)
     merges = 0
     stamp = datetime.now().isoformat(timespec="seconds")
@@ -344,6 +351,7 @@ def regroup(conn, threshold: float, min_faces: int = 2) -> int:
         # keep the named group, or else the larger one
         keep, gone = (a, b) if (named[a], n[a]) >= (named[b], n[b]) else (b, a)
         conn.execute("UPDATE faces SET person_id = ? WHERE person_id = ?", (ids[keep], ids[gone]))
+        move_apart(conn, ids[gone], ids[keep])
         conn.execute("DELETE FROM people WHERE id = ?", (ids[gone],))
         log.info("merged person %s into %s (alike %.2f) at %s", ids[gone], ids[keep], float(link[a, b]), stamp)
         merges += 1
@@ -355,11 +363,128 @@ def regroup(conn, threshold: float, min_faces: int = 2) -> int:
         row[keep] = -1
         if named[keep]:
             row[named] = -1
+        far = apart.setdefault(keep, set())
+        far |= apart.pop(gone, set())
+        far.discard(keep)
+        for j in far:
+            row[j] = -1
+            apart.setdefault(j, set()).add(keep)
         link[keep, :] = row
         link[:, keep] = row
         link[gone, :] = -1
         link[:, gone] = -1
     return merges
+
+
+def move_apart(conn, gone: int, keep: int) -> None:
+    """Before `gone` is merged into `keep`: whoever was "not the same person" as gone isn't keep either."""
+    for (other,) in conn.execute("SELECT CASE WHEN a = ? THEN b ELSE a END FROM people_not_same WHERE a = ? OR b = ?",
+                                 (gone, gone, gone)).fetchall():
+        if other != keep:
+            mark_apart(conn, keep, other)
+
+
+def mark_apart(conn, a: int, b: int) -> None:
+    if a != b:
+        conn.execute("INSERT OR IGNORE INTO people_not_same (a, b) VALUES (?, ?)", (min(a, b), max(a, b)))
+
+
+def _group_sums(conn):
+    """Sum and count of the face embeddings of every visible person, from photos everyone can see."""
+    import numpy as np
+
+    sums, counts = {}, {}
+    for person_id, blob in conn.execute(
+        "SELECT f.person_id, f.embedding FROM faces f JOIN people p ON p.id = f.person_id AND p.hidden = 0"
+        " JOIN assets a ON a.id = f.asset_id AND a.trashed_at IS NULL AND a.locked_by IS NULL"
+    ):
+        v = np.frombuffer(blob, dtype=np.float32)
+        if person_id in sums:
+            sums[person_id] = sums[person_id] + v
+            counts[person_id] += 1
+        else:
+            sums[person_id] = v.astype(np.float32)
+            counts[person_id] = 1
+    return sums, counts
+
+
+def suggestions(conn, min_faces: int, threshold: float, limit: int = 200) -> list[dict]:
+    """People who may be the same person, most alike first. Two kinds:
+    * "merge": two listed people (named, or with at least min_faces faces) that look alike;
+    * "is_this": a small unnamed group (too small to be listed) that looks like a listed person.
+    Pairs with two different names, and pairs someone said are different people, are left out."""
+    import numpy as np
+
+    sums, counts = _group_sums(conn)
+    if len(sums) < 2:
+        return []
+    names = {r[0]: r[1] for r in conn.execute("SELECT id, name FROM people WHERE hidden = 0")}
+    apart = {(a, b) for a, b in conn.execute("SELECT a, b FROM people_not_same")}
+    listed = [i for i in sums if names.get(i) or counts[i] >= min_faces]
+    small = [i for i in sums if not names.get(i) and counts[i] < min_faces]
+    if not listed:
+        return []
+    L = np.array([sums[i] for i in listed], dtype=np.float32)
+    ln = np.array([counts[i] for i in listed], dtype=np.float32)
+    out = []
+
+    def same_name(a, b):
+        return bool(names.get(a)) and bool(names.get(b)) and names[a].strip().lower() == names[b].strip().lower()
+
+    link = (L @ L.T) / np.outer(ln, ln)
+    for x in range(len(listed)):
+        for y in range(x + 1, len(listed)):
+            a, b = listed[x], listed[y]
+            if (min(a, b), max(a, b)) in apart:
+                continue
+            both_named = bool(names.get(a)) and bool(names.get(b))
+            if both_named and not same_name(a, b):
+                continue
+            score = float(link[x, y])
+            if score >= threshold or same_name(a, b):
+                out.append({"kind": "merge", "a": a, "b": b, "score": round(score, 3), "same_name": same_name(a, b)})
+    for start in range(0, len(small), 2000):
+        chunk = small[start:start + 2000]
+        U = np.array([sums[i] for i in chunk], dtype=np.float32)
+        un = np.array([counts[i] for i in chunk], dtype=np.float32)
+        sim = (U @ L.T) / np.outer(un, ln)
+        best = sim.argmax(axis=1)
+        for k, pid in enumerate(chunk):
+            j = int(best[k])
+            score = float(sim[k, j])
+            target = listed[j]
+            if score >= threshold and (min(pid, target), max(pid, target)) not in apart:
+                out.append({"kind": "is_this", "a": target, "b": pid, "score": round(score, 3), "same_name": False})
+    # Name the bigger or named person first in a merge.
+    for o in out:
+        if o["kind"] == "merge":
+            a, b = o["a"], o["b"]
+            if (bool(names.get(b)), counts[b]) > (bool(names.get(a)), counts[a]):
+                o["a"], o["b"] = b, a
+    out.sort(key=lambda o: (not o["same_name"], -o["score"]))
+    return out[:limit]
+
+
+def recluster(conn, match_threshold: float, merge_threshold: float) -> int:
+    """Group the faces of unnamed people again (after the strictness changed). Named and hidden people stay as
+    they are, though faces may now join them. Returns how many unnamed groups there are afterwards."""
+    import numpy as np
+
+    rows = conn.execute(
+        "SELECT f.id, f.embedding FROM faces f JOIN people p ON p.id = f.person_id"
+        " WHERE p.name IS NULL AND p.hidden = 0 ORDER BY f.id").fetchall()
+    conn.execute("DELETE FROM people WHERE name IS NULL AND hidden = 0")   # their faces lose their person
+    clusterer = Clusterer(conn, match_threshold)
+    stamp = datetime.now().isoformat(timespec="seconds")
+    for face_id, blob in rows:
+        emb = np.frombuffer(blob, dtype=np.float32)
+        person_id = clusterer.match(emb)
+        if person_id is None:
+            person_id = conn.execute("INSERT INTO people (created_at) VALUES (?)", (stamp,)).lastrowid
+        conn.execute("UPDATE faces SET person_id = ? WHERE id = ?", (person_id, face_id))
+        clusterer.add(person_id, emb)
+    regroup(conn, merge_threshold)
+    return conn.execute("SELECT COUNT(*) FROM people WHERE name IS NULL AND hidden = 0").fetchone()[0]
 
 
 class FacesJob:
@@ -374,6 +499,7 @@ class FacesJob:
         self.needs_regroup = True     # after new faces (and once after starting): look for split people
         self.retry_at = 0.0
         self.state = {"running": False, "pending": 0, "message": None}
+        self.recluster_requested = False
 
     def invalidate(self) -> None:
         self.people_version += 1
@@ -388,6 +514,20 @@ class FacesJob:
         self.clusterer = None
 
     def run_batch(self, conn, now: float, should_stop, batch: int = 20) -> bool:
+        if self.recluster_requested and available() is None:
+            # Asked for from the settings: done here, in the worker, so it never races new faces.
+            self.recluster_requested = False
+            self.state["message"] = "Grouping faces again…"
+            try:
+                recluster(conn, self.cfg.face_match_threshold, self.cfg.face_merge_threshold)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                log.exception("could not group faces again")
+            self.state["message"] = None
+            self.clusterer = None
+            self.invalidate()
+            return True
         if now < self.retry_at:
             return False
         rows = conn.execute(

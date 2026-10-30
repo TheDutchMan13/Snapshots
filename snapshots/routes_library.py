@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Upl
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from . import __version__, analysis, db, libraries, linking, media, smart, webhooks
+from . import __version__, analysis, db, libraries, linking, media, smart, storage, webhooks
 from .app import current_user, require_admin, safe_filename
 from .scanner import _make_thumb, index_file
 from .videos import Converter
@@ -507,18 +507,28 @@ def router(ctx) -> APIRouter:
 
     # ------------------------------------------------------------ upload
 
-    def save_upload(upload: UploadFile, root: Path) -> dict:
+    def upload_folder(tmp: Path, name: str, kind: str, username: str | None) -> str:
+        """The folder the storage template gives for this file: by the date in the file, else today."""
+        info = {}
+        try:
+            info = media.read_photo_info(tmp) if kind == "photo" else media.read_video_info(tmp)
+        except Exception:
+            pass
+        taken = info.get("taken") or media.date_from_filename(name) or datetime.now()
+        template = cfg.upload_template if not storage.template_problem(cfg.upload_template) else "Uploads/{year}/{month}"
+        return storage.folder_for(template, taken, info.get("camera"), kind, username)
+
+    def save_upload(upload: UploadFile, root: Path, username: str | None = None) -> dict:
         name = safe_filename(upload.filename)
-        if media.kind_of(name) is None:
+        kind = media.kind_of(name)
+        if kind is None:
             return {"name": upload.filename, "status": "rejected", "reason": "Unsupported file type"}
 
-        now = datetime.now()
-        dest_dir = root / "Uploads" / f"{now:%Y}" / f"{now:%m}"
         incoming = root / "Uploads" / ".incoming"  # same drive as the library, hidden from scans
-        dest_dir.mkdir(parents=True, exist_ok=True)
         incoming.mkdir(parents=True, exist_ok=True)
 
-        tmp = incoming / f"{uuid.uuid4().hex}.part"
+        # The real extension, so the file can be read (for its date) before it is filed.
+        tmp = incoming / f"{uuid.uuid4().hex}{os.path.splitext(name)[1].lower()}"
         digest = hashlib.sha1(usedforsecurity=False)
         try:
             with open(tmp, "wb") as out:
@@ -542,6 +552,8 @@ def router(ctx) -> APIRouter:
                 return {"name": upload.filename, "status": "restored" if dup["trashed_at"] else "duplicate",
                         "id": dup["id"]}
 
+            dest_dir = root / upload_folder(tmp, name, kind, username)
+            dest_dir.mkdir(parents=True, exist_ok=True)
             stem, ext = os.path.splitext(name)
             n = 0
             while True:  # claim a free name atomically: "x" mode fails if the file already exists
@@ -566,9 +578,9 @@ def router(ctx) -> APIRouter:
 
     @r.post("/api/upload")
     def upload(request: Request, files: list[UploadFile] = File(...)):
-        current_user(request)
+        user = current_user(request)
         root = library_root(cfg)
-        results = [save_upload(f, root) for f in files]
+        results = [save_upload(f, root, user["username"]) for f in files]
         with db.session(cfg.db_path) as conn:  # a Live Photo's photo and clip may arrive together
             linking.link_pairs(conn, cfg)
             webhooks.emit_added(conn, [x["id"] for x in results if x["status"] == "added"], "upload")

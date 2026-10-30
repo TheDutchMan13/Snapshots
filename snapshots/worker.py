@@ -22,6 +22,7 @@ from .analysis import QualityJob
 from .backup import BackupJob
 from .clipsearch import ClipJob
 from .faces import FacesJob
+from .xmp import XmpJob
 from .linking import MotionJob
 from .offsite import OffsiteJob
 from .ocr import OcrJob
@@ -38,6 +39,7 @@ class Worker:
         self.places = PlacesJob(cfg)
         self.motion = MotionJob(cfg)
         self.faces = FacesJob(cfg)
+        self.xmp = XmpJob(cfg)
         self.quality = QualityJob(cfg)
         self.clip = ClipJob(cfg)
         self.ocr = OcrJob(cfg)
@@ -102,6 +104,7 @@ class Worker:
             "text": dict(self.ocr.state, enabled=self.cfg.text_search),
             "backup": dict(self.backup.state, enabled=bool(self.cfg.backup_hours and self.cfg.backup_hours > 0)),
             "offsite": dict(self.offsite.state, enabled=self.offsite.enabled()),
+            "xmp": dict(self.xmp.state, enabled=self.cfg.xmp_sidecars),
         }
 
     def _jobs(self):
@@ -110,6 +113,7 @@ class Worker:
             (self.backup, bool(self.cfg.backup_hours and self.cfg.backup_hours > 0)),
             (self.offsite, self.offsite.enabled()),
             (self.motion, True),
+            (self.xmp, self.cfg.xmp_sidecars),
             (self.places, self.cfg.places),
             (self.quality, self.cfg.photo_checks),
             (self.faces, self.cfg.faces),

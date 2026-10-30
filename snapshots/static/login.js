@@ -2,6 +2,7 @@
 
 const $ = (id) => document.getElementById(id);
 let setupMode = false;
+let ticket = null;
 
 async function post(url, body) {
   const res = await fetch(url, {
@@ -42,7 +43,16 @@ $("form").addEventListener("submit", async (e) => {
   }
   $("submit").disabled = true;
   try {
-    await post(setupMode ? "/api/auth/setup" : "/api/auth/login", { username, password });
+    const res = await post(setupMode ? "/api/auth/setup" : "/api/auth/login", { username, password });
+    if (res.two_step) {
+      ticket = res.ticket;
+      $("form").hidden = true;
+      $("code-form").hidden = false;
+      $("intro").textContent = "Two-step login is on for this account.";
+      $("code").value = "";
+      $("code").focus();
+      return;
+    }
     location.replace("/");
   } catch (err) {
     $("error").textContent = err.message;
@@ -50,3 +60,34 @@ $("form").addEventListener("submit", async (e) => {
     $("password").select();
   }
 });
+
+$("code-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const code = $("code").value.trim();
+  $("code-error").textContent = "";
+  if (!code) { $("code-error").textContent = "Type the code your app shows."; return; }
+  $("code-submit").disabled = true;
+  try {
+    const res = await post("/api/auth/login/code", { ticket, code });
+    if (res.recovery_left !== undefined) {
+      try { sessionStorage.setItem("snapshots-recovery-left", String(res.recovery_left)); } catch (_) { /* fine */ }
+    }
+    location.replace("/");
+  } catch (err) {
+    $("code-error").textContent = err.message;
+    $("code-submit").disabled = false;
+    $("code").select();
+    if (/log in again/.test(err.message)) setTimeout(goBack, 1500);
+  }
+});
+
+function goBack() {
+  ticket = null;
+  $("code-form").hidden = true;
+  $("form").hidden = false;
+  $("intro").textContent = "Log in to see your photos.";
+  $("submit").disabled = false;
+  $("password").value = "";
+  $("password").focus();
+}
+$("code-back").addEventListener("click", goBack);

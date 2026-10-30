@@ -258,6 +258,57 @@ MIGRATIONS = [
     );
     CREATE INDEX idx_webhook_due ON webhook_deliveries (next_try_at) WHERE delivered_at IS NULL AND failed = 0;
     """,
+    # 7 - version 0.8: face suggestions, two-step login, known devices, XMP sidecars
+    """
+    CREATE TABLE people_not_same (             -- pairs someone said are different people
+        a INTEGER NOT NULL REFERENCES people (id) ON DELETE CASCADE,
+        b INTEGER NOT NULL REFERENCES people (id) ON DELETE CASCADE,
+        PRIMARY KEY (a, b),
+        CHECK (a < b)
+    ) WITHOUT ROWID;
+    CREATE INDEX idx_people_not_same_b ON people_not_same (b);
+
+    ALTER TABLE users ADD COLUMN totp_secret TEXT;         -- two-step login: base32 secret, NULL = off
+    ALTER TABLE users ADD COLUMN totp_last INTEGER;        -- the last time step used, so a code works once
+    CREATE TABLE recovery_codes (
+        user_id   INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+        code_hash TEXT NOT NULL,
+        used_at   TEXT,
+        PRIMARY KEY (user_id, code_hash)
+    ) WITHOUT ROWID;
+    CREATE TABLE known_devices (               -- browsers someone has logged in from: kept out of lockouts
+        token_hash   TEXT PRIMARY KEY,
+        user_id      INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+        created_at   TEXT NOT NULL,
+        last_used_at TEXT NOT NULL,
+        user_agent   TEXT
+    );
+    CREATE INDEX idx_known_devices_user ON known_devices (user_id);
+
+    ALTER TABLE assets ADD COLUMN xmp_dirty INTEGER NOT NULL DEFAULT 0;  -- the sidecar may need writing
+    ALTER TABLE assets ADD COLUMN xmp_hash TEXT;                        -- what Snapshots last wrote there
+    CREATE INDEX idx_assets_xmp ON assets (xmp_dirty) WHERE xmp_dirty = 1;
+    CREATE TRIGGER xmp_assets AFTER UPDATE OF taken_at, lat, lon, description ON assets
+        BEGIN UPDATE assets SET xmp_dirty = 1 WHERE id = NEW.id; END;
+    CREATE TRIGGER xmp_tag_add AFTER INSERT ON asset_tags
+        BEGIN UPDATE assets SET xmp_dirty = 1 WHERE id = NEW.asset_id; END;
+    CREATE TRIGGER xmp_tag_del AFTER DELETE ON asset_tags
+        BEGIN UPDATE assets SET xmp_dirty = 1 WHERE id = OLD.asset_id; END;
+    CREATE TRIGGER xmp_tag_name AFTER UPDATE OF name ON tags
+        BEGIN UPDATE assets SET xmp_dirty = 1 WHERE id IN (SELECT asset_id FROM asset_tags WHERE tag_id = NEW.id); END;
+    CREATE TRIGGER xmp_fav_add AFTER INSERT ON favorites
+        BEGIN UPDATE assets SET xmp_dirty = 1 WHERE id = NEW.asset_id; END;
+    CREATE TRIGGER xmp_fav_del AFTER DELETE ON favorites
+        BEGIN UPDATE assets SET xmp_dirty = 1 WHERE id = OLD.asset_id; END;
+    CREATE TRIGGER xmp_face_add AFTER INSERT ON faces WHEN NEW.person_id IS NOT NULL
+        BEGIN UPDATE assets SET xmp_dirty = 1 WHERE id = NEW.asset_id; END;
+    CREATE TRIGGER xmp_face_move AFTER UPDATE OF person_id ON faces
+        BEGIN UPDATE assets SET xmp_dirty = 1 WHERE id = NEW.asset_id; END;
+    CREATE TRIGGER xmp_face_del AFTER DELETE ON faces
+        BEGIN UPDATE assets SET xmp_dirty = 1 WHERE id = OLD.asset_id; END;
+    CREATE TRIGGER xmp_person_name AFTER UPDATE OF name ON people
+        BEGIN UPDATE assets SET xmp_dirty = 1 WHERE id IN (SELECT asset_id FROM faces WHERE person_id = NEW.id); END;
+    """,
 ]
 SCHEMA_VERSION = len(MIGRATIONS)
 

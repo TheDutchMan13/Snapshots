@@ -2,6 +2,7 @@
 
 import json
 import os
+from pathlib import Path
 from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Request
@@ -109,6 +110,12 @@ def router(ctx) -> APIRouter:
                 try:
                     if full.exists():
                         os.remove(full)
+                    side = Path(str(full) + ".xmp")      # its sidecar goes with it
+                    if side.is_file():
+                        try:
+                            side.unlink()
+                        except OSError:
+                            pass
                 except OSError as exc:
                     failed.append({"id": row["id"], "filename": row["filename"], "reason": exc.strerror or str(exc)})
                     continue

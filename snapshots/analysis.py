@@ -13,6 +13,7 @@ Events need nothing stored: they are worked out from dates and places when the E
 
 import logging
 import math
+import re
 import threading
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -210,30 +211,65 @@ def _best(members: list[dict]) -> int:
                                        m["size"] or 0, -m["id"]))["id"]
 
 
+def _best_identical(members: list[dict]) -> int:
+    """Identical files: keep the one in the main library (not an extra folder), else the oldest."""
+    return min(members, key=lambda m: (bool(re.match(r"^(/|[A-Za-z]:/)", m["path"])), m["id"]))["id"]
+
+
+def why_best(members: list[dict], keep: int, identical: bool) -> str:
+    """In a few words, why `keep` was picked."""
+    k = next(m for m in members if m["id"] == keep)
+    others = [m for m in members if m["id"] != keep]
+    if identical:
+        return "Same file: kept the first one added"
+    px = lambda m: (m["width"] or 0) * (m["height"] or 0)  # noqa: E731
+    if all(px(k) > px(o) for o in others):
+        return "Most pixels"
+    if all((k["sharpness"] or 0) > (o["sharpness"] or 0) for o in others if px(o) == px(k)):
+        return "Sharpest"
+    if all((k["size"] or 0) > (o["size"] or 0) for o in others):
+        return "Largest file"
+    return "Added first"
+
+
+STRICTNESS = {"strict": 4, "normal": None, "loose": 12}   # None: the duplicate_distance setting
+
+
 class DuplicateFinder:
-    """Groups of near-identical photos, recomputed only when the library has changed."""
+    """Groups of identical files, near-identical photos and bursts, recomputed only when the library changed.
+
+    * identical: the very same file content (photos and videos), for instance in two folders;
+    * copies: photos that look the same (a resized or re-saved copy, an edit with the same picture);
+    * burst: photos taken seconds apart that look alike.
+    """
 
     def __init__(self, cfg):
         self.cfg = cfg
         self._lock = threading.Lock()
-        self._key = None
-        self._groups: list[dict] = []
+        self._cache: dict = {}
 
     def _version(self, conn):
         return tuple(conn.execute(
             "SELECT COUNT(*), COALESCE(MAX(id), 0), COALESCE(SUM(dhash % 1000003), 0),"
             " (SELECT COUNT(*) FROM not_duplicates), COALESCE(SUM(trashed_at IS NOT NULL), 0),"
-            " COALESCE(SUM(coalesce(stack_id, 0) % 1000003), 0), COALESCE(SUM(CASE WHEN locked_by IS NOT NULL THEN id END), 0)"
-            " FROM assets WHERE dhash IS NOT NULL"
+            " COALESCE(SUM(coalesce(stack_id, 0) % 1000003), 0), COALESCE(SUM(CASE WHEN locked_by IS NOT NULL THEN id END), 0),"
+            " COALESCE(SUM(id % 1000003), 0)"
+            " FROM assets"
         ).fetchone())
 
-    def groups(self, conn) -> list[dict]:
+    def distance(self, strictness: str | None) -> int:
+        d = STRICTNESS.get(strictness or "normal")
+        return self.cfg.duplicate_distance if d is None else d
+
+    def groups(self, conn, strictness: str | None = None) -> list[dict]:
         key = self._version(conn)
+        distance = self.distance(strictness)
         with self._lock:
-            if key != self._key:
-                self._groups = self._compute(conn)
-                self._key = key
-            return self._groups
+            hit = self._cache.get(distance)
+            if hit is None or hit[0] != key:
+                hit = (key, self._compute(conn, distance))
+                self._cache[distance] = hit
+            return hit[1]
 
     def _is_burst(self, ms: list[dict]) -> bool:
         """Shots taken one after another (each at a different moment, seconds apart), not copies of one."""
@@ -242,14 +278,26 @@ class DuplicateFinder:
             return False
         return all((b - a).total_seconds() <= self.cfg.burst_seconds for a, b in zip(times, times[1:]))
 
-    def _compute(self, conn) -> list[dict]:
+    def _compute(self, conn, distance: int | None = None) -> list[dict]:
+        distance = self.cfg.duplicate_distance if distance is None else distance
         rows = [dict(r) for r in conn.execute(
-            "SELECT id, dhash, taken_at, width, height, size, sharpness, stack_id FROM assets"
-            " WHERE dhash IS NOT NULL AND trashed_at IS NULL AND locked_by IS NULL AND kind = 'photo'"
+            "SELECT a.id, a.dhash, a.taken_at, a.width, a.height, a.size, a.sharpness, a.stack_id, a.sha1, a.kind, a.path"
+            " FROM assets a WHERE a.trashed_at IS NULL AND a.locked_by IS NULL"
+            " AND ((a.dhash IS NOT NULL AND a.kind = 'photo')"
+            "      OR a.sha1 IN (SELECT sha1 FROM assets WHERE trashed_at IS NULL AND locked_by IS NULL"
+            "                    GROUP BY sha1 HAVING COUNT(*) > 1))"
+            " AND NOT EXISTS (SELECT 1 FROM assets lp WHERE lp.live_video = a.id)"   # a Live Photo's hidden clip
         )]
         by_id = {r["id"]: r for r in rows}
-        copies = similar_pairs([(r["id"], r["dhash"]) for r in rows], self.cfg.duplicate_distance)
-        bursts = burst_pairs(rows, self.cfg.burst_seconds, self.cfg.burst_distance) - copies
+        same_file = defaultdict(list)
+        for r in rows:
+            same_file[r["sha1"]].append(r["id"])
+        identical = {(min(a, b), max(a, b)) for ids in same_file.values() if len(ids) > 1
+                     for i, a in enumerate(ids) for b in ids[i + 1:]}
+        photos = [(r["id"], r["dhash"]) for r in rows if r["dhash"] is not None and r["kind"] == "photo"]
+        copies = similar_pairs(photos, distance) | identical
+        bursts = burst_pairs([r for r in rows if r["dhash"] is not None and r["kind"] == "photo"],
+                             self.cfg.burst_seconds, self.cfg.burst_distance) - copies
         dismissed = {(a, b) for a, b in conn.execute("SELECT a, b FROM not_duplicates")}
         uf = _Union()
         for a, b in (copies | bursts) - dismissed:
@@ -265,10 +313,15 @@ class DuplicateFinder:
             if len(ms) < 2:
                 continue
             ms.sort(key=lambda m: (m["taken_at"], m["id"]))
+            same = len({m["sha1"] for m in ms}) == 1
+            kind = "identical" if same else "burst" if self._is_burst(ms) else "copies"
+            keep = _best_identical(ms) if same else _best(ms)
             groups.append({
-                "kind": "burst" if self._is_burst(ms) else "copies",
+                "kind": kind,
                 "ids": [m["id"] for m in ms],
-                "keep": _best(ms),
+                "keep": keep,
+                "why": why_best(ms, keep, same),
+                "space": sum(m["size"] or 0 for m in ms if m["id"] != keep),
                 "taken_at": ms[-1]["taken_at"],
             })
         groups.sort(key=lambda g: g["taken_at"], reverse=True)

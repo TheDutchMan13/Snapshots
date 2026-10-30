@@ -16,7 +16,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 
-from . import db, libraries, linking, media, webhooks
+from . import db, libraries, linking, media, webhooks, xmp
 from .config import Config
 
 log = logging.getLogger("snapshots.scanner")
@@ -152,10 +152,19 @@ def index_file(cfg: Config, conn, rel: str, full: Path, digest: str | None = Non
         return prev["id"]
 
     info = media.read_photo_info(full) if kind == "photo" else media.read_video_info(full)
-    taken = info["taken"] or media.date_from_filename(full.name) or datetime.fromtimestamp(st.st_mtime)
+    side = None
+    if prev is None:
+        try:
+            side = xmp.read_for(full)    # a sidecar from another program (or from Snapshots, before a move)
+        except Exception:
+            side = None
+    taken = (info["taken"] or (side or {}).get("taken") or media.date_from_filename(full.name)
+             or datetime.fromtimestamp(st.st_mtime))
     taken = taken.isoformat(timespec="seconds")
     taken_file = None
     lat, lon = info["lat"], info["lon"]
+    if lat is None and side and side.get("lat") is not None:
+        lat, lon = side["lat"], side["lon"]
     if prev is not None and prev["taken_at_file"]:
         # Someone set this item's date by hand: that stays, whatever the changed file says.
         taken, taken_file = prev["taken_at"], taken
@@ -211,6 +220,8 @@ def index_file(cfg: Config, conn, rel: str, full: Path, digest: str | None = Non
         )
     if info.get("keywords"):
         linking.add_keywords(conn, asset_id, info["keywords"])
+    if side:
+        xmp.apply_on_index(conn, asset_id, side)
     _make_thumb(cfg, conn, asset_id, kind, full, prev["edits"] if prev is not None else None)
     return asset_id
 
