@@ -149,11 +149,17 @@ def copy_folder(cfg, dest: Path, progress, should_stop) -> dict:
             counts["failed"] += 1
             if len(counts["errors"]) < 10:
                 counts["errors"].append(f"{src}: {exc.strerror or exc}")
-    db_copy = backup.backup_now(cfg)
-    (dest / "Database").mkdir(exist_ok=True)
-    shutil.copy2(db_copy, dest / "Database" / "snapshots.db.part")
-    os.replace(dest / "Database" / "snapshots.db.part", dest / "Database" / "snapshots.db")
-    (dest / "README.txt").write_text(README, encoding="utf-8")
+    try:
+        db_copy = backup.backup_now(cfg)
+        (dest / "Database").mkdir(exist_ok=True)
+        part = dest / "Database" / "snapshots.db.part"
+        shutil.copy2(db_copy, part)
+        os.replace(part, dest / "Database" / "snapshots.db")
+        (dest / "README.txt").write_text(README, encoding="utf-8")
+    except OSError as exc:   # say, the copy's database is open in another program
+        counts["failed"] += 1
+        counts["errors"].append(f"The database copy: {exc.strerror or exc}")
+        (dest / "Database" / "snapshots.db.part").unlink(missing_ok=True)
     progress(len(work), len(work))
     return counts
 

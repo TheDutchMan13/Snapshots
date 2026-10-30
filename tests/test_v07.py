@@ -385,7 +385,9 @@ def test_offsite_folder_copy(tmp_path):
         assert (dest / "Library" / "2023" / "beach.jpg").read_bytes() == (root / "2023" / "beach.jpg").read_bytes()
         assert (dest / "Library" / "notes.txt").read_text() == "keep me"
         assert (dest / "Old phone" / "old.jpg").is_file()
-        assert sqlite3.connect(dest / "Database" / "snapshots.db").execute("SELECT COUNT(*) FROM assets").fetchone()[0] == 5
+        copy_db = sqlite3.connect(dest / "Database" / "snapshots.db")
+        assert copy_db.execute("SELECT COUNT(*) FROM assets").fetchone()[0] == 5
+        copy_db.close()   # Windows can't replace a file that is open
         assert (dest / "README.txt").is_file()
 
         # second run: only what changed; deleted files stay in the copy
@@ -658,16 +660,13 @@ def test_takeout_sidecar_names():
 
 
 def _sidecar(title, when, **extra):
-    import calendar
     from datetime import datetime
-    ts = calendar.timegm(datetime.strptime(when, "%Y-%m-%d %H:%M:%S").timetuple())
+    ts = int(datetime.strptime(when, "%Y-%m-%d %H:%M:%S").timestamp())   # this computer's time zone
     return json.dumps({"title": title, "photoTakenTime": {"timestamp": str(ts)}, "url": "https://photos.google.com/x",
                        "geoData": {"latitude": 0.0, "longitude": 0.0}, **extra})
 
 
 def test_import_from_google_takeout(tmp_path, monkeypatch):
-    monkeypatch.setenv("TZ", "UTC")
-    time.tzset()
     root = library(tmp_path)
     beach = (root / "2023" / "beach.jpg").read_bytes()
     dog = (root / "2024" / "dog.jpg").read_bytes()
