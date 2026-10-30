@@ -102,7 +102,7 @@ def zip_stream(cfg, rows, edited: bool = True, videos: bool = True):
                             yield sink.take()
             except Exception as exc:
                 log.warning("left %s out of an export: %s", full, exc)
-                missing.append(row["filename"])
+                missing.append(f"{row['filename']} (could not be read; if it is in the zip, it is incomplete)")
             yield sink.take()
         if missing:
             zf.writestr("Not included.txt", "These could not be read, so they are not in this zip:\r\n"

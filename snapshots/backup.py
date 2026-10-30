@@ -44,8 +44,11 @@ def backup_now(cfg) -> Path:
     """Make a consistent copy of the database (safe while Snapshots is running) and remove old ones."""
     folder = cfg.backups_path
     folder.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    dest = folder / f"snapshots-{stamp}.db"
+    when = datetime.now()
+    dest = folder / f"snapshots-{when:%Y%m%d-%H%M%S}.db"
+    while dest.exists() or dest.with_name(dest.name + ".part").exists():   # two backups in the same second
+        when = when.fromtimestamp(when.timestamp() + 1)
+        dest = folder / f"snapshots-{when:%Y%m%d-%H%M%S}.db"
     tmp = dest.with_name(dest.name + ".part")
     src = db.connect(cfg.db_path)
     try:

@@ -178,8 +178,11 @@ def router(ctx) -> APIRouter:
         """Send a "test" event now."""
         require_admin(request)
         with db.session(cfg.db_path) as conn:
-            if conn.execute("SELECT 1 FROM webhooks WHERE id = ?", (hook_id,)).fetchone() is None:
+            hook = conn.execute("SELECT enabled FROM webhooks WHERE id = ?", (hook_id,)).fetchone()
+            if hook is None:
                 raise HTTPException(404, "No such webhook.")
+            if not hook["enabled"]:
+                raise HTTPException(400, "Turn the webhook on first.")
             webhooks.emit(conn, "test", {"message": "This is a test from Snapshots."}, only=hook_id)
         return {"ok": True}
 

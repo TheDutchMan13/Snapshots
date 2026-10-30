@@ -98,6 +98,14 @@ def collect(source: Path, check=None) -> tuple[list[Entry], list]:
     return entries, zips
 
 
+def folder_name(folder: str) -> str:
+    """A safe folder name for copies, from the export's folder (never "..", a drive or a path)."""
+    from .app import safe_filename
+    last = folder.replace("\\", "/").split("/")[-1].strip()
+    name = os.path.splitext(safe_filename(last.replace(":", "_") + ".x"))[0]
+    return name if name and name not in (".", "..") and not name.startswith(".") else "Photos"
+
+
 def read_json(entry: Entry) -> dict | None:
     if entry.size > MAX_JSON:
         return None
@@ -116,12 +124,17 @@ def is_sidecar(data: dict) -> bool:
 def match_sidecar(name: str, sidecars: dict[str, dict]) -> dict | None:
     """The .json Google wrote for a photo, despite the ways Takeout names them:
     IMG.jpg.json, IMG.jpg.supplemental-metadata.json, names cut short, IMG(1).jpg → IMG.jpg(1).json,
-    and IMG-edited.jpg using the original's IMG.jpg.json."""
-    dup = ""
+    and IMG-edited.jpg using the original's IMG.jpg.json. A name that really ends in "(1)" (like a browser
+    download, "image (1).jpg") is tried as it is too."""
     m = DUPLICATE.match(name)
-    base = name
     if m:
-        base, dup = m.group(1) + m.group(3), m.group(2)
+        found = _match(m.group(1) + m.group(3), m.group(2), name, sidecars)
+        if found is not None:
+            return found
+    return _match(name, "", name, sidecars)
+
+
+def _match(base: str, dup: str, name: str, sidecars: dict[str, dict]) -> dict | None:
     stem, ext = os.path.splitext(base)
     plain = EDITED.sub("", stem) + ext
     best, best_len = None, -1
@@ -247,13 +260,16 @@ def _run(manager, cfg, entries: list[Entry], user_id: int, copy_missing: bool, d
             ids = known.get(sha1)
             if ids is None:
                 ids = imports.find_assets(conn, sha1)
-                if ids:
+                if ids is None:     # only in someone's locked folder: left alone
+                    summary["matched"] += 1
+                    ids = []
+                elif ids:
                     summary["matched"] += 1
                 elif not meta.get("trashed"):
                     summary["missing"] += 1
                     summary["missing_bytes"] += e.size
                     if not dry_run and copy_missing and into is not None:
-                        folder = into / (e.folder.split("/")[-1] or "Photos")
+                        folder = into / folder_name(e.folder)
 
                         def write(fh, e=e):
                             with e.opener() as src:
@@ -287,7 +303,7 @@ def _run(manager, cfg, entries: list[Entry], user_id: int, copy_missing: bool, d
                     if has is not None:   # the file's own position wins
                         m.pop("lat"), m.pop("lon")
                 applier.apply(i, m)
-            if n % 200 == 0:
+            if n % 100 == 0:
                 conn.commit()
         if not dry_run:
             linking.link_pairs(conn, cfg)

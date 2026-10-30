@@ -11,6 +11,7 @@ Safety rules:
 import hashlib
 import logging
 import os
+import threading
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -41,6 +42,26 @@ class ScanState:
     started_at: str | None = None
     finished_at: str | None = None
     automatic: bool = False
+
+
+_adding: set[str] = set()      # files Snapshots is putting into the library itself (trim, still, import)
+_adding_lock = threading.Lock()
+
+
+def hold(path: Path) -> None:
+    """A scan leaves this file alone until release(): its row is being made by whoever holds it."""
+    with _adding_lock:
+        _adding.add(_norm(path))
+
+
+def release(path: Path) -> None:
+    with _adding_lock:
+        _adding.discard(_norm(path))
+
+
+def _held(path: Path) -> bool:
+    with _adding_lock:
+        return bool(_adding) and _norm(path) in _adding
 
 
 def now() -> str:
@@ -290,6 +311,8 @@ class Scanner:
             added_ids: list[int] = []
             for rel, full, size, mtime_ns in found:
                 state.done += 1
+                if _held(full):
+                    continue
                 row = existing.get(rel)
                 unchanged = row is not None and row["size"] == size and row["mtime_ns"] == mtime_ns
                 if unchanged and (not row["has_thumb"] or cfg.thumb_path(row["id"]).exists()):

@@ -93,6 +93,13 @@ def to_filter(rule: dict, f: db.Filter, content_search) -> tuple[db.Filter, bool
     Returns (filter, waiting): waiting is True when the rule needs search by content and it isn't ready.
     """
     g = replace(f, album=None)
+    # A filter added on top that contradicts the rule (videos in a "photos only" album) finds nothing.
+    clash = ((f.kind and rule.get("kind") and f.kind != rule["kind"])
+             or (f.tag is not None and rule.get("tag") is not None and f.tag != rule["tag"])
+             or (f.country is not None and rule.get("country") and f.country != rule["country"]))
+    if clash:
+        g.ids = []
+        return g, False
     g.words = " ".join(x for x in (rule.get("words", ""), f.words) if x)
     if rule.get("people"):
         g.people = list(dict.fromkeys((f.people or []) + rule["people"]))

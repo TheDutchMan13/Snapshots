@@ -252,6 +252,13 @@ def router(ctx) -> APIRouter:
 
     def _add(conn, album_id: int, ids, user_id: int | None = None) -> None:
         ids = db.open_ids(conn, ids)
+        present = set()
+        for start in range(0, len(ids), 900):
+            chunk = ids[start:start + 900]
+            present.update(r[0] for r in conn.execute(
+                f"SELECT asset_id FROM album_assets WHERE album_id = ? AND asset_id IN ({','.join('?' * len(chunk))})",
+                [album_id, *chunk]))
+        new_ids = [i for i in ids if i not in present]
         before = conn.total_changes
         conn.executemany(
             "INSERT OR IGNORE INTO album_assets (album_id, asset_id, added_at, added_by)"
@@ -264,7 +271,7 @@ def router(ctx) -> APIRouter:
             name = conn.execute("SELECT name FROM albums WHERE id = ?", (album_id,)).fetchone()[0]
             by = conn.execute("SELECT username FROM users WHERE id = ?", (user_id,)).fetchone() if user_id else None
             webhooks.emit(conn, "album.added", {"album": {"id": album_id, "name": name}, "count": added,
-                                                "ids": ids[:webhooks.MAX_ITEMS], "by": by[0] if by else None})
+                                                "ids": new_ids[:webhooks.MAX_ITEMS], "by": by[0] if by else None})
 
     def not_smart(album) -> None:
         if album["rule"]:

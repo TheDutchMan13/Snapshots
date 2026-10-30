@@ -241,6 +241,9 @@ def run(manager, cfg, url: str, key: str, user_id: int, copy_missing: bool, dry_
                 manager.update(done=n)
             sha1 = sha1_hex(asset.get("checksum"))
             ids = imports.find_assets(conn, sha1) if sha1 else []
+            if ids is None:     # only in someone's locked folder: left alone
+                summary["matched"] += 1
+                continue
             if ids:
                 summary["matched"] += 1
             else:
@@ -262,7 +265,7 @@ def run(manager, cfg, url: str, key: str, user_id: int, copy_missing: bool, dry_
                 continue
             for i in ids:
                 applier.apply(i, metas[aid])
-            if n % 200 == 0:
+            if n % 100 == 0:
                 conn.commit()
         if not dry_run:
             linking.link_pairs(conn, cfg)

@@ -752,3 +752,57 @@ def test_upgrade_from_06_database(tmp_path):
     assert conn.execute("SELECT name, rule FROM albums").fetchall() == [("Old", None)]
     for table in ("face_hints", "imports", "webhooks", "webhook_deliveries"):
         conn.execute(f"SELECT * FROM {table}")
+
+
+# ------------------------------------------------------------------ found in review
+
+def test_imports_never_bring_back_locked_photos(tmp_path):
+    root = library(tmp_path)
+    dog = (root / "2024" / "dog.jpg").read_bytes()
+    export = tmp_path / "Takeout" / "Google Photos" / "Photos from 2024"
+    export.mkdir(parents=True)
+    (export / "dog.jpg").write_bytes(dog)
+    (export / "dog.jpg.json").write_text(_sidecar("dog.jpg", "2024-06-15 16:00:00", favorited=True))
+    c, cfg = new_client(tmp_path, root)
+    with c:
+        setup_admin(c)
+        wait_scan(c)
+        ids = ids_by_name(c)
+        c.post("/api/locked/pin", json={"pin": "2468", "password": ADMIN[1]})
+        c.post("/api/locked/open", json={"pin": "2468"})
+        c.post("/api/locked", json={"ids": [ids["dog.jpg"]], "value": True})
+        c.post("/api/locked/close")
+        c.post("/api/imports/takeout", json={"path": str(tmp_path / "Takeout")})
+        state = wait_for(lambda: (s := c.get("/api/imports").json()["current"]) and not s["running"] and s)
+        assert state["error"] is None and state["summary"]["copied"] == 0 and state["summary"]["missing"] == 0
+        assert "dog.jpg" not in names(c) and not (root / "From Google Photos").exists()
+        with db.session(cfg.db_path) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM favorites").fetchone()[0] == 0
+
+
+def test_review_details():
+    cars = {"image (1).jpg.json": {"n": 1}, "IMG.jpg(1).json": {"n": 2}}
+    assert takeout.match_sidecar("image (1).jpg", cars)["n"] == 1
+    assert takeout.match_sidecar("IMG(1).jpg", cars)["n"] == 2
+    for bad in ("..", ".", "C:", "Google Photos/../..", ""):
+        name = takeout.folder_name(bad)
+        assert name not in (".", "..") and ":" not in name and "/" not in name, (bad, name)
+    assert takeout.folder_name("Rome trip") == "Rome trip"
+
+
+def test_smart_album_filters_that_clash_find_nothing(tmp_path):
+    root = library(tmp_path)
+    c, cfg = new_client(tmp_path, root)
+    with c:
+        setup_admin(c)
+        wait_scan(c)
+        ids = ids_by_name(c)
+        album = c.post("/api/albums", json={"name": "Photos", "rule": {"kind": "photo"}}).json()
+        assert names(c, album=album["id"], kind="video") == []
+        c.app.state.ctx.webhooks.stop()
+        c.post("/api/webhooks", json={"url": "http://x.local/", "events": ["album.added"]})
+        plain = c.post("/api/albums", json={"name": "A", "ids": [ids["dog.jpg"]]}).json()
+        c.post(f"/api/albums/{plain['id']}/add", json={"ids": [ids["dog.jpg"], ids["hike.jpg"]]})
+        with db.session(cfg.db_path) as conn:
+            last = json.loads(conn.execute("SELECT payload FROM webhook_deliveries ORDER BY id DESC").fetchone()[0])
+        assert last["data"]["ids"] == [ids["hike.jpg"]] and last["data"]["count"] == 1

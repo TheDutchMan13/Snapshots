@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from . import db, exports, imports, libraries, media, smart, webhooks
 from .app import current_user
 from .routes_library import asset_dict, can_see, original_path
+from . import scanner
 from .scanner import index_file
 
 EXPORT_COLS = ("a.id, a.path, a.filename, a.kind, a.taken_at, a.edits, a.city, a.state, a.country, a.description,"
@@ -106,12 +107,14 @@ def router(ctx) -> APIRouter:
     tasks = Tasks()
     ctx.tasks = tasks
     zips: dict[str, dict] = {}
+    zips_lock = threading.Lock()
 
     def tidy_exports() -> None:
         tasks.tidy()
         cutoff = time.time() - KEEP_HOURS * 3600
-        for k in [k for k, z in zips.items() if z["created"] < cutoff]:
-            zips.pop(k, None)
+        with zips_lock:
+            for k in [k for k, z in zips.items() if z["created"] < cutoff]:
+                zips.pop(k, None)
         try:
             for p in cfg.export_dir.glob("*"):
                 if p.stat().st_mtime < cutoff:
@@ -158,7 +161,8 @@ def router(ctx) -> APIRouter:
         tidy_exports()
         if body.format == "zip":
             token = secrets.token_urlsafe(16)
-            zips[token] = {"user_id": user["id"], "ids": [x["id"] for x in rows], "edited": body.edited,
+            with zips_lock:
+                zips[token] = {"user_id": user["id"], "ids": [x["id"] for x in rows], "edited": body.edited,
                            "videos": body.videos, "name": _safe_name(title) + ".zip", "created": time.time()}
             return {"url": f"/api/exports/{token}/download", "count": len(rows)}
         photos = [x for x in rows if x["kind"] == "photo"]
@@ -183,7 +187,8 @@ def router(ctx) -> APIRouter:
     @r.get("/api/exports/{token}/download")
     def download_export(token: str, request: Request):
         user = current_user(request)
-        z = zips.get(token)
+        with zips_lock:
+            z = zips.get(token)
         if z is None or z["user_id"] != user["id"]:
             raise HTTPException(404, "This download has expired. Export again.")
         with db.session(cfg.db_path) as conn:
@@ -230,11 +235,18 @@ def router(ctx) -> APIRouter:
         tmp = full.parent / f".{uuid.uuid4().hex}{Path(name).suffix}"
         try:
             make(tmp)
-            target = imports.claim_name(full.parent, name)
-            os.replace(tmp, target)
+            target = imports.claim_name(full.parent, name)   # a scan leaves it alone until it has its row
         except BaseException:
             tmp.unlink(missing_ok=True)
             raise
+        try:
+            os.replace(tmp, target)
+            return _add_row(row, root, target, offset, user_id)
+        finally:
+            scanner.release(target)
+            tmp.unlink(missing_ok=True)
+
+    def _add_row(row, root, target: Path, offset: float, user_id: int) -> int:
         with db.session(cfg.db_path) as conn:
             new_id = index_file(cfg, conn, libraries.stored_path(root, target), target)
             src = conn.execute("SELECT * FROM assets WHERE id = ?", (row["id"],)).fetchone()

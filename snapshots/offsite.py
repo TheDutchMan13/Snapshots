@@ -237,6 +237,7 @@ class OffsiteJob:
                       "done": 0, "total": 0}
         self._thread: threading.Thread | None = None
         self._stop = False
+        self._start_lock = threading.Lock()
         self._load()
 
     def _state_path(self) -> Path:
@@ -281,13 +282,14 @@ class OffsiteJob:
         return False   # never holds up other work
 
     def start(self) -> bool:
-        if self.running():
-            return False
-        self._stop = False
-        self.state.update(running=True, done=0, total=0, message=None)
-        self._thread = threading.Thread(target=self._run, name="snapshots-offsite", daemon=True)
-        self._thread.start()
-        return True
+        with self._start_lock:   # "Copy now" and the timer must never start two copies at once
+            if self.running():
+                return False
+            self._stop = False
+            self.state.update(running=True, done=0, total=0, message=None)
+            self._thread = threading.Thread(target=self._run, name="snapshots-offsite", daemon=True)
+            self._thread.start()
+            return True
 
     def stop(self) -> None:
         self._stop = True

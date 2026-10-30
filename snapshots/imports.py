@@ -148,9 +148,15 @@ class Applier:
         return changed
 
 
-def find_assets(conn, sha1: str) -> list[int]:
-    """Items with this content, not in anyone's locked folder."""
-    return [r[0] for r in conn.execute("SELECT id FROM assets WHERE sha1 = ? AND locked_by IS NULL", (sha1,))]
+def find_assets(conn, sha1: str) -> list[int] | None:
+    """Items with this content that are not in anyone's locked folder. None when the content is only in a
+    locked folder: the import then leaves it alone (it must neither change it nor copy it in again, which
+    would show it to everyone)."""
+    rows = conn.execute("SELECT id, locked_by FROM assets WHERE sha1 = ?", (sha1,)).fetchall()
+    open_ids = [r[0] for r in rows if r[1] is None]
+    if rows and not open_ids:
+        return None
+    return open_ids
 
 
 def claim_name(folder: Path, name: str) -> Path:
@@ -160,10 +166,13 @@ def claim_name(folder: Path, name: str) -> Path:
     n = 0
     while True:
         target = folder / (name if n == 0 else f"{stem}-{n}{ext}")
+        from . import scanner
+        scanner.hold(target)   # the caller releases it once the file's row is saved
         try:
             open(target, "xb").close()
             return target
         except FileExistsError:
+            scanner.release(target)
             n += 1
 
 
@@ -171,7 +180,9 @@ def add_file(cfg, conn, folder: Path, name: str, write, expect_sha1: str | None 
     """Write a new file into the main library (write(fh) fills it) and index it. Returns its id, or None
     when what arrived isn't what was expected."""
     from .app import safe_filename
+    from . import scanner
 
+    conn.commit()   # never hold the database while a file downloads or copies
     root = next(r for r in libraries.roots(cfg) if r.main)
     folder.mkdir(parents=True, exist_ok=True)
     tmp = folder / f".{uuid.uuid4().hex}.part"     # a hidden name: scans skip it
@@ -187,11 +198,20 @@ def add_file(cfg, conn, folder: Path, name: str, write, expect_sha1: str | None 
             tmp.unlink(missing_ok=True)
             return None
         target = claim_name(folder, safe_filename(name))
-        os.replace(tmp, target)
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
-    return index_file(cfg, conn, libraries.stored_path(root, target), target, digest.hexdigest())
+    try:
+        os.replace(tmp, target)
+        new_id = index_file(cfg, conn, libraries.stored_path(root, target), target, digest.hexdigest())
+        conn.commit()
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        conn.rollback()
+        raise
+    finally:
+        scanner.release(target)
+    return new_id
 
 
 class Manager:
