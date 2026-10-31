@@ -23,6 +23,11 @@ class StartupBody(BaseModel):
     enabled: bool
 
 
+class ShortcutBody(BaseModel):
+    place: str = Field(pattern="^(start|desktop)$")
+    enabled: bool
+
+
 class KeyBody(BaseModel):
     name: str = Field(min_length=1, max_length=100)
 
@@ -90,6 +95,7 @@ def router(ctx) -> APIRouter:
             "xmp": xmp_json(),
             "storage": storage_json(cfg.upload_template),
             "startup": startup_json(),
+            "shortcuts": startup.shortcut_status(cfg),
             "sorting": sorting_json(),
         }
 
@@ -125,6 +131,17 @@ def router(ctx) -> APIRouter:
         except OSError as exc:
             raise HTTPException(409, f"Windows would not change its startup list. {exc}") from None
         return startup_json()
+
+    @r.put("/api/settings/shortcuts")
+    def save_shortcut(body: ShortcutBody, request: Request):
+        require_admin(request)
+        if not startup.supported():
+            raise HTTPException(400, "Shortcuts are only available in the Windows app.")
+        try:
+            startup.set_shortcut(cfg, body.place, body.enabled)
+        except (OSError, ValueError) as exc:
+            raise HTTPException(409, f"Windows would not change the shortcut. {exc}") from None
+        return startup.shortcut_status(cfg)
 
     @r.post("/api/quit")
     def stop_snapshots(request: Request):

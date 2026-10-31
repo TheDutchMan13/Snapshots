@@ -269,3 +269,88 @@ def test_first_time_setup_offers_it_only_on_windows_and_only_before_setup(reg, t
     monkeypatch.setattr(startup, "supported", lambda: False)
     c2, _ = new_client(tmp_path / "other", tmp_path / "Photos")
     assert c2.get("/api/auth/state").json()["can_start_with_windows"] is False
+
+
+# ------------------------------------------------------------ Start menu and desktop shortcuts
+
+class FakeShortcuts:
+    def __init__(self):
+        self.links = {}
+
+    def read(self, place):
+        return self.links.get(place) and self.links[place][:2]
+
+    def write(self, place, program, arguments, folder):
+        self.links[place] = (program, arguments, folder)
+
+    def delete(self, place):
+        self.links.pop(place, None)
+
+
+@pytest.fixture
+def links(monkeypatch):
+    fake = FakeShortcuts()
+    monkeypatch.setattr(startup, "shortcuts", fake)
+    monkeypatch.setattr(startup, "supported", lambda: True)
+    return fake
+
+
+def test_a_shortcut_opens_the_window_not_the_hidden_mode(links, monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", r"C:\Apps\Snapshots\Snapshots.exe")
+    cfg = cfg_for(tmp_path)
+    program, arguments, folder = startup.shortcut_target(cfg)
+    assert program == r"C:\Apps\Snapshots\Snapshots.exe" and "--background" not in arguments
+    assert "--library" in arguments and "--data" in arguments
+    assert folder == str(Path(program).parent)       # the folder the exe is in (Windows paths only split on Windows)
+
+
+def test_shortcut_status_and_changes(links, monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", r"C:\Apps\Snapshots\Snapshots.exe")
+    cfg = cfg_for(tmp_path)
+    assert startup.shortcut_status(cfg) == {"supported": True, "start": {"exists": False, "current": False},
+                                            "desktop": {"exists": False, "current": False}}
+    startup.set_shortcut(cfg, "start", True)
+    st = startup.shortcut_status(cfg)
+    assert st["start"] == {"exists": True, "current": True} and st["desktop"]["exists"] is False
+    links.links["start"] = (r"D:\Old\Snapshots.exe", "", "")             # a moved copy
+    assert startup.shortcut_status(cfg)["start"] == {"exists": True, "current": False}
+    startup.set_shortcut(cfg, "start", True)
+    assert startup.shortcut_status(cfg)["start"]["current"] is True
+    startup.set_shortcut(cfg, "start", False)
+    startup.set_shortcut(cfg, "start", False)                              # twice is fine
+    assert startup.shortcut_status(cfg)["start"]["exists"] is False
+
+
+def test_shortcut_settings_route(links, reg, tmp_path):
+    (tmp_path / "Photos").mkdir()
+    c, cfg = new_client(tmp_path, tmp_path / "Photos")
+    setup_admin(c)
+    assert c.get("/api/settings").json()["shortcuts"]["start"]["exists"] is False
+    r = c.put("/api/settings/shortcuts", json={"place": "desktop", "enabled": True})
+    assert r.status_code == 200 and r.json()["desktop"]["exists"] and not r.json()["start"]["exists"]
+    assert "desktop" in links.links
+    assert c.put("/api/settings/shortcuts", json={"place": "desktop", "enabled": False}).json()["desktop"]["exists"] is False
+    assert c.put("/api/settings/shortcuts", json={"place": "elsewhere", "enabled": True}).status_code == 422
+
+
+def test_shortcut_errors_and_permissions(links, reg, monkeypatch, tmp_path):
+    (tmp_path / "Photos").mkdir()
+    c, cfg = new_client(tmp_path, tmp_path / "Photos")
+    setup_admin(c)
+
+    def refuse(*a):
+        raise OSError("Access is denied")
+
+    links.write = refuse
+    r = c.put("/api/settings/shortcuts", json={"place": "start", "enabled": True})
+    assert r.status_code == 409 and "Access is denied" in r.json()["detail"]
+    add_member(c, "sam", "a long enough password")
+    c.post("/api/auth/logout")
+    login(c, "sam", "a long enough password")
+    assert c.put("/api/settings/shortcuts", json={"place": "start", "enabled": True}).status_code == 403
+    monkeypatch.setattr(startup, "supported", lambda: False)
+    c.post("/api/auth/logout")
+    login(c, *ADMIN)
+    assert c.put("/api/settings/shortcuts", json={"place": "start", "enabled": True}).status_code == 400

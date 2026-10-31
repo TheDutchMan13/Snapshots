@@ -7,6 +7,10 @@ server runs, there is no window. Open it by double-clicking Snapshots.exe (that 
 is already running) or by going to its address in a browser.
 
 Everything that touches the registry goes through `Registry`, so tests can swap it for a fake.
+
+The same module makes the optional Start menu and desktop shortcuts (a Snapshots.lnk that opens the
+window): Snapshots.exe is a single portable file, so nothing else gives it an icon. They go through
+`Shortcuts`, which asks PowerShell (always there on Windows) to write the .lnk, and tests swap it too.
 """
 
 import os
@@ -77,12 +81,8 @@ def _quote(text: str) -> str:
     return '"' + text.replace('"', "") + '"'
 
 
-def command(config_file: Path | None = None, library: Path | None = None, data_dir: Path | None = None) -> str:
-    """The command Windows should run at sign-in for this copy of Snapshots.
-
-    Windows starts programs in another folder, so everything is named in full: the config file if
-    there is one, otherwise the photo and data folders this copy was started with.
-    """
+def _parts(config_file: Path | None, library: Path | None, data_dir: Path | None, background: bool) -> list[str]:
+    """The program and its arguments, each ready to be joined into one command line."""
     if getattr(sys, "frozen", False):
         parts = [_quote(sys.executable)]
     else:
@@ -91,7 +91,8 @@ def command(config_file: Path | None = None, library: Path | None = None, data_d
         script = Path(__file__).resolve().parent.parent / "run_snapshots.py"
         parts = [_quote(str(windowless if windowless.is_file() else python))]
         parts += [_quote(str(script))] if script.is_file() else ["-m", "snapshots"]
-    parts.append("--background")
+    if background:
+        parts.append("--background")
     if config_file:
         parts += ["--config", _quote(str(Path(config_file).resolve()))]
     else:
@@ -99,7 +100,16 @@ def command(config_file: Path | None = None, library: Path | None = None, data_d
             parts += ["--library", _quote(str(Path(library).resolve()))]
         if data_dir:
             parts += ["--data", _quote(str(Path(data_dir).resolve()))]
-    return " ".join(parts)
+    return parts
+
+
+def command(config_file: Path | None = None, library: Path | None = None, data_dir: Path | None = None) -> str:
+    """The command Windows should run at sign-in for this copy of Snapshots.
+
+    Windows starts programs in another folder, so everything is named in full: the config file if
+    there is one, otherwise the photo and data folders this copy was started with.
+    """
+    return " ".join(_parts(config_file, library, data_dir, True))
 
 
 def command_for(cfg) -> str:
@@ -127,3 +137,82 @@ def enable(cfg) -> None:
 def disable() -> None:
     registry.delete()
     registry.clear_switched_off()
+
+
+# ---------------------------------------------------------------- Start menu and desktop shortcuts
+
+LINK_NAME = "Snapshots.lnk"
+PLACES = {"start": "Programs", "desktop": "Desktop"}    # Windows' names for the current user's folders
+
+
+class Shortcuts:
+    """Reads, writes and removes the Snapshots.lnk in the Start menu or on the desktop (through PowerShell)."""
+
+    _FOLDER = "$f = [Environment]::GetFolderPath([Environment+SpecialFolder]$env:SNAP_PLACE); " \
+              "$p = Join-Path $f $env:SNAP_LINK; "
+
+    def _run(self, script: str, **env: str) -> str:
+        import subprocess
+
+        full = ("[Console]::OutputEncoding = [Text.Encoding]::UTF8; $ErrorActionPreference = 'Stop'; "
+                + self._FOLDER + script)
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        done = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", full],
+            env={**os.environ, "SNAP_LINK": LINK_NAME, **env}, capture_output=True, timeout=30,
+            creationflags=flags)
+        if done.returncode != 0:
+            raise OSError((done.stderr or b"").decode("utf-8", "replace").strip() or "PowerShell failed")
+        return done.stdout.decode("utf-8", "replace")
+
+    def read(self, place: str) -> tuple[str, str] | None:
+        """(program, arguments) of the shortcut, or None when there isn't one."""
+        out = self._run("if (Test-Path -LiteralPath $p) { $s = (New-Object -ComObject WScript.Shell)"
+                        ".CreateShortcut($p); $s.TargetPath; $s.Arguments }", SNAP_PLACE=PLACES[place])
+        lines = out.splitlines()
+        return (lines[0].strip(), lines[1].strip() if len(lines) > 1 else "") if lines and lines[0].strip() else None
+
+    def write(self, place: str, program: str, arguments: str, folder: str) -> None:
+        self._run("$s = (New-Object -ComObject WScript.Shell).CreateShortcut($p); "
+                  "$s.TargetPath = $env:SNAP_PROGRAM; $s.Arguments = $env:SNAP_ARGS; "
+                  "$s.WorkingDirectory = $env:SNAP_DIR; $s.IconLocation = $env:SNAP_PROGRAM + ',0'; "
+                  "$s.Description = 'Snapshots'; $s.Save()",
+                  SNAP_PLACE=PLACES[place], SNAP_PROGRAM=program, SNAP_ARGS=arguments, SNAP_DIR=folder)
+
+    def delete(self, place: str) -> None:
+        self._run("if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Force }", SNAP_PLACE=PLACES[place])
+
+
+shortcuts = Shortcuts()
+
+
+def shortcut_target(cfg) -> tuple[str, str, str]:
+    """(program, arguments, folder) a shortcut to this copy of Snapshots should have (a window, not hidden)."""
+    parts = _parts(cfg.config_file, cfg.library_path, cfg.data_dir, False)
+    program = parts[0].strip('"')
+    return program, " ".join(parts[1:]), str(Path(program).parent)
+
+
+def shortcut_status(cfg) -> dict:
+    """What the settings page shows for each place: whether the shortcut is there, and whether it opens this copy."""
+    if not supported():
+        return {"supported": False, **{p: {"exists": False, "current": False} for p in PLACES}}
+    program, arguments, _ = shortcut_target(cfg)
+    out: dict = {"supported": True}
+    for place in PLACES:
+        try:
+            found = shortcuts.read(place)
+        except (OSError, ValueError):
+            found = None
+        out[place] = {"exists": found is not None,
+                      "current": found is not None and found[0].lower() == program.lower()
+                      and found[1] == arguments}
+    return out
+
+
+def set_shortcut(cfg, place: str, enabled: bool) -> None:
+    if enabled:
+        program, arguments, folder = shortcut_target(cfg)
+        shortcuts.write(place, program, arguments, folder)
+    else:
+        shortcuts.delete(place)

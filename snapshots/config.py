@@ -45,7 +45,7 @@ class Config:
     guess_dates: bool = True               # date files that have none from GPS time or the files beside them
     text_search: bool = True               # read text in photos so it can be searched (11 MB model)
     search_threads: int = 2                # CPU threads content and text search may use
-    map_tiles: str = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"  # map pictures ("" = outlines only)
+    map_tiles: str = ""  # map pictures; "" = country outlines only, nothing fetched (set a tile URL for street maps)
     map_attribution: str = "© OpenStreetMap contributors"
     extra_libraries: list = field(default_factory=list)  # more photo folders, besides library_path
     backup_hours: float = 24               # copy the database this often (0 turns backups off)

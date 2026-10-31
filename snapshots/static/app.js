@@ -2004,7 +2004,7 @@ async function renderMap() {
   const world = await loadWorld();
   L.geoJSON(world, { pane: "world", interactive: false, style: { className: "map-country", weight: 1, fillOpacity: 1 } }).addTo(map);
   if (data.tiles) {
-    L.tileLayer(data.tiles, { maxZoom: 19, attribution: data.attribution || "", className: "map-tiles", referrerPolicy: "no-referrer" }).addTo(map);
+    L.tileLayer(data.tiles, { maxZoom: 19, attribution: data.attribution || "", className: "map-tiles", referrerPolicy: "origin" }).addTo(map);
   } else {
     map.attributionControl.addAttribution("Country shapes: Natural Earth");
   }
@@ -3725,7 +3725,7 @@ async function editDetails(ids, item) {
         const st = (S.status && S.status.map) || {};
         map = L.map(mapBox, { minZoom: 1, maxZoom: 19, worldCopyJump: true });
         map.attributionControl.setPrefix(false);
-        if (st.tiles) L.tileLayer(st.tiles, { maxZoom: 19, attribution: st.attribution || "", className: "map-tiles", referrerPolicy: "no-referrer" }).addTo(map);
+        if (st.tiles) L.tileLayer(st.tiles, { maxZoom: 19, attribution: st.attribution || "", className: "map-tiles", referrerPolicy: "origin" }).addTo(map);
         else loadWorld().then((w) => L.geoJSON(w, { interactive: false, style: { className: "map-country", weight: 1, fillOpacity: 1 } }).addTo(map));
         const start = one && item.position ? item.position : null;
         if (start) map.setView(start, 11); else map.setView([30, 0], 2);
@@ -4839,6 +4839,48 @@ function startupSection(ctl) {
   return { box, draw };
 }
 
+function shortcutsSection(ctl) {
+  const box = el("div");
+  const draw = (o) => {
+    box.replaceChildren();
+    if (!o.supported) {
+      box.append(el("p", "muted", "Shortcuts are only available in the Windows app."));
+      return;
+    }
+    box.append(el("p", "muted", "Snapshots.exe is a single file with no installer, so it has no icon in the Start menu. Add one here (or on your desktop) that opens Snapshots. Keep Snapshots.exe where it is: if you move it, press “Use this copy” to fix the shortcut."));
+    const place = (key, label, done) => {
+      const st = o[key];
+      const wrap = el("label", "field inline");
+      const on = el("input");
+      on.type = "checkbox";
+      on.checked = st.exists;
+      wrap.append(on, el("span", null, label));
+      on.addEventListener("change", async () => {
+        try {
+          draw(await api("/api/settings/shortcuts", { method: "PUT", json: { place: key, enabled: on.checked } }));
+          ctl.error("");
+          flashNote(on.checked ? done : "Shortcut removed");
+        } catch (err) { on.checked = !on.checked; ctl.error(err.message); }
+      });
+      box.append(wrap);
+      if (st.exists && !st.current) {
+        const fix = el("button", "btn small", "Use this copy");
+        fix.type = "button";
+        fix.addEventListener("click", async () => {
+          try { draw(await api("/api/settings/shortcuts", { method: "PUT", json: { place: key, enabled: true } })); ctl.error(""); flashNote("Shortcut updated"); }
+          catch (err) { ctl.error(err.message); }
+        });
+        const warn = el("p", "small");
+        warn.append(el("span", "form-error", "This shortcut opens a different copy of Snapshots (or one that was moved). "), fix);
+        box.append(warn);
+      }
+    };
+    place("start", "Show Snapshots in the Start menu", "Snapshots is now in the Start menu");
+    place("desktop", "Put a Snapshots icon on the desktop", "Snapshots icon added to the desktop");
+  };
+  return { box, draw };
+}
+
 function facesSection(ctl) {
   const box = el("div");
   const draw = async (st) => {
@@ -5153,6 +5195,9 @@ async function renderSettings() {
     const boot = startupSection(ctl);
     section("Start with Windows", boot.box);
     boot.draw(data.startup);
+    const links = shortcutsSection(ctl);
+    section("Start menu and desktop", links.box);
+    links.draw(data.shortcuts || { supported: false });
     const hooks = webhookSection(ctl);
     section("Webhooks", hooks.box);
     hooks.draw();

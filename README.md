@@ -47,6 +47,7 @@ Snapshots is a self-hosted photo and video library for Windows. Your originals s
 - **Video thumbnails** show the video's best frame (sharp, not black), and square tiles keep faces in view
 - **Two-step login** (optional, per account, in **Login security**): a 6-digit code from an authenticator app after the password, with recovery codes for a lost phone. Wrong passwords are counted per device, so someone guessing at your name elsewhere can't lock you out of your own browser
 - **XMP files** (optional, Settings): descriptions, tags, people's names, stars, labels, favourites and dates and places you changed are written into small `.xmp` files beside the photos, which Lightroom, digiKam, darktable and Immich read. New photos that arrive with one get its details
+- **Start menu and desktop shortcuts** (optional, Settings > Start menu and desktop): Snapshots.exe is a single file with no installer, so it has no Start menu entry. Two checkboxes add a Snapshots shortcut to your Start menu and to your desktop (an ordinary `Snapshots.lnk`; no administrator rights needed). Keep Snapshots.exe in one place: if you move it, press "Use this copy" in Settings to fix the shortcut. Untick the box to remove it.
 - **Start with Windows** (optional, off by default; a checkbox when you create the first account, and in Settings): Snapshots starts hidden when you sign in, so scans, backups and the health check keep running and your phone can reach it. No administrator rights are needed. Double-click Snapshots.exe to open its window, or use the address shown in Settings; an administrator can stop it from Settings. Turning it off in Windows' own Startup list works too. Turn it off before deleting Snapshots.exe
 - **Where uploads go:** a folder pattern like `Uploads/{year}/{month}` (Settings), by the date the photo was taken
 - **On this day:** photos from today's date in earlier years, at the top of All
@@ -137,7 +138,7 @@ Copy `config.example.toml` to `config.toml` and edit it, or use command-line opt
 | | `search_threads` | `2` | CPU threads the two above may use |
 | | `hide_clutter` | `false` | Leave screenshots, documents and receipts out of All and Photos (also set in the app: Settings) |
 | | `guess_dates` | `true` | Date files that have none from their GPS time or the files beside them (also set in the app: Settings) |
-| | `map_tiles` | OpenStreetMap | Where the map's pictures come from; `""` shows country outlines only, with nothing fetched |
+| | `map_tiles` | `""` (outlines only) | Where the map's pictures come from. The default shows only the country outlines that come with Snapshots, with nothing fetched; set a tile URL (for example OpenStreetMap's) for street maps |
 | | `map_attribution` | `© OpenStreetMap contributors` | Credit shown on the map for `map_tiles` |
 | | `extra_libraries` | none | More photo folders, like `["E:\\Phone backup"]` (also set in the app: Settings) |
 | | `backup_hours` | `24` | Copy the database this often; `0` turns backups off |
@@ -185,7 +186,7 @@ Everything runs on your own computer, in the background after a scan, a few phot
 - **Imports** match each photo by its SHA-1, which Immich reports for every photo and Snapshots works out for every file in a Google export, so it doesn't matter where either app keeps its files or what they are called. Immich is read through its API with an API key you make in Immich; nothing is changed in Immich. Google Takeout's `.json` files are matched to their photos despite Takeout's naming quirks (`.supplemental-metadata.json`, names cut short, `(1)` copies, `-edited` versions). Google's dates are in UTC with no time zone, so a Google date only replaces the file's own when the two differ by more than a day. Names of people from Immich come with where each face is, and go to the face Snapshots finds there; Google only says who is in a photo, so its names are used for photos with exactly one face.
 - **The photo book** is a PDF written by Snapshots itself, one picture per page at 200 dots per inch, so it is sharp on screen and good for printing at home. Videos are left out.
 - **Webhooks** are kept in the database before they are sent, so none are lost if Snapshots closes. A delivery that fails is tried again after 30 seconds, 2 and 10 minutes, 1 and 6 hours. Each one carries `X-Snapshots-Signature: sha256=<HMAC of the body with the webhook's secret>`. Items in a locked folder never appear in one.
-- **The map** draws pictures from OpenStreetMap while you look at it, so your computer asks OpenStreetMap's servers for the areas you view (not for your photos' locations). Set `map_tiles = ""` to use only the country outlines that come with Snapshots, with nothing fetched, or point it at your own tile server.
+- **The map** works offline: it shows the country outlines that come with Snapshots and fetches nothing from the internet. If you set `map_tiles` to a tile server (OpenStreetMap's, say), your computer asks that server for the areas you view (not for your photos' locations), and it sees the address you opened Snapshots from.
 
 ## Your files and safety
 

@@ -137,6 +137,19 @@ jobs:
             $years = (Invoke-RestMethod "$base/api/review" -WebSession $web).years
             $qr = Invoke-WebRequest "$base/static/vendor/qrcode.js" -WebSession $web -UseBasicParsing
             $boot = (Invoke-RestMethod "$base/api/settings" -WebSession $web).startup
+            # 0.11: a Start menu shortcut can be made, found again and removed (PowerShell writes the .lnk).
+            # Only reported, not failed on: a runner without a Start menu folder says so here.
+            try {
+              $lnkOn  = Invoke-RestMethod -Method Put "$base/api/settings/shortcuts" -Body '{"place": "start", "enabled": true}' `
+                -ContentType 'application/json' -Headers $hdr -WebSession $web
+              $lnkOff = Invoke-RestMethod -Method Put "$base/api/settings/shortcuts" -Body '{"place": "start", "enabled": false}' `
+                -ContentType 'application/json' -Headers $hdr -WebSession $web
+              if ($lnkOn.start.exists -and $lnkOn.start.current -and -not $lnkOff.start.exists) {
+                Write-Host 'Start menu shortcut: made, recognised and removed.'
+              } else {
+                Write-Warning "Start menu shortcut did not round-trip: on=$($lnkOn | ConvertTo-Json -Compress) off=$($lnkOff | ConvertTo-Json -Compress)"
+              }
+            } catch { Write-Warning "Start menu shortcut failed: $($_.Exception.Message)" }
           }
           Get-Process -Name Snapshots -ErrorAction SilentlyContinue | Stop-Process -Force
           Write-Host '--- exe output ---'

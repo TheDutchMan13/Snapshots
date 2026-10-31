@@ -126,7 +126,7 @@ def test_map_points_and_areas(tmp_path):
     make_jpeg(root / "fiji.jpg", "2024:05:02 10:00:00", gps=(-17.7, 179.9))
     make_jpeg(root / "samoa.jpg", "2024:05:03 10:00:00", gps=(-13.8, -171.8))
     make_jpeg(root / "nowhere.jpg", "2024:05:04 10:00:00")
-    c, cfg = new_client(tmp_path, root)
+    c, cfg = new_client(tmp_path, root, map_tiles="https://tile.openstreetmap.org/{z}/{x}/{y}.png")
     with c:
         setup_admin(c)
         wait_scan(c)

@@ -66,9 +66,11 @@ search_threads = 2
 # Date files that have no date inside from their GPS time or the numbered photos beside them.
 # guess_dates = true
 
-# Where the map's pictures come from. OpenStreetMap is used by default, which means your computer asks
-# OpenStreetMap's servers for the areas of the map you look at (not for your photos' locations).
-# "" shows only the country outlines that come with Snapshots and fetches nothing.
+# Where the map's pictures come from. By default the map shows only the country outlines that come with
+# Snapshots, and fetches nothing from the internet. To get street maps, set a tile server, for example
+# OpenStreetMap's (your computer then asks their servers for the areas of the map you look at, not for
+# your photos' locations; their policy also wants requests to say where they come from, so use your
+# own tile server for heavy use).
 # map_tiles = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
 # map_attribution = "© OpenStreetMap contributors"
 
