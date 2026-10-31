@@ -37,6 +37,7 @@ Snapshots is a self-hosted photo and video library for Windows. Your originals s
 - **Duplicates** in Clean up, sorted into identical files, look-alikes and bursts, with the space each would free and why each keeper was picked
 - **Two-step login** (optional, per account, in **Login security**): a 6-digit code from an authenticator app after the password, with recovery codes for a lost phone. Wrong passwords are counted per device, so someone guessing at your name elsewhere can't lock you out of your own browser
 - **XMP files** (optional, Settings): descriptions, tags, people's names, stars, labels, favourites and dates and places you changed are written into small `.xmp` files beside the photos, which Lightroom, digiKam, darktable and Immich read. New photos that arrive with one get its details
+- **Start with Windows** (optional, off by default; a checkbox when you create the first account, and in Settings): Snapshots starts hidden when you sign in, so scans, backups and the health check keep running and your phone can reach it. No administrator rights are needed. Double-click Snapshots.exe to open its window, or use the address shown in Settings; an administrator can stop it from Settings. Turning it off in Windows' own Startup list works too. Turn it off before deleting Snapshots.exe
 - **Where uploads go:** a folder pattern like `Uploads/{year}/{month}` (Settings), by the date the photo was taken
 - **On this day:** photos from today's date in earlier years, at the top of All
 - **Map:** every photo with a location on a world map, grouped into pins with a photo on each. Press **Show these photos** for everything in view
@@ -145,6 +146,7 @@ Copy `config.example.toml` to `config.toml` and edit it, or use command-line opt
 | `--window` | | exe: on, source: off | Show Snapshots in its own window |
 | `--open` / `--browser` | | off | Use your web browser instead of the app window |
 | `--no-browser` | | | Open nothing: just run the server |
+| `--background` | | | Run without a window (this is what Start with Windows uses; stop it from Settings) |
 
 ## How the clever parts work
 
@@ -210,7 +212,7 @@ If Windows Security removes the exe after a build (programs made with PyInstalle
 
 ## Upgrading
 
-Replace the exe (or pull the new code) and start it again. Your database is upgraded automatically the first time. Version 0.2 added accounts, so after upgrading from 0.1 you'll be asked to create the administrator account. Version 0.3 only changes how Snapshots opens (its own window instead of a browser tab); your accounts, albums and photos are untouched. You will need to log in once more, because the app window keeps its own login separate from your browser. Version 0.4 then checks every photo once in the background (copies, blur, content and text), which takes a while for a big library; everything keeps working meanwhile. Version 0.5 looks once through your JPEG and HEIC photos for motion photos and keywords (quick: it reads only the start of each file), pairs Live Photos, stacks RAW + JPEG pairs, and picks up RAW files that earlier versions skipped. Version 0.6 looks once through your JPEG and HEIC photos for 360° panoramas (again reading only the start of each file) and makes its first database backup when it starts. Version 0.7 changes nothing on its own: imports, the offsite copy and webhooks only start once you set them up. Version 0.8 changes nothing in your files unless you turn on XMP files; new uploads are filed by the date taken. Version 0.9 adds stars, labels and pick/reject (all empty to begin with); the library health check only runs when you ask, or on the schedule you set.
+Replace the exe (or pull the new code) and start it again. Your database is upgraded automatically the first time. Version 0.2 added accounts, so after upgrading from 0.1 you'll be asked to create the administrator account. Version 0.3 only changes how Snapshots opens (its own window instead of a browser tab); your accounts, albums and photos are untouched. You will need to log in once more, because the app window keeps its own login separate from your browser. Version 0.4 then checks every photo once in the background (copies, blur, content and text), which takes a while for a big library; everything keeps working meanwhile. Version 0.5 looks once through your JPEG and HEIC photos for motion photos and keywords (quick: it reads only the start of each file), pairs Live Photos, stacks RAW + JPEG pairs, and picks up RAW files that earlier versions skipped. Version 0.6 looks once through your JPEG and HEIC photos for 360° panoramas (again reading only the start of each file) and makes its first database backup when it starts. Version 0.7 changes nothing on its own: imports, the offsite copy and webhooks only start once you set them up. Version 0.8 changes nothing in your files unless you turn on XMP files; new uploads are filed by the date taken. Version 0.9.1 adds the optional Start with Windows switch; it stays off until you turn it on. Version 0.9 adds stars, labels and pick/reject (all empty to begin with); the library health check only runs when you ask, or on the schedule you set.
 
 ## Roadmap
 
@@ -238,7 +240,8 @@ Replace the exe (or pull the new code) and start it again. Your database is upgr
 - [x] Stars, labels, compare and cull, year in review videos, library health check, storage report
 - [ ] Android app with automatic backup
 - [ ] Sharing links for people without an account
-- [ ] Run at startup as a Windows service
+- [x] Optional start with Windows (Settings)
+- [ ] A tray icon and a true Windows service that runs before anyone signs in
 
 ## Development
 

@@ -26,10 +26,31 @@ async function post(url, body) {
     $("confirm-row").hidden = false;
     $("password").autocomplete = "new-password";
     $("submit").textContent = "Create account";
+    $("startup-row").hidden = !state.can_start_with_windows;
   } else {
     $("intro").textContent = "Log in to see your photos.";
   }
 })();
+
+// The account exists by now, so a problem here must not stop the person getting in: it is shown in the app.
+async function startWithWindows() {
+  let note = "Snapshots will start when you sign in to Windows.";
+  try {
+    const res = await fetch("/api/settings/startup", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", "X-Snapshots-Request": "1" },
+      body: JSON.stringify({ enabled: true }),
+    });
+    if (!res.ok) {
+      let detail = "";
+      try { detail = (await res.json()).detail || ""; } catch (_) { /* empty */ }
+      note = `Snapshots could not be set to start with Windows. ${detail} You can try again in Settings.`;
+    }
+  } catch (_) {
+    note = "Snapshots could not be set to start with Windows. You can try again in Settings.";
+  }
+  try { sessionStorage.setItem("snapshots-startup-note", note); } catch (_) { /* fine */ }
+}
 
 $("form").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -53,6 +74,7 @@ $("form").addEventListener("submit", async (e) => {
       $("code").focus();
       return;
     }
+    if (setupMode && $("startup").checked && !$("startup-row").hidden) await startWithWindows();
     location.replace("/");
   } catch (err) {
     $("error").textContent = err.message;

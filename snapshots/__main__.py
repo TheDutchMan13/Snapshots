@@ -21,6 +21,7 @@ from .app import create_app
 from .config import load_config, save_library_path
 
 FROZEN = bool(getattr(sys, "frozen", False))  # True inside the PyInstaller exe
+BACKGROUND_WAIT = 120  # seconds to wait at sign-in for the photo folder's drive to appear
 
 
 def pick_folder() -> Path | None:
@@ -81,7 +82,7 @@ def open_browser_when_ready(url: str, host: str, port: int, timeout: float = 30)
 
 def choose_ui(args, frozen: bool) -> str:
     """How to show Snapshots: "window" (its own app window), "browser", or "none" (server only)."""
-    if args.no_browser:
+    if args.no_browser or getattr(args, "background", False):
         return "none"
     if args.open:
         return "browser"
@@ -90,9 +91,15 @@ def choose_ui(args, frozen: bool) -> str:
     return "none"
 
 
-def start_server(cfg) -> tuple[uvicorn.Server, threading.Thread]:
-    """Run the web server on a background thread (the app window needs the main thread)."""
-    server = uvicorn.Server(uvicorn.Config(create_app(cfg), host=cfg.host, port=cfg.port, log_level="info"))
+def start_server(cfg, allow_quit: bool = False) -> tuple[uvicorn.Server, threading.Thread]:
+    """Run the web server on a background thread (the app window needs the main thread).
+
+    With allow_quit, an administrator can stop it from Settings (used when it runs without a window).
+    """
+    app = create_app(cfg)
+    server = uvicorn.Server(uvicorn.Config(app, host=cfg.host, port=cfg.port, log_level="info"))
+    if allow_quit:
+        app.state.ctx.quit = lambda: setattr(server, "should_exit", True)
 
     def run() -> None:
         try:
@@ -161,6 +168,29 @@ def serve_with_ui(cfg, mode: str, url: str, check_host: str) -> int:
         else:
             while thread.is_alive():
                 thread.join(0.5)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stop_server(server, thread)
+    return 0
+
+
+def run_background(cfg, check_host: str) -> int:
+    """Run the server with no window (what starting with Windows does). Stop it from Settings."""
+    server, thread = start_server(cfg, allow_quit=True)
+    if not wait_until_up(server, thread):
+        if shell.snapshots_running(check_host, cfg.port):
+            print("Snapshots is already running.")
+            return 0
+        return fail(
+            f"Snapshots could not start on port {cfg.port}.\n"
+            "Is it already running? Close the other Snapshots window, or use --port 8081.",
+            code=1,
+        )
+    print("Snapshots is running in the background. Open it in a browser, or start Snapshots.exe to see it.")
+    try:
+        while thread.is_alive():
+            thread.join(0.5)
     except KeyboardInterrupt:
         pass
     finally:
@@ -246,6 +276,8 @@ def main(argv=None) -> int:
     p.add_argument("--open", "--browser", dest="open", action="store_true",
                    help="Open Snapshots in your web browser instead of its own window")
     p.add_argument("--no-browser", action="store_true", help="Do not open a window or browser on start")
+    p.add_argument("--background", action="store_true",
+                   help="Run without a window (this is how starting with Windows runs it)")
     p.add_argument("--version", action="version", version=f"snapshots {__version__}")
     args = p.parse_args(argv)
 
@@ -271,6 +303,11 @@ def main(argv=None) -> int:
         host = "127.0.0.1" if cfg.host in ("0.0.0.0", "localhost") else cfg.host
         return restore_backup(cfg, args.restore_backup, host)
 
+    if args.background and cfg.library_path is None:
+        # Never pop up a folder picker at sign-in.
+        return fail("Snapshots was started with Windows, but no photo folder has been chosen yet.\n"
+                    "Start Snapshots.exe once and choose your photo folder.")
+
     if args.library is None and (args.change_library or cfg.library_path is None):
         chosen = pick_folder()
         if chosen is None:
@@ -280,7 +317,14 @@ def main(argv=None) -> int:
             )
         cfg.library_path = chosen
         saved = save_library_path(chosen, cfg.config_file)
+        cfg.config_file = cfg.config_file or saved   # so Start with Windows names this file
         print(f"Remembered your choice in {saved}")
+
+    if args.background and not cfg.library_path.is_dir():
+        # At sign-in a USB or network drive can take a little while to appear.
+        deadline = time.time() + BACKGROUND_WAIT
+        while time.time() < deadline and not cfg.library_path.is_dir():
+            time.sleep(2)
 
     if not cfg.library_path.is_dir():
         return fail(
@@ -308,6 +352,9 @@ def main(argv=None) -> int:
             print("  Close this window to stop Snapshots.\n")
         else:
             print("  Press Ctrl+C to stop.\n")
+
+    if args.background:
+        return run_background(cfg, check_host)
 
     if mode == "window" or (mode == "browser" and shell.console == "none"):
         return serve_with_ui(cfg, mode, url, check_host)

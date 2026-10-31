@@ -38,7 +38,8 @@ def test_first_run_needs_setup_and_only_once(app):
 
     me = setup_admin(c)["user"]
     assert me["is_admin"] is True
-    assert c.get("/api/auth/state").json() == {"needs_setup": False, "user": me, "version": state["version"]}
+    assert c.get("/api/auth/state").json() == {"needs_setup": False, "user": me, "version": state["version"],
+                                                  "can_start_with_windows": False}
 
     again = fresh(c).post("/api/auth/setup", json={"username": "intruder", "password": "x" * 12})
     assert again.status_code == 409

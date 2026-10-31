@@ -1,6 +1,7 @@
 """Settings people change from the app: extra library folders, backups, video conversion and API keys."""
 
 import json
+import threading
 import urllib.parse
 from datetime import datetime
 from pathlib import Path
@@ -8,7 +9,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from . import auth, backup, db, libraries, media, offsite, storage, webhooks
+from . import auth, backup, db, libraries, media, offsite, startup, storage, webhooks
 from .app import current_user, require_admin, require_session
 from .config import OFFSITE_METHODS, save_extra_libraries, save_settings
 from .scanner import delete_asset_row
@@ -16,6 +17,10 @@ from .scanner import delete_asset_row
 
 class FolderBody(BaseModel):
     path: str = Field(min_length=1, max_length=1000)
+
+
+class StartupBody(BaseModel):
+    enabled: bool
 
 
 class KeyBody(BaseModel):
@@ -79,7 +84,33 @@ def router(ctx) -> APIRouter:
             "offsite": offsite_json(),
             "xmp": xmp_json(),
             "storage": storage_json(cfg.upload_template),
+            "startup": startup_json(),
         }
+
+    def startup_json() -> dict:
+        return dict(startup.status(cfg), can_stop=ctx.quit is not None, port=cfg.port)
+
+    @r.put("/api/settings/startup")
+    def save_startup(body: StartupBody, request: Request):
+        require_admin(request)
+        if not startup.supported():
+            raise HTTPException(400, "Starting with Windows is only available in the Windows app.")
+        try:
+            if body.enabled:
+                startup.enable(cfg)
+            else:
+                startup.disable()
+        except OSError as exc:
+            raise HTTPException(409, f"Windows would not change its startup list. {exc}") from None
+        return startup_json()
+
+    @r.post("/api/quit")
+    def stop_snapshots(request: Request):
+        require_admin(request)
+        if ctx.quit is None:
+            raise HTTPException(409, "This copy is showing its own window. Close the window to stop Snapshots.")
+        threading.Timer(0.5, ctx.quit).start()     # after this reply has gone out
+        return {"stopping": True}
 
     def xmp_json() -> dict:
         return dict(worker.xmp.state, enabled=cfg.xmp_sidecars)

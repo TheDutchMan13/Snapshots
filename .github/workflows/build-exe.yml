@@ -136,6 +136,7 @@ jobs:
             $store = Invoke-RestMethod "$base/api/storage?fresh=true" -WebSession $web
             $years = (Invoke-RestMethod "$base/api/review" -WebSession $web).years
             $qr = Invoke-WebRequest "$base/static/vendor/qrcode.js" -WebSession $web -UseBasicParsing
+            $boot = (Invoke-RestMethod "$base/api/settings" -WebSession $web).startup
           }
           Get-Process -Name Snapshots -ErrorAction SilentlyContinue | Stop-Process -Force
           Write-Host '--- exe output ---'
@@ -166,6 +167,7 @@ jobs:
           if (-not $hc.last.finished_at -or $hc.last.problems -ne 0 -or $hc.last.checked -lt 2) { throw "The library health check failed: $($hc | ConvertTo-Json -Compress -Depth 4)" }
           if ($store.kinds.photos.items -lt 1 -or -not $store.disks[0].available) { throw "The storage report failed: $($store | ConvertTo-Json -Compress -Depth 3)" }
           if (-not $years -or $years.Count -lt 1) { throw 'The year in review found no years.' }
+          if (-not $boot.supported -or $boot.enabled) { throw 'Start with Windows should be available and off by default.' }
           if ($qr.StatusCode -ne 200)    { throw 'The QR code script for two-step login is missing from the exe.' }
           Write-Host "Video converting: ffmpeg $($enc.ffmpeg), encoder $($enc.using)"
           Write-Host "Smoke test passed: $($status.photos) photos indexed (one RAW), login required, HEIC and RAW support present, map files served, editing, backups, API keys, smart albums, exports, the photo book, the offsite copy, stars, the health check, the storage report and the year in review work."

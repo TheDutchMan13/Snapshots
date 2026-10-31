@@ -6,7 +6,7 @@ from datetime import datetime
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel
 
-from . import __version__, auth, db
+from . import __version__, auth, db, startup
 from .app import current_user, require_admin, require_session
 
 
@@ -86,7 +86,8 @@ def router(ctx) -> APIRouter:
         user = request.state.user
         if user is not None:
             user = {"id": user["id"], "username": user["username"], "is_admin": user["is_admin"]}
-        return {"needs_setup": needs_setup, "user": user, "version": __version__}
+        return {"needs_setup": needs_setup, "user": user, "version": __version__,
+                "can_start_with_windows": needs_setup and startup.supported()}
 
     @r.post("/api/auth/setup")
     def setup(body: Credentials, request: Request, response: Response):

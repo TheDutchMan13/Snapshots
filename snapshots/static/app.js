@@ -4603,6 +4603,57 @@ function xmpSection(ctl) {
   return { box, draw };
 }
 
+function startupSection(ctl) {
+  const box = el("div");
+  const draw = (o) => {
+    box.replaceChildren();
+    if (!o.supported) {
+      box.append(el("p", "muted", "Starting with Windows is only available in the Windows app."));
+      return;
+    }
+    box.append(el("p", "muted", "Start Snapshots by itself when you sign in to Windows, so your library is always up to date and reachable from your phone. It runs in the background with no window. Open it by double-clicking Snapshots.exe, or go to its address in a browser. This is the same list as Windows Settings > Apps > Startup, so you can turn it off there too."));
+    const wrap = el("label", "field inline");
+    const on = el("input");
+    on.type = "checkbox";
+    on.checked = o.enabled;
+    wrap.append(on, el("span", null, "Start Snapshots when I sign in to Windows"));
+    on.addEventListener("change", async () => {
+      try {
+        draw(await api("/api/settings/startup", { method: "PUT", json: { enabled: on.checked } }));
+        ctl.error("");
+        flashNote(on.checked ? "Snapshots will start when you sign in to Windows" : "Snapshots will no longer start with Windows");
+      } catch (err) { on.checked = !on.checked; ctl.error(err.message); }
+    });
+    box.append(wrap);
+    if (o.enabled && !o.current) {
+      const fix = el("button", "btn small", "Use this copy");
+      fix.type = "button";
+      fix.addEventListener("click", async () => {
+        try { draw(await api("/api/settings/startup", { method: "PUT", json: { enabled: true } })); ctl.error(""); flashNote("Windows will start this copy"); }
+        catch (err) { ctl.error(err.message); }
+      });
+      const warn = el("p", "small");
+      warn.append(el("span", "form-error", "Windows is set to start a different copy of Snapshots (or one that was moved). "), fix);
+      box.append(warn);
+    }
+    if (o.enabled && !o.can_stop) box.append(el("p", "muted small", "It starts by itself from your next sign-in. Until then, closing this window stops Snapshots as usual."));
+    box.append(el("p", "muted small", `Address when it runs in the background: http://localhost:${o.port}`));
+    if (o.can_stop) {
+      const stop = el("button", "btn small danger", "Stop Snapshots");
+      stop.type = "button";
+      stop.addEventListener("click", async () => {
+        if (!window.confirm("Stop Snapshots? It stays off until you start it again (or until the next time you sign in to Windows, if starting with Windows is on).")) return;
+        try {
+          await api("/api/quit", { method: "POST" });
+          document.body.replaceChildren(el("p", "muted", "Snapshots has stopped. You can close this tab."));
+        } catch (err) { ctl.error(err.message); }
+      });
+      box.append(el("p", "small", "Running in the background right now."), stop);
+    }
+  };
+  return { box, draw };
+}
+
 function facesSection(ctl) {
   const box = el("div");
   const draw = async (st) => {
@@ -4852,9 +4903,11 @@ async function manageSettings() {
       const store = storageSection(ctl);
       const side = xmpSection(ctl);
       const faceSet = facesSection(ctl);
+      const boot = startupSection(ctl);
       body.append(el("h3", "section-title small", "Where uploads go"), store.box);
       body.append(el("h3", "section-title small", "XMP files beside photos"), side.box);
       body.append(el("h3", "section-title small", "Face grouping"), faceSet.box);
+      body.append(el("h3", "section-title small", "Start with Windows"), boot.box);
       body.append(el("h3", "section-title small", "Backups"), backups);
       body.append(el("h3", "section-title small", "Videos"), video);
       const off = offsiteSection(ctl);
@@ -4868,6 +4921,7 @@ async function manageSettings() {
         if (data.offsite.state.running) off.refresh();
         store.draw(data.storage);
         side.draw(data.xmp);
+        boot.draw(data.startup);
       });
       faceSet.draw();
       hooks.draw();
@@ -4886,6 +4940,9 @@ async function manageSettings() {
   await render();
   let left = null;
   try { left = sessionStorage.getItem("snapshots-recovery-left"); sessionStorage.removeItem("snapshots-recovery-left"); } catch (_) { /* fine */ }
+  let startNote = null;
+  try { startNote = sessionStorage.getItem("snapshots-startup-note"); sessionStorage.removeItem("snapshots-startup-note"); } catch (_) { /* fine */ }
+  if (startNote) flashNote(startNote);
   if (left !== null) {
     flashNote(+left > 0 ? `You used a recovery code: ${plural(+left, "code")} left. Make new ones in Login security if you lost your phone.`
       : "You used your last recovery code. Make new ones now in Login security.");

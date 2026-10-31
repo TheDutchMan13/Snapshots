@@ -85,7 +85,7 @@ def create_app(cfg: Config, start_worker: bool = True) -> FastAPI:
     worker = Worker(cfg)
     sender = webhooks.Sender(cfg)
     ctx = SimpleNamespace(cfg=cfg, worker=worker, throttle=LoginThrottle(), pin_throttle=LoginThrottle(limit=5), tickets=Tickets(), pending_totp={},
-                          webhooks=sender)
+                          webhooks=sender, quit=None)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):

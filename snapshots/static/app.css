@@ -505,6 +505,10 @@ button.tag-chip:hover { background: var(--accent-soft); border-color: var(--acce
   width: 100%; height: 40px; padding: 0 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg);
 }
 .login-card .form-error { padding: 0; margin: 12px 0; }
+.login-card label.check-row { display: flex; flex-wrap: nowrap; align-items: flex-start; gap: 8px; margin: 16px 0 0; font-weight: 500; cursor: pointer; }
+.login-card label.check-row input { width: 18px; height: 18px; flex: none; margin: 1px 0 0; }
+.login-card label.check-row span { min-width: 0; }
+.login-card #startup-row .muted.small { margin: 4px 0 0 26px; }
 
 
 /* ---- 0.6: activity badge, details, comments */
