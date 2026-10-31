@@ -402,7 +402,8 @@ def test_locked_items_get_no_sidecar_and_trash_removes_it(tmp_path):
     ids = ids_by_name(c)
     c.put("/api/settings/xmp", json={"enabled": True})
     c.post("/api/assets/details", json={"ids": [ids["beach.jpg"], ids["dog.jpg"]], "description": "secret"})
-    wait_for(lambda: (root / "2024" / "dog.jpg.xmp").is_file(), timeout=30)
+    # The worker looks for changed items every 10 seconds, and a slow Windows runner can take longer still.
+    wait_for(lambda: (root / "2024" / "dog.jpg.xmp").is_file(), timeout=90)
     (root / "2023" / "beach.jpg.xmp").unlink(missing_ok=True)
     with db.session(cfg.db_path) as conn:
         conn.execute("UPDATE assets SET locked_by = 1 WHERE id = ?", (ids["beach.jpg"],))
