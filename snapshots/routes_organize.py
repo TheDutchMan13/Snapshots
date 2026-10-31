@@ -319,12 +319,14 @@ def router(ctx) -> APIRouter:
         with db.session(cfg.db_path) as conn:
             rows = conn.execute(
                 "SELECT substr(a.taken_at, 1, 4) AS year, COUNT(*) AS count,"
-                # the cover: a favourite if there is one, else the sharpest photo
+                # the cover: a favourite if there is one, else the best-looking photo (sorting.py), else the
+                # sharpest; never a screenshot or a document
                 " (SELECT b.id FROM assets b WHERE substr(b.taken_at, 1, 10) = substr(a.taken_at, 1, 10)"
                 f"  AND b.trashed_at IS NULL AND b.archived_at IS NULL AND b.locked_by IS NULL"
                 "  AND b.kind = 'photo' AND b.has_thumb = 1"
                 "  ORDER BY EXISTS (SELECT 1 FROM favorites f WHERE f.asset_id = b.id) DESC,"
-                "  coalesce(b.sharpness, 0) DESC, b.id LIMIT 1) AS cover"
+                "  coalesce(b.category, '') IN ('screenshot', 'document', 'receipt'),"
+                "  b.beauty IS NULL, b.beauty DESC, coalesce(b.sharpness, 0) DESC, b.id LIMIT 1) AS cover"
                 f" FROM assets a WHERE substr(a.taken_at, 5, 6) = ? AND a.taken_at < ? AND {VISIBLE}"
                 " GROUP BY year ORDER BY year DESC",
                 (month_day, f"{day.year:04d}"),

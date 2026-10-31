@@ -158,16 +158,24 @@ def index_file(cfg: Config, conn, rel: str, full: Path, digest: str | None = Non
             side = xmp.read_for(full)    # a sidecar from another program (or from Snapshots, before a move)
         except Exception:
             side = None
-    taken = (info["taken"] or (side or {}).get("taken") or media.date_from_filename(full.name)
-             or datetime.fromtimestamp(st.st_mtime))
-    taken = taken.isoformat(timespec="seconds")
-    taken_file = None
     lat, lon = info["lat"], info["lon"]
     if lat is None and side and side.get("lat") is not None:
         lat, lon = side["lat"], side["lon"]
+    # The date: the file's own, else a sidecar's, else (if the settings allow guessing) the GPS fix's time,
+    # else one in the file name, else when the file was last changed. date_guess says which guess it is.
+    guess = None
+    taken = info["taken"] or (side or {}).get("taken")
+    if taken is None and cfg.guess_dates and info.get("gps_taken"):
+        taken, guess = media.local_from_gps(info["gps_taken"], lon), "gps"
+    if taken is None:
+        taken = media.date_from_filename(full.name)
+    if taken is None:
+        taken, guess = datetime.fromtimestamp(st.st_mtime), "file"
+    taken = taken.isoformat(timespec="seconds")
+    taken_file = None
     if prev is not None and prev["taken_at_file"]:
         # Someone set this item's date by hand: that stays, whatever the changed file says.
-        taken, taken_file = prev["taken_at"], taken
+        taken, taken_file, guess = prev["taken_at"], taken, None
     if prev is not None and prev["position_edited"]:
         lat, lon = prev["lat"], prev["lon"]
     has_position = lat is not None
@@ -178,15 +186,15 @@ def index_file(cfg: Config, conn, rel: str, full: Path, digest: str | None = Non
         info["width"], info["height"], info["camera"], lat, lon,
         0 if has_position else 1,           # geo_done: nothing to look up without a position
         0 if kind == "photo" else 1,        # faces_done: faces are found in photos only
-        motion[0] if motion else None, motion[1] if motion else None, projection, taken_file,
+        motion[0] if motion else None, motion[1] if motion else None, projection, taken_file, guess,
     )
     if prev is None:
         cur = conn.execute(
             """
             INSERT INTO assets (filename, kind, size, mtime_ns, sha1, taken_at, width, height, camera,
                                 lat, lon, geo_done, faces_done, motion_offset, motion_length, projection,
-                                taken_at_file, motion_done, pano_done, path, has_thumb, added_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, 0, ?)
+                                taken_at_file, date_guess, motion_done, pano_done, path, has_thumb, added_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, 0, ?)
             """,
             values + (rel, now()),
         )
@@ -208,11 +216,11 @@ def index_file(cfg: Config, conn, rel: str, full: Path, digest: str | None = Non
             """
             UPDATE assets SET filename = ?, kind = ?, size = ?, mtime_ns = ?, sha1 = ?, taken_at = ?,
                 width = ?, height = ?, camera = ?, lat = ?, lon = ?, geo_done = ?, faces_done = ?,
-                motion_offset = ?, motion_length = ?, projection = ?, taken_at_file = ?, motion_done = 1,
-                pano_done = 1, vcodec = NULL,
+                motion_offset = ?, motion_length = ?, projection = ?, taken_at_file = ?, date_guess = ?,
+                date_checked = 0, motion_done = 1, pano_done = 1, vcodec = NULL,
                 city = NULL, state = NULL, country = NULL, has_thumb = 0,
                 dhash = NULL, sharpness = NULL, brightness = NULL, highlights = NULL, quality_done = 0, keep_quality = 0,
-                clip_done = 0, ocr_done = 0, ocr_text = NULL,
+                clip_done = 0, ocr_done = 0, ocr_text = NULL, sort_done = 0, beauty = NULL, faceq_done = 0,
                 trashed_at = NULL   -- a different picture now: never inherit the old one's trash state
             WHERE id = ?
             """,

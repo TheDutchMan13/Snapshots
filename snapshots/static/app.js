@@ -19,7 +19,7 @@ const S = {
   lastClicked: -1,
   viewing: -1,
   detail: null,      // full details of the photo open in the viewer
-  look: null,        // searching by what is in the photo (true), by words (false), or not chosen yet (null)
+  look: null,        // searching by what is in the photo (true), by words (false), both ("mix"), or not chosen yet (null)
   search: null,      // the last search summary: how many matches each way
 };
 
@@ -232,6 +232,10 @@ function parseRoute() {
       if (S.status && S.status.locked && S.status.locked.open) return { name: "locked", view: "grid", filter: { locked: "true" }, locked: true };
       return { name: "locked", view: "locked" };
     case "activity": return { name: "activity", view: "activity" };
+    case "highlights": return { name: "highlights", view: "grid", filter: { highlights: "true", archived: "hide", stacks: "true" }, highlights: true };
+    case "sorted":
+      if (SORTED[parts[1]]) return { name: "cleanup", view: "grid", filter: { category: parts[1] }, sorted: parts[1] };
+      return { name: "cleanup", view: "cleanup" };
     case "review": return { name: "review", view: "review", year: /^\d{4}$/.test(parts[1] || "") ? +parts[1] : null };
     case "events":
       if (parts[1] && parts[2]) return { name: "events", view: "grid", filter: { start: parts[1], end: parts[2], archived: "hide" }, event: { start: parts[1], end: parts[2] } };
@@ -279,11 +283,18 @@ function parseRoute() {
   }
 }
 
+// Pictures that are not really photos (sorted out in the background).
+const SORTED = {
+  screenshot: { title: "Screenshots", one: "screenshot", note: "Pictures of a phone or computer screen." },
+  document: { title: "Documents", one: "document", note: "Photos and scans of pages, forms, notes and whiteboards." },
+  receipt: { title: "Receipts", one: "receipt", note: "Receipts, bills and invoices." },
+};
+
 let keepSearch = false;   // true while the search box itself caused a change of page
 
 const ROUTE_TITLES = {
   all: "Snapshots", photos: "Photos", videos: "Videos", favorites: "Favourites", activity: "Activity", people: "People",
-  places: "Places", map: "Map", events: "Events", review: "Year in review", albums: "Albums", tags: "Tags", folders: "Folders",
+  places: "Places", map: "Map", events: "Events", review: "Year in review", highlights: "Highlights", albums: "Albums", tags: "Tags", folders: "Folders",
   cleanup: "Clean up", storage: "Storage", health: "Library health", archive: "Archive", locked: "Locked", trash: "Trash",
   settings: "Settings",
 };
@@ -408,6 +419,13 @@ async function renderHead() {
     await renderEventHead(r.event);
   } else if (r.quality) {
     renderQualityHead();
+  } else if (r.highlights) {
+    headRow("Highlights", null, [],
+      "Your best-looking photos, about one in 25, picked by what they show and how well they are taken. It's a rough judgement: favourites, stars and picks are yours to set.");
+  } else if (r.sorted) {
+    const k = SORTED[r.sorted];
+    headRow(k.title, null, [link("Back to Clean up", "#/cleanup", "btn small")],
+      `${k.note} Found by their name, shape, the text in them and what they show. Wrongly sorted? Select it and press Not a ${k.one}. Archive them to keep them out of your timeline.`);
   } else if (r.album) {
     const album = await api(`/api/albums/${r.album}`);
     S.album = album;
@@ -455,7 +473,9 @@ async function renderSearchHead() {
   if (q !== S.q) return;
   S.search = sum;
   if (!sum) { $("page-head").hidden = true; S.look = false; return; }
-  if (S.look === null) S.look = sum.words === 0 && sum.content > 0;
+  if (S.look === null) {
+    S.look = sum.mixed != null && sum.words > 0 && sum.content > 0 ? "mix" : sum.words === 0 && sum.content > 0;
+  }
   const tabs = el("div", "tabs");
   tabs.setAttribute("role", "group");
   tabs.setAttribute("aria-label", "Search by");
@@ -471,17 +491,19 @@ async function renderSearchHead() {
     b.setAttribute("aria-pressed", String(S.look === look));
     return b;
   };
+  if (sum.mixed != null && sum.words > 0) tabs.append(tab("Best matches", sum.mixed, "mix"));
   tabs.append(tab("Words, names and dates", sum.words, false));
   let note = null;
+  if (S.look === "mix") note = "Found by words and by what's in the photo, best first.";
   if (sum.content_enabled) {
     tabs.append(tab("What's in the photo", sum.content, true));
     if (sum.content_message) note = sum.content_message;
     else if (!sum.content_ready) note = "Search by what's in the photo starts once its model is downloaded.";
     else if (sum.content_pending) note = `Still learning what's in your photos: ${plural(sum.content_pending, "photo")} to go.`;
-    else if (S.look) note = "Best matches first. Matching by content is approximate.";
+    else if (S.look === true) note = "Best matches first. Matching by content is approximate.";
   }
   const save = button("Save as smart album", "btn small", () =>
-    smartAlbumDialog(null, S.look ? { look: q } : { words: q }, q));
+    smartAlbumDialog(null, S.look === true || (S.look === "mix" && !sum.words) ? { look: q } : { words: q }, q));
   headRow(el("h1", null, `“${q}”`), null, [tabs, save], note);
 }
 
@@ -524,13 +546,19 @@ function renderQualityHead() {
   ], "Photos that look blurry or too dark. Select the ones to keep and press Looks fine, or move them to the trash.");
 }
 
+/** How search results are ranked: by content (look), words and content together (mix), or by date. */
+function rankParam(p) {
+  if (S.look === "mix") p.set("mix", "true");
+  else if (S.look) p.set("look", "true");
+}
+
 /** Every id in the current grid (not only the ones loaded so far). */
 async function allIds() {
   const ids = [];
   let cursor = "";
   for (;;) {
     const p = filterParams({ limit: 500 });
-    if (S.look) p.set("look", "true");
+    rankParam(p);
     if (cursor) p.set("cursor", cursor);
     const page = await api(`/api/assets?${p}`);
     page.items.forEach((it) => ids.push(it.id));
@@ -644,6 +672,8 @@ function tile(item, index) {
   if (item.has_thumb) {
     const i = img(thumbUrl(item.id, item.v));
     i.addEventListener("error", () => { i.remove(); b.prepend(el("span", "ph", ext(item.filename))); });
+    // Square tiles crop the picture: keep the faces in view.
+    if (item.focus) i.style.objectPosition = `${(item.focus[0] * 100).toFixed(1)}% ${(item.focus[1] * 100).toFixed(1)}%`;
     b.append(i);
   } else {
     b.append(el("span", "ph", ext(item.filename)));
@@ -698,7 +728,7 @@ async function loadMore() {
   const gen = S.gen;
   try {
     const params = filterParams({ limit: PAGE });
-    if (S.look) params.set("look", "true");
+    rankParam(params);
     if (S.cursor) params.set("cursor", S.cursor);
     const page = await api(`/api/assets?${params}`);
     if (gen !== S.gen) return;
@@ -787,11 +817,13 @@ function updateEmpty() {
   if (S.items.length > 0 || !S.loaded) { $("empty").hidden = true; return; }
   const st = S.status;
   const r = S.route;
-  if (S.q && S.look) showEmpty("Nothing looks like that", S.search && !S.search.content_ready
+  if (S.q && S.look === true) showEmpty("Nothing looks like that", S.search && !S.search.content_ready
     ? "Search by what's in the photo is not ready yet." : "Try other words, like “dog”, “snow” or “birthday cake”.");
   else if (S.q) showEmpty("No matches", S.search && S.search.content
     ? "No names, places or dates match. Try “What's in the photo” above." : "Try a different word, or clear the search.");
   else if (r.quality) showEmpty("Nothing to tidy up", "No blurry or dark photos were found.");
+  else if (r.sorted) showEmpty(`No ${SORTED[r.sorted].title.toLowerCase()}`, "None were found, or they are still being sorted.");
+  else if (r.highlights) showEmpty("No highlights yet", "Highlights are picked once search by what's in the photo has looked at your photos.");
   else if (r.locked) showEmpty("Your locked folder is empty", "Select photos anywhere in the library and press Move to Locked.");
   else if (r.archive) showEmpty("Nothing archived", "Archive screenshots, receipts and other photos you want to keep but not see in the timeline. Select them and press Archive.");
   else if (r.tag) showEmpty("Nothing with this tag", "Select photos anywhere in the library and press Tag.");
@@ -878,6 +910,13 @@ function updateSelection() {
     actions.append(button("Restore", "btn", () => restore(ids())));
     if (S.me && S.me.is_admin) actions.append(button("Delete permanently", "btn danger", () => deleteForever(ids())));
     return;
+  }
+  if (r.sorted) {
+    actions.append(button(`Not a ${SORTED[r.sorted].one}`, "btn", async () => {
+      const chosen = ids();
+      try { await post("/api/assets/category", { ids: chosen, category: "photo" }); removeItems(chosen); flashNote(`${plural(chosen.length, "item")} moved back to the photos`); }
+      catch (err) { flashNote(err.message); }
+    }));
   }
   if (r.quality) {
     actions.append(button("Looks fine", "btn", async () => {
@@ -1485,9 +1524,11 @@ async function renderAlbums() {
   const coll = $("collection");
   if (!albums.length) {
     showEmpty("No albums yet", "Press Select, pick some photos and choose Add to album. Albums are shared with everyone who uses Snapshots.");
+    suggestedAlbums().then((strip) => { if (strip && S.route.view === "albums") { $("empty").hidden = true; coll.replaceChildren(strip); } });
     return;
   }
   const cards = el("div", "cards");
+  suggestedAlbums().then((strip) => { if (strip && S.route.view === "albums") coll.prepend(strip); });
   for (const a of albums) {
     const card = link("", `#/albums/${a.id}`, "card");
     const box = el("div", "card-img");
@@ -1499,6 +1540,33 @@ async function renderAlbums() {
     cards.append(card);
   }
   coll.replaceChildren(cards);
+}
+
+/** Smart albums worth making (dogs, sunsets, food...), as a strip of cards with Create buttons. */
+async function suggestedAlbums() {
+  let data;
+  try { data = await api("/api/suggestions/albums"); } catch (_) { return null; }
+  if (!data.suggestions.length) return null;
+  const wrap = el("section", "suggested");
+  wrap.append(el("h2", "section-title", "Suggested albums"),
+    el("p", "muted small", "Smart albums for things many of your photos show. New photos join them by themselves."));
+  const row = el("div", "cards strip");
+  for (const x of data.suggestions) {
+    const card = el("div", "card");
+    const box = el("div", "card-img");
+    if (x.cover) box.append(img(thumbUrl(x.cover, x.cover_v)));
+    box.append(el("span", "smart-badge", "Smart"));
+    card.append(box, el("div", "card-title", x.name), el("div", "card-meta", `About ${plural(x.count, "photo")}`));
+    card.append(button("Create", "btn small", async () => {
+      try {
+        const a = await post("/api/albums", { name: x.name, rule: { look: x.look } });
+        location.hash = `#/albums/${a.id}`;
+      } catch (err) { flashNote(err.message); }
+    }));
+    row.append(card);
+  }
+  wrap.append(row);
+  return wrap;
 }
 
 // ------------------------------------------------------------------ people page
@@ -2000,8 +2068,8 @@ const CLEANUP_KINDS = [
 const CLEANUP_HELP = {
   "": "Each group's best item is marked to keep. Click items to change what to keep. Nothing is deleted: the rest go to the trash, and the files are only removed from your disk when the trash is emptied.",
   identical: "The very same file, more than once (in two folders, say). Keeping one loses nothing.",
-  copies: "Photos that look the same: a smaller or re-saved copy, or the same picture from another app. The one with the most pixels is kept.",
-  burst: "Photos taken seconds apart. Keep your favourite, or stack them so they show as one.",
+  copies: "Photos that look the same: a smaller or re-saved copy, an edited, cropped or filtered copy, or the same picture from another app. The one with the most pixels is kept.",
+  burst: "Photos taken seconds apart. The one where everyone's eyes are open and faces are sharpest is marked to keep. Keep your favourite instead, or stack them so they show as one.",
 };
 
 async function renderCleanup() {
@@ -2018,6 +2086,17 @@ async function renderCleanup() {
   q.href = "#/cleanup/quality";
   q.append(el("strong", null, "Blurry or dark photos"), el("span", "muted", sum.low_quality ? plural(sum.low_quality, "photo") : "None found"));
   frag.append(q);
+  try {
+    const so = await api("/api/sorting");
+    for (const c of so.categories) {
+      if (!c.count) continue;
+      const k = SORTED[c.category];
+      const a = el("a", "cleanup-link");
+      a.href = `#/sorted/${c.category}`;
+      a.append(el("strong", null, k.title), el("span", "muted", plural(c.count, k.one)));
+      frag.append(a);
+    }
+  } catch (_) { /* the rest of the page still shows */ }
 
   const h = el("h2", "section-title", "Duplicates");
   if (sum.groups) h.append(el("span", "muted", `${plural(sum.extra, "extra item")} · ${fmtSize(sum.space)} could be freed`));
@@ -2786,7 +2865,8 @@ function renderDetails(item) {
   row("File", item.filename);
   if (item.description !== undefined && !item.locked) row("Description", descriptionBox(item));
   const when = el("span", "with-action");
-  when.append(document.createTextNode(fmtDateTime(item.taken_at) + (item.date_edited ? " (changed)" : "")));
+  const GUESS = { gps: " (from the GPS time)", nearby: " (guessed from the photos beside it)", file: " (when the file was last changed)" };
+  when.append(document.createTextNode(fmtDateTime(item.taken_at) + (item.date_edited ? " (changed)" : GUESS[item.date_guess] || "")));
   if (!item.locked && item.id !== undefined && item.description !== undefined) when.append(button("Change", "linklike", () => editDetails([item.id], item)));
   row("Taken", when);
   if (item.place) {
@@ -4680,6 +4760,34 @@ function xmpSection(ctl) {
   return { box, draw };
 }
 
+function sortingSection(ctl) {
+  const box = el("div");
+  const draw = (o) => {
+    box.replaceChildren(el("p", "muted", o.content
+      ? "Screenshots, documents and receipts are sorted out by their name, shape, the text in them and what they show. You find them in Clean up."
+      : "Screenshots are sorted out by their name and shape, and receipts and documents by the text in them. Turn on search by what's in the photo (smart_search) to sort better."));
+    const check = (label, key, done) => {
+      const wrap = el("label", "field inline");
+      const on = el("input");
+      on.type = "checkbox";
+      on.checked = o[key];
+      wrap.append(on, el("span", null, label));
+      on.addEventListener("change", async () => {
+        try { draw(await api("/api/settings/sorting", { method: "PUT", json: { [key]: on.checked } })); ctl.error(""); flashNote(done(on.checked)); }
+        catch (err) { on.checked = !on.checked; ctl.error(err.message); }
+      });
+      return wrap;
+    };
+    box.append(
+      check("Leave screenshots, documents and receipts out of All and Photos", "hide_clutter",
+        (on) => on ? "Screenshots and documents are left out of All and Photos" : "Screenshots and documents show in All and Photos again"),
+      check("Guess dates for files that have none", "guess_dates",
+        (on) => on ? "Dates are guessed from GPS time and the files beside them" : "Dates are no longer guessed"),
+      el("p", "muted small", "A file with no date in it gets one from the GPS time saved with it, or from the photos taken just before and after it in the same folder (by file name), instead of the time the file was last changed. Guessed dates say so in the photo's details, and you can always change them."));
+  };
+  return { box, draw };
+}
+
 function startupSection(ctl) {
   const box = el("div");
   const draw = (o) => {
@@ -4979,6 +5087,9 @@ async function renderSettings() {
     const side = xmpSection(ctl);
     section("XMP files beside photos", side.box);
     side.draw(data.xmp);
+    const sorter = sortingSection(ctl);
+    section("Sorting", sorter.box);
+    sorter.draw(data.sorting);
   } else if (tab === "backups") {
     const backups = el("div");
     const drawBackups = (b) => {

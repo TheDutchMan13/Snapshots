@@ -40,6 +40,9 @@ places = true
 photo_checks = true
 # Copies differ in at most this many of 64 fingerprint bits. Higher finds more edited copies.
 # duplicate_distance = 8
+# Edited, cropped and filtered copies, found by what they show (needs smart_search): how alike, 0 to 1.
+# 0 turns it off.
+# lookalike_similarity = 0.96
 # Photos taken within burst_seconds of each other that differ in at most burst_distance bits are a burst.
 # burst_seconds = 30
 # burst_distance = 14
@@ -57,6 +60,11 @@ smart_search = true
 text_search = true
 # How many CPU threads these two may use.
 search_threads = 2
+
+# Leave screenshots, documents and receipts out of All and Photos (they stay in Clean up and search).
+# hide_clutter = false
+# Date files that have no date inside from their GPS time or the numbered photos beside them.
+# guess_dates = true
 
 # Where the map's pictures come from. OpenStreetMap is used by default, which means your computer asks
 # OpenStreetMap's servers for the areas of the map you look at (not for your photos' locations).

@@ -1154,3 +1154,9 @@ a.bar-row:hover .bar-name { color: var(--accent-ink); text-decoration: underline
   .sel-actions { grid-column: 1 / -1; flex-wrap: nowrap; overflow-x: auto; padding-bottom: 2px; scrollbar-width: none; }
   .sel-actions > * { flex: none; }
 }
+
+/* Suggested albums, above the albums */
+.suggested { margin-bottom: 28px; }
+.suggested .section-title { margin-top: 0; }
+.suggested .card { display: flex; flex-direction: column; }
+.suggested .card .btn { margin-top: 6px; align-self: flex-start; }

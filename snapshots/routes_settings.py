@@ -42,6 +42,11 @@ class XmpBody(BaseModel):
     enabled: bool
 
 
+class SortingBody(BaseModel):
+    hide_clutter: bool | None = None
+    guess_dates: bool | None = None
+
+
 class StorageBody(BaseModel):
     template: str = Field(max_length=300)
 
@@ -85,7 +90,24 @@ def router(ctx) -> APIRouter:
             "xmp": xmp_json(),
             "storage": storage_json(cfg.upload_template),
             "startup": startup_json(),
+            "sorting": sorting_json(),
         }
+
+    def sorting_json() -> dict:
+        return {"hide_clutter": cfg.hide_clutter, "guess_dates": cfg.guess_dates,
+                "content": cfg.smart_search, "lookalike": cfg.lookalike_similarity}
+
+    @r.put("/api/settings/sorting")
+    def save_sorting(body: SortingBody, request: Request):
+        require_admin(request)
+        values = {k: v for k, v in (("hide_clutter", body.hide_clutter), ("guess_dates", body.guess_dates))
+                  if v is not None}
+        if values:
+            save_settings(values, cfg.config_file)
+            for k, v in values.items():
+                setattr(cfg, k, v)
+            worker.poke()
+        return sorting_json()
 
     def startup_json() -> dict:
         return dict(startup.status(cfg), can_stop=ctx.quit is not None, port=cfg.port)

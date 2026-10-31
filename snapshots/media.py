@@ -2,6 +2,7 @@
 
 import io
 import json
+import logging
 import math
 import os
 import re
@@ -9,7 +10,7 @@ import shutil
 import struct
 import subprocess
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from html import unescape
 from pathlib import Path
 
@@ -58,6 +59,8 @@ _EXIF_MODEL = 272
 _EXIF_ORIENTATION = 274
 _EXIF_SUBIFD = 0x8769
 _EXIF_GPSIFD = 0x8825
+
+log = logging.getLogger("snapshots.media")
 
 
 def kind_of(path: str | os.PathLike) -> str | None:
@@ -169,11 +172,37 @@ def _info_from_exif(exif, info: dict) -> None:
             lon = _gps_degrees(gps.get(4), gps.get(3))
             if _valid_position(lat, lon):
                 info["lat"], info["lon"] = round(lat, 6), round(lon, 6)
+            if info.get("gps_taken") is None:
+                info["gps_taken"] = _gps_time(gps)
 
 
 def _empty_info() -> dict:
     return {"taken": None, "width": None, "height": None, "camera": None, "lat": None, "lon": None,
-            "keywords": []}
+            "keywords": [], "gps_taken": None}
+
+
+def _gps_time(gps) -> datetime | None:
+    """The GPS fix's own time (GPSDateStamp and GPSTimeStamp), which is in UTC."""
+    stamp = gps.get(29)
+    if isinstance(stamp, bytes):
+        stamp = stamp.decode("ascii", "ignore")
+    m = re.match(r"^\s*(\d{4})[:\-](\d{2})[:\-](\d{2})", str(stamp or ""))
+    if not m:
+        return None
+    try:
+        hh, mm, ss = (float(v) for v in (gps.get(7) or (0, 0, 0)))
+        day = datetime(int(m[1]), int(m[2]), int(m[3]))
+        if not 1990 <= day.year <= 2100:
+            return None
+        return day + timedelta(hours=hh, minutes=mm, seconds=int(ss))
+    except (TypeError, ValueError, ZeroDivisionError, OverflowError):
+        return None
+
+
+def local_from_gps(utc: datetime, lon: float | None) -> datetime:
+    """A GPS time (UTC) as local time where it was taken, roughly: one hour per 15 degrees of longitude.
+    Time zones follow borders, so this can be an hour or so off; it is only used for files with no date."""
+    return utc + timedelta(hours=round(lon / 15)) if lon is not None else utc
 
 
 def read_photo_info(path: Path) -> dict:
@@ -901,11 +930,75 @@ def read_video_info(path: Path) -> dict:
     return info
 
 
+FRAME_SPOTS = (0.2, 0.5, 0.8)   # where in a video to look for its best frame
+
+
+def frame_score(img) -> float:
+    """How good a video frame is as the video's picture: sharp, and neither black, white nor murky."""
+    from .analysis import measure
+
+    m = measure(img)
+    if m["dhash"] is None:          # a flat picture: a black or white frame, a fade
+        return -1.0
+    exposure = 1.0 - min(1.0, abs(m["brightness"] - 120) / 120)
+    return math.log1p(m["sharpness"]) * (0.3 + 0.7 * exposure)
+
+
+def video_duration(src: Path) -> float | None:
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return None
+    try:
+        out = subprocess.run([ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(src)],
+                             capture_output=True, timeout=30, stdin=subprocess.DEVNULL, check=True).stdout
+        value = float(out.decode().strip())
+        return value if math.isfinite(value) and value > 0 else None
+    except (subprocess.SubprocessError, OSError, ValueError):
+        return None
+
+
+def _best_frame(ffmpeg: str, src: Path, dst: Path, duration: float) -> bool:
+    """Take a frame at each of FRAME_SPOTS and keep the best (frame_score)."""
+    best = None
+    tmps = []
+    try:
+        for i, spot in enumerate(FRAME_SPOTS):
+            tmp = dst.with_name(f"{dst.stem}.f{i}.tmp.jpg")
+            tmps.append(tmp)
+            cmd = [ffmpeg, "-v", "error", "-y", "-ss", f"{duration * spot:.2f}", "-i", str(src),
+                   "-frames:v", "1", "-vf", f"scale='min({THUMB_SIZE},iw)':-2", "-q:v", "4", str(tmp)]
+            try:
+                subprocess.run(cmd, timeout=60, capture_output=True, stdin=subprocess.DEVNULL, check=True)
+                with Image.open(tmp) as img:
+                    score = frame_score(img)
+            except (subprocess.SubprocessError, OSError, ValueError):
+                continue
+            if best is None or score > best[0]:
+                best = (score, tmp)
+        if best is None:
+            return False
+        os.replace(best[1], dst)
+        return True
+    finally:
+        for t in tmps:
+            try:
+                t.unlink()
+            except OSError:
+                pass
+
+
 def make_video_thumb(src: Path, dst: Path) -> bool:
-    """A frame from the video, if ffmpeg is installed. Otherwise no thumbnail."""
+    """The video's best frame (see _best_frame) if ffmpeg is installed, else no thumbnail."""
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         return False
+    duration = video_duration(src)
+    if duration and duration >= 3:
+        try:
+            if _best_frame(ffmpeg, src, dst, duration):
+                return True
+        except Exception as exc:   # never lose the thumbnail over this: fall back to the first second
+            log.info("could not pick the best frame of %s: %s", src, exc)
     tmp = dst.with_name(dst.stem + ".tmp.jpg")
     for seek in ("1", "0"):  # very short clips have no frame at 1 second
         cmd = [

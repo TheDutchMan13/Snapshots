@@ -232,7 +232,140 @@ def why_best(members: list[dict], keep: int, identical: bool) -> str:
     return "Added first"
 
 
+LOOKALIKE_SECONDS = 120   # a copy keeps the date of the photo it came from: only photos this close are compared
+
+
+def lookalike_pairs(conn, items: list[tuple[int, str, bool]], threshold: float, block: int = 512) -> set[tuple[int, int]]:
+    """Pairs whose content vectors (see clipsearch) are at least `threshold` alike (cosine).
+
+    The fingerprint above misses copies that were cropped, rotated, straightened or given a filter: their
+    light and dark pattern moved. What the picture shows did not, so its content vector stays almost the
+    same. items: [(id, taken_at, dated)]. A copy keeps its photo's date, so photos with a date of their
+    own are only compared with photos taken within LOOKALIKE_SECONDS (which also keeps the same view
+    shot on two different days apart); photos with a guessed date are compared with every photo."""
+    import bisect
+    import json
+
+    import numpy as np
+
+    if threshold <= 0 or len(items) < 2:
+        return set()
+    info = {i: (t, d) for i, t, d in items}
+    rows = conn.execute("SELECT asset_id, vec FROM clip_vectors WHERE asset_id IN (SELECT value FROM json_each(?))",
+                        (json.dumps(sorted(info)),)).fetchall()
+    if len(rows) < 2:
+        return set()
+    rows.sort(key=lambda r: (info[r[0]][0], r[0]))
+    order = [r[0] for r in rows]
+    stamps = []
+    for i in order:
+        try:
+            stamps.append(datetime.fromisoformat(info[i][0]).timestamp())
+        except (TypeError, ValueError):
+            stamps.append(0.0)
+    m = np.frombuffer(b"".join(r[1] for r in rows), dtype=np.float16).reshape(len(rows), -1).astype(np.float32)
+    norms = np.linalg.norm(m, axis=1)
+    m /= np.where(norms > 0, norms, 1)[:, None]
+    t = np.array(stamps)
+    n = len(order)
+    found: set[tuple[int, int]] = set()
+
+    def add(x, y):
+        a, b = order[x], order[y]
+        found.add((a, b) if a < b else (b, a))
+
+    # Photos with dates of their own: in time order, each block against what follows it within the window.
+    for i0 in range(0, n, block):
+        i1 = min(n, i0 + block)
+        k = bisect.bisect_right(stamps, stamps[i1 - 1] + LOOKALIKE_SECONDS)
+        sims = m[i0:i1] @ m[i0:k].T
+        close = np.abs(t[i0:k][None, :] - t[i0:i1][:, None]) <= LOOKALIKE_SECONDS
+        for i, j in zip(*np.nonzero((sims >= threshold) & close)):
+            x, y = i0 + int(i), i0 + int(j)
+            if y > x:
+                add(x, y)
+    # Photos whose date is only a guess: against everything.
+    loose = [x for x, i in enumerate(order) if not info[i][1]]
+    for s0 in range(0, len(loose), block):
+        part = loose[s0:s0 + block]
+        sims = m[part] @ m.T
+        for i, j in zip(*np.nonzero(sims >= threshold)):
+            x, y = part[int(i)], int(j)
+            if x != y:
+                add(x, y)
+    return found
+
+
+# ---------------------------------------------------------------- the best shot of a burst
+
+BLINK = 0.65     # a face whose eye detail is below this share of the same person's best in the burst: eyes shut
+
+
+def faces_of(conn, ids: list[int]) -> dict[int, list[dict]]:
+    import json
+
+    out: dict[int, list[dict]] = defaultdict(list)
+    for r in conn.execute("SELECT asset_id, person_id, x, y, w, h, eyes, sharp, frontal FROM faces"
+                          " WHERE asset_id IN (SELECT value FROM json_each(?))", (json.dumps(ids),)):
+        out[r["asset_id"]].append(dict(r))
+    return out
+
+
+def _who(face: dict):
+    """The same person in each photo of a burst: their group, or else roughly where the face is."""
+    if face["person_id"] is not None:
+        return ("p", face["person_id"])
+    return ("at", round((face["x"] + face["w"] / 2) * 5), round((face["y"] + face["h"] / 2) * 5))
+
+
+def best_shot(members: list[dict], faces: dict[int, list[dict]]) -> tuple[int, str] | None:
+    """The photo to keep from a burst, by its faces: everyone there, eyes open, faces sharp, looking at the
+    camera. None when the burst has no measured faces (then the sharpest photo is kept, as before).
+
+    Eye detail is compared between photos of the same person only: it depends on the light and the
+    person, so on its own it says little, but a blink makes it drop well below that person's other shots."""
+    measured = {m["id"]: [f for f in faces.get(m["id"], []) if f["eyes"] is not None or f["sharp"] is not None]
+                for m in members}
+    if not any(measured.values()):
+        return None
+    people = defaultdict(dict)                 # who -> {asset_id: face}
+    for aid, fs in measured.items():
+        for f in fs:
+            key = _who(f)
+            prev = people[key].get(aid)
+            if prev is None or f["w"] * f["h"] > prev["w"] * prev["h"]:
+                people[key][aid] = f
+    # Only people in at least half the photos count (a passer-by in one frame doesn't decide).
+    people = {k: v for k, v in people.items() if len(v) * 2 >= len(members)}
+    if not people:
+        return None
+    sharp_top = max((m["sharpness"] or 0) for m in members) or 1.0
+    scored = []
+    for m in members:
+        total, blinks = 0.0, 0
+        for shots in people.values():
+            f = shots.get(m["id"])
+            if f is None:
+                continue                        # not in this one (turned away, or out of the picture)
+            eyes_top = max((g["eyes"] or 0) for g in shots.values())
+            sharp_best = max((g["sharp"] or 0) for g in shots.values())
+            eyes = (f["eyes"] / eyes_top) if f["eyes"] is not None and eyes_top else 1.0
+            blink = eyes < BLINK
+            blinks += blink
+            sharp = (f["sharp"] / sharp_best) if f["sharp"] is not None and sharp_best else 1.0
+            front = f["frontal"] if f["frontal"] is not None else 1.0
+            total += 0.45 * min(1.0, eyes) + 0.3 * sharp + 0.25 * front - (0.6 if blink else 0.0)
+        score = total / len(people) + 0.05 * ((m["sharpness"] or 0) / sharp_top)
+        scored.append((score, -blinks, m["id"], blinks))
+    best = max(scored)
+    keep, keep_blinks = best[2], best[3]
+    others_blink = any(b > 0 for _, _, i, b in scored if i != keep)
+    why = "Eyes open" if others_blink and keep_blinks == 0 else "Sharpest faces"
+    return keep, why
+
+
 STRICTNESS = {"strict": 4, "normal": None, "loose": 12}   # None: the duplicate_distance setting
+LOOKALIKE = {"strict": 0.98, "normal": None, "loose": 0.93}  # None: the lookalike_similarity setting
 
 
 class DuplicateFinder:
@@ -253,7 +386,10 @@ class DuplicateFinder:
             "SELECT COUNT(*), COALESCE(MAX(id), 0), COALESCE(SUM(dhash % 1000003), 0),"
             " (SELECT COUNT(*) FROM not_duplicates), COALESCE(SUM(trashed_at IS NOT NULL), 0),"
             " COALESCE(SUM(coalesce(stack_id, 0) % 1000003), 0), COALESCE(SUM(CASE WHEN locked_by IS NOT NULL THEN id END), 0),"
-            " COALESCE(SUM(id % 1000003), 0)"
+            # New content vectors (for edited copies): while photos are still being learned, only every
+            # thousand counts, so indexing doesn't make this start over after each small batch
+            " COALESCE(SUM(id % 1000003), 0), (SELECT COUNT(*) FROM clip_vectors)"
+            " / CASE WHEN EXISTS (SELECT 1 FROM assets WHERE clip_done = 0 AND trashed_at IS NULL) THEN 1000 ELSE 1 END"
             " FROM assets"
         ).fetchone())
 
@@ -261,14 +397,22 @@ class DuplicateFinder:
         d = STRICTNESS.get(strictness or "normal")
         return self.cfg.duplicate_distance if d is None else d
 
+    def similarity(self, strictness: str | None) -> float:
+        s = LOOKALIKE.get(strictness or "normal")
+        base = getattr(self.cfg, "lookalike_similarity", 0.0) or 0.0
+        if base <= 0:
+            return 0.0           # switched off
+        return base if s is None else s
+
     def groups(self, conn, strictness: str | None = None) -> list[dict]:
         key = self._version(conn)
         distance = self.distance(strictness)
+        similarity = self.similarity(strictness)
         with self._lock:
-            hit = self._cache.get(distance)
+            hit = self._cache.get((distance, similarity))
             if hit is None or hit[0] != key:
-                hit = (key, self._compute(conn, distance))
-                self._cache[distance] = hit
+                hit = (key, self._compute(conn, distance, similarity))
+                self._cache[(distance, similarity)] = hit
             return hit[1]
 
     def _is_burst(self, ms: list[dict]) -> bool:
@@ -278,10 +422,12 @@ class DuplicateFinder:
             return False
         return all((b - a).total_seconds() <= self.cfg.burst_seconds for a, b in zip(times, times[1:]))
 
-    def _compute(self, conn, distance: int | None = None) -> list[dict]:
+    def _compute(self, conn, distance: int | None = None, similarity: float | None = None) -> list[dict]:
         distance = self.cfg.duplicate_distance if distance is None else distance
+        similarity = self.similarity(None) if similarity is None else similarity
         rows = [dict(r) for r in conn.execute(
-            "SELECT a.id, a.dhash, a.taken_at, a.width, a.height, a.size, a.sharpness, a.stack_id, a.sha1, a.kind, a.path"
+            "SELECT a.id, a.dhash, a.taken_at, a.width, a.height, a.size, a.sharpness, a.stack_id, a.sha1, a.kind, a.path,"
+            " a.date_guess"
             " FROM assets a WHERE a.trashed_at IS NULL AND a.locked_by IS NULL"
             " AND ((a.dhash IS NOT NULL AND a.kind = 'photo')"
             "      OR a.sha1 IN (SELECT sha1 FROM assets WHERE trashed_at IS NULL AND locked_by IS NULL"
@@ -296,6 +442,10 @@ class DuplicateFinder:
                      for i, a in enumerate(ids) for b in ids[i + 1:]}
         photos = [(r["id"], r["dhash"]) for r in rows if r["dhash"] is not None and r["kind"] == "photo"]
         copies = similar_pairs(photos, distance) | identical
+        # Edited, cropped and filtered copies, which the fingerprint misses (flat pictures have no
+        # fingerprint, and are left out here too: all black frames look alike).
+        copies |= lookalike_pairs(conn, [(r["id"], r["taken_at"], r["date_guess"] not in ("file", "nearby"))
+                                         for r in rows if r["dhash"] is not None and r["kind"] == "photo"], similarity)
         bursts = burst_pairs([r for r in rows if r["dhash"] is not None and r["kind"] == "photo"],
                              self.cfg.burst_seconds, self.cfg.burst_distance) - copies
         dismissed = {(a, b) for a, b in conn.execute("SELECT a, b FROM not_duplicates")}
@@ -316,11 +466,16 @@ class DuplicateFinder:
             same = len({m["sha1"] for m in ms}) == 1
             kind = "identical" if same else "burst" if self._is_burst(ms) else "copies"
             keep = _best_identical(ms) if same else _best(ms)
+            why = why_best(ms, keep, same)
+            if kind == "burst":
+                shot = best_shot(ms, faces_of(conn, [m["id"] for m in ms]))
+                if shot:
+                    keep, why = shot
             groups.append({
                 "kind": kind,
                 "ids": [m["id"] for m in ms],
                 "keep": keep,
-                "why": why_best(ms, keep, same),
+                "why": why,
                 "space": sum(m["size"] or 0 for m in ms if m["id"] != keep),
                 "taken_at": ms[-1]["taken_at"],
             })
@@ -448,7 +603,15 @@ def _join(names: list[str]) -> str:
 
 
 def _cover(items: list[dict]) -> int:
-    """A photo for the event's card: the sharpest of the middle half, or the middle one."""
+    """A photo for the event's card: the best-looking one (sorting.py), else the sharpest of the middle
+    half, else the middle one. Blurry, dark and screenshot-like pictures don't make covers."""
+    usable = [r for r in items if not r.get("category")]
+    pretty = [r for r in usable if r.get("beauty") is not None]
+    if len(pretty) * 2 >= len(usable) and pretty:
+        sharp = sorted(r["sharpness"] for r in pretty if r.get("sharpness") is not None)
+        floor = sharp[len(sharp) // 4] if sharp else None     # leave out the blurriest quarter
+        good = [r for r in pretty if floor is None or (r.get("sharpness") or 0) >= floor] or pretty
+        return max(good, key=lambda r: r["beauty"])["id"]
     middle = items[len(items) // 4: max(len(items) // 4 + 1, 3 * len(items) // 4)]
     scored = [r for r in middle if r.get("sharpness") is not None]
     return max(scored, key=lambda r: r["sharpness"])["id"] if scored else middle[len(middle) // 2]["id"]
@@ -467,7 +630,8 @@ class EventFinder:
             " COUNT(archived_at), COUNT(live_video), COALESCE(SUM(CASE WHEN locked_by IS NOT NULL THEN id END), 0),"
             # dates and positions people changed by hand
             " COALESCE(SUM(CAST(replace(replace(replace(taken_at, '-', ''), 'T', ''), ':', '') AS INTEGER) % 1000003), 0),"
-            " COALESCE(SUM(CAST(coalesce(lat, 0) * 10000 + coalesce(lon, 0) * 100 AS INTEGER) % 1000003), 0)"
+            " COALESCE(SUM(CAST(coalesce(lat, 0) * 10000 + coalesce(lon, 0) * 100 AS INTEGER) % 1000003), 0),"
+            " COUNT(beauty), COUNT(category)"
             " FROM assets WHERE trashed_at IS NULL"
         ).fetchone())
 
@@ -476,7 +640,9 @@ class EventFinder:
         with self._lock:
             if key != self._key:
                 rows = [dict(r) for r in conn.execute(
-                    "SELECT a.id, a.taken_at, a.lat, a.lon, a.city, a.state, a.country, a.sharpness FROM assets a"
+                    "SELECT a.id, a.taken_at, a.lat, a.lon, a.city, a.state, a.country, a.sharpness, a.beauty,"
+                    " CASE WHEN a.category IN ('screenshot', 'document', 'receipt') THEN a.category END AS category"
+                    " FROM assets a"
                     " WHERE a.trashed_at IS NULL AND a.archived_at IS NULL AND a.locked_by IS NULL"
                     " AND NOT EXISTS (SELECT 1 FROM assets lp WHERE lp.live_video = a.id) ORDER BY a.taken_at, a.id"
                 )]

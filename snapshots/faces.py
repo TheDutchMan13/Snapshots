@@ -20,6 +20,7 @@ Two differently named people, and hidden people, are never merged.
 """
 
 import hashlib
+import json
 import logging
 import os
 import sqlite3
@@ -104,6 +105,67 @@ def ensure_models(model_dir: Path) -> dict[str, Path]:
     return paths
 
 
+# ---------------------------------------------------------------- how good a face looks
+
+EYE_PATCH = 0.18      # half the side of the square looked at around each eye, as a share of the eye distance
+CHEEK_DROP = 0.45     # the cheek used for comparison sits this far below the eye (share of the eye distance)
+FACE_SIDE = 112       # faces are measured at this width, so big and small faces compare
+
+
+def _patch(grey, cx: float, cy: float, half: float):
+    h, w = grey.shape
+    x0, x1 = int(max(0, cx - half)), int(min(w, cx + half + 1))
+    y0, y1 = int(max(0, cy - half)), int(min(h, cy + half + 1))
+    return grey[y0:y1, x0:x1]
+
+
+def face_quality(grey, landmarks: list[float], box: tuple[float, float, float, float]) -> dict:
+    """Eyes, sharpness and frontalness of one face, from a greyscale picture (a float32 array, in pixels).
+
+    * eyes: the detail (spread of light and dark) around each eye, over that of the cheek below it. An open
+      eye has white, iris and pupil; a closed one is mostly skin and a lash line, so the number drops
+      when someone blinks. It is only compared between photos of the same person in one burst.
+    * sharp: fine detail in the face (variance of second differences, the weaker direction), at FACE_SIDE.
+    * frontal: 1 when the nose is midway between the eyes (looking at the camera), 0 when turned well away.
+    """
+    import numpy as np
+
+    rx, ry, lx, ly, nx, ny = landmarks[:6]
+    d = float(np.hypot(lx - rx, ly - ry))
+    out = {"eyes": None, "sharp": None, "frontal": None}
+    if d < 6:
+        return out
+    ratios = []
+    for ex, ey in ((rx, ry), (lx, ly)):
+        eye = _patch(grey, ex, ey, EYE_PATCH * d)
+        cheek = _patch(grey, ex, ey + CHEEK_DROP * d, EYE_PATCH * d)
+        if eye.size >= 9 and cheek.size >= 9:
+            ratios.append(float(eye.std()) / (float(cheek.std()) + 4.0))
+    if ratios:
+        out["eyes"] = round(sum(ratios) / len(ratios), 4)
+    mid_x = (rx + lx) / 2
+    out["frontal"] = round(max(0.0, 1.0 - abs(nx - mid_x) / (0.35 * d)), 3)
+    x, y, w, h = box
+    face = grey[int(max(0, y)):int(max(0, y + h)), int(max(0, x)):int(max(0, x + w))]
+    if face.shape[0] > 8 and face.shape[1] > 8:
+        from PIL import Image
+
+        scale = FACE_SIDE / face.shape[1]
+        img = Image.fromarray(face.astype(np.uint8)).resize(
+            (FACE_SIDE, max(8, round(face.shape[0] * scale))), Image.BILINEAR)
+        g = np.asarray(img, dtype=np.float32)
+        across = g[:, :-2] + g[:, 2:] - 2 * g[:, 1:-1]
+        down = g[:-2] + g[2:] - 2 * g[1:-1]
+        out["sharp"] = round(min(float(across.var()), float(down.var())), 2)
+    return out
+
+
+def _grey(img):
+    import numpy as np
+
+    return np.asarray(img.convert("L"), dtype=np.float32)
+
+
 class FaceEngine:
     def __init__(self, paths: dict[str, Path], threads: int = 2):
         import cv2
@@ -127,6 +189,7 @@ class FaceEngine:
         if found is None:
             return []
         faces = []
+        grey = _grey(img)
         for row in found:
             x, y, fw, fh = (float(v) for v in row[:4])
             if fw < MIN_FACE_PX or fh < MIN_FACE_PX:
@@ -136,14 +199,54 @@ class FaceEngine:
             if not norm:
                 continue
             x0, y0 = max(0.0, x), max(0.0, y)
+            marks = [float(v) for v in row[4:14]]
             faces.append({
                 "x": x0 / w, "y": y0 / h,
                 "w": (min(w, x + fw) - x0) / w, "h": (min(h, y + fh) - y0) / h,
                 "score": float(row[14]),
                 "embedding": emb / norm,
                 "thumb": _face_picture(img, x, y, fw, fh),
+                "landmarks": [round(v / (w if i % 2 == 0 else h), 4) for i, v in enumerate(marks)],
+                **face_quality(grey, marks, (x, y, fw, fh)),
             })
         return faces
+
+    def measure(self, path: Path, boxes: list[tuple[float, float, float, float]]) -> list[dict | None]:
+        """Landmarks and face_quality for faces found before (boxes as fractions), matched by position.
+        For photos whose faces were found before this was measured."""
+        img = media.load_oriented(path, DETECT_MAX_SIDE)
+        w, h = img.size
+        import numpy as np
+
+        bgr = np.ascontiguousarray(np.asarray(img)[:, :, ::-1])
+        self.detector.setInputSize((w, h))
+        _, found = self.detector.detect(bgr)
+        grey = _grey(img)
+        out: list[dict | None] = []
+        for bx, by, bw, bh in boxes:
+            best, best_iou = None, 0.3
+            for row in (found if found is not None else []):
+                iou = _iou((bx, by, bw, bh), (row[0] / w, row[1] / h, row[2] / w, row[3] / h))
+                if iou > best_iou:
+                    best, best_iou = row, iou
+            if best is None:
+                out.append(None)
+                continue
+            marks = [float(v) for v in best[4:14]]
+            q = face_quality(grey, marks, tuple(float(v) for v in best[:4]))
+            q["landmarks"] = [round(v / (w if i % 2 == 0 else h), 4) for i, v in enumerate(marks)]
+            out.append(q)
+        return out
+
+
+def _iou(a, b) -> float:
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    ix = max(0.0, min(ax + aw, bx + bw) - max(ax, bx))
+    iy = max(0.0, min(ay + ah, by + bh) - max(ay, by))
+    inter = ix * iy
+    union = aw * ah + bw * bh - inter
+    return inter / union if union > 0 else 0.0
 
 
 def _face_picture(img, x, y, fw, fh):
@@ -535,9 +638,7 @@ class FacesJob:
         ).fetchall()
         self.state["pending"] = self.pending(conn)
         if not rows:
-            self.state["running"] = False
-            self.unload()
-            if self.needs_regroup:
+            if self.needs_regroup:            # first: people who are split in two get put back together
                 self.needs_regroup = False
                 try:
                     if regroup(conn, self.cfg.face_merge_threshold):
@@ -546,30 +647,17 @@ class FacesJob:
                 except Exception:
                     conn.rollback()
                     log.exception("could not regroup faces")
+            if self._measure_older(conn, now, should_stop):
+                return True
+            self.state["running"] = False
+            self.unload()
             return False
         root = self.cfg.library_path
         if root is None or not root.is_dir():
             return False
-
-        reason = available()
-        if reason:
-            self.state["message"] = reason
-            self.retry_at = now + 24 * 3600
+        if not self._load_engine(now):
             return False
         self.state["running"] = True
-        if self.engine is None:
-            try:
-                if not all((self.cfg.model_dir / s["file"]).exists() for s in MODELS.values()):
-                    self.state["message"] = "Downloading the face recognition models (about 39 MB)…"
-                paths = ensure_models(self.cfg.model_dir)
-                self.engine = FaceEngine(paths, self.cfg.face_threads)
-                self.state["message"] = None
-            except Exception as exc:
-                log.warning("face models unavailable: %s", exc)
-                self.state["message"] = "Could not download the face recognition models. Will try again in an hour."
-                self.state["running"] = False
-                self.retry_at = now + 3600
-                return False
 
         for row in rows:
             if should_stop():
@@ -591,6 +679,60 @@ class FacesJob:
         self.state["pending"] = self.pending(conn)
         return True
 
+    def _load_engine(self, now: float) -> bool:
+        reason = available()
+        if reason:
+            self.state["message"] = reason
+            self.retry_at = now + 24 * 3600
+            return False
+        if self.engine is None:
+            try:
+                if not all((self.cfg.model_dir / s["file"]).exists() for s in MODELS.values()):
+                    self.state["message"] = "Downloading the face recognition models (about 39 MB)…"
+                paths = ensure_models(self.cfg.model_dir)
+                self.engine = FaceEngine(paths, self.cfg.face_threads)
+                self.state["message"] = None
+            except Exception as exc:
+                log.warning("face models unavailable: %s", exc)
+                self.state["message"] = "Could not download the face recognition models. Will try again in an hour."
+                self.state["running"] = False
+                self.retry_at = now + 3600
+                return False
+        return True
+
+    def _measure_older(self, conn, now: float, should_stop, batch: int = 20) -> bool:
+        """Faces found before eyes and sharpness were measured: measure them (once). True if any were."""
+        rows = conn.execute(
+            "SELECT a.id, a.path FROM assets a WHERE a.faceq_done = 0 AND a.faces_done = 1 AND a.trashed_at IS NULL"
+            " LIMIT ?", (batch,)).fetchall()
+        if not rows:
+            return False
+        self.state["running"] = True
+        for row in rows:
+            if should_stop():
+                break
+            faces = conn.execute("SELECT id, x, y, w, h FROM faces WHERE asset_id = ? ORDER BY id",
+                                 (row["id"],)).fetchall()
+            if not faces:                     # a video, or a photo without faces: nothing to measure
+                conn.execute("UPDATE assets SET faceq_done = 1 WHERE id = ?", (row["id"],))
+                conn.commit()
+                continue
+            if not self._load_engine(now):
+                return False
+            try:
+                path = libraries.full_path(self.cfg, row["path"])
+                found = self.engine.measure(path, [(f["x"], f["y"], f["w"], f["h"]) for f in faces]) if path else []
+            except Exception as exc:
+                log.info("could not measure the faces in %s: %s", row["path"], exc)
+                found = []
+            for f, q in zip(faces, found):
+                if q:
+                    conn.execute("UPDATE faces SET landmarks = ?, eyes = ?, sharp = ?, frontal = ? WHERE id = ?",
+                                 (json.dumps(q["landmarks"]), q["eyes"], q["sharp"], q["frontal"], f["id"]))
+            conn.execute("UPDATE assets SET faceq_done = 1 WHERE id = ?", (row["id"],))
+            conn.commit()
+        return True
+
     def _store(self, conn, asset_id: int, found: list[dict]) -> None:
         stamp = datetime.now().isoformat(timespec="seconds")
         for face in found:
@@ -599,10 +741,11 @@ class FacesJob:
             if person_id is None:
                 person_id = conn.execute("INSERT INTO people (created_at) VALUES (?)", (stamp,)).lastrowid
             face_id = conn.execute(
-                "INSERT INTO faces (asset_id, person_id, x, y, w, h, score, embedding, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO faces (asset_id, person_id, x, y, w, h, score, embedding, created_at,"
+                " landmarks, eyes, sharp, frontal) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (asset_id, person_id, face["x"], face["y"], face["w"], face["h"], face["score"],
-                 emb.tobytes(), stamp),
+                 emb.tobytes(), stamp, json.dumps(face["landmarks"]) if face.get("landmarks") else None,
+                 face.get("eyes"), face.get("sharp"), face.get("frontal")),
             ).lastrowid
             self.clusterer.add(person_id, emb)
             self.needs_regroup = True
@@ -610,7 +753,7 @@ class FacesJob:
                 face["thumb"].save(self.cfg.face_path(face_id), "JPEG", quality=85)
             except OSError:
                 pass
-        conn.execute("UPDATE assets SET faces_done = 1 WHERE id = ?", (asset_id,))
+        conn.execute("UPDATE assets SET faces_done = 1, faceq_done = 1 WHERE id = ?", (asset_id,))
         for face_id, old, new in apply_hints(conn, asset_id):
             blob = conn.execute("SELECT embedding FROM faces WHERE id = ?", (face_id,)).fetchone()[0]
             self.clusterer.move(old, new, self.clusterer.np.frombuffer(blob, dtype=self.clusterer.np.float32))

@@ -35,11 +35,14 @@ class Config:
     duplicate_distance: int = 8            # copies differ in at most this many of 64 fingerprint bits
     burst_seconds: int = 30                # photos this close in time ...
     burst_distance: int = 14               # ... and this alike are a burst
+    lookalike_similarity: float = 0.96     # copies by content (edits, crops, filters): this alike or more (0: off)
     blur_threshold: float = 50             # sharpness below this is blurry
     dark_threshold: float = 30             # average brightness (0-255) below this is too dark
     event_gap_hours: float = 4             # a pause this long starts a new event
     event_min_items: int = 8               # smaller events are not listed
     smart_search: bool = True              # search by what is in a photo (downloads a 154 MB model)
+    hide_clutter: bool = False             # leave screenshots, documents and receipts out of the timelines
+    guess_dates: bool = True               # date files that have none from GPS time or the files beside them
     text_search: bool = True               # read text in photos so it can be searched (11 MB model)
     search_threads: int = 2                # CPU threads content and text search may use
     map_tiles: str = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"  # map pictures ("" = outlines only)
@@ -134,8 +137,9 @@ _FILE_KEYS = {
     "faces": bool, "places": bool, "face_threads": int, "face_match_threshold": float,
     "min_faces_per_person": int, "face_merge_threshold": float, "face_suggest_threshold": float,
     "photo_checks": bool, "duplicate_distance": int, "burst_seconds": int, "burst_distance": int,
+    "lookalike_similarity": float,
     "blur_threshold": float, "dark_threshold": float, "event_gap_hours": float, "event_min_items": int,
-    "smart_search": bool, "text_search": bool, "search_threads": int,
+    "smart_search": bool, "text_search": bool, "search_threads": int, "hide_clutter": bool, "guess_dates": bool,
     "map_tiles": str, "map_attribution": str,
     "backup_hours": float, "backup_keep": int, "video_encoder": str, "video_cache_gb": float,
     "offsite_method": str, "offsite_target": str, "offsite_hours": float,

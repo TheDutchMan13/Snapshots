@@ -37,7 +37,14 @@ Snapshots is a self-hosted photo and video library for Windows. Your originals s
 - **Library health check** (Clean up, administrators): reads every file again and compares it with the checksum stored when it was added, to find files damaged on disk before backups copy the damage. A damaged or missing file can be put back from the offsite copy with one click. Runs when you ask, or every few days
 - **Storage report** (Clean up): where the space goes, by type, year and folder, the biggest files, what you could get back from the trash and duplicates, Snapshots' own files, and free space on each drive
 - **"Same person?"** questions on the People page and on each person's page for groups of faces that look alike. A "No" is remembered, and automatic grouping respects it. How strictly faces are grouped can be set in Settings
-- **Duplicates** in Clean up, sorted into identical files, look-alikes and bursts, with the space each would free and why each keeper was picked
+- **Duplicates** in Clean up, sorted into identical files, look-alikes and bursts, with the space each would free and why each keeper was picked. Edited, cropped and filtered copies are found too (by what the photo shows), and in a burst the photo where everyone's eyes are open and faces are sharpest is marked to keep
+- **Best matches:** a search finds photos by words (names, places, tags, text in the photo) and by what they show, and puts the two together, best first
+- **Dates in plain words:** `last summer`, `christmas 2023`, `3 years ago`, `yesterday`, `halloween`, `between 2018 and 2020`, `dog june 2021`
+- **Highlights:** your best-looking photos, about one in 25. The same judgement picks covers for events and memories, and helps choose the year in review
+- **Screenshots, documents and receipts** are sorted out from your photos (Clean up), and can be left out of All and Photos (Settings). Wrongly sorted? Select it and press **Not a screenshot**
+- **Suggested albums:** smart albums for things many of your photos show (dogs, sunsets, food, snow...), one click to make
+- **Guessed dates:** a file with no date gets one from its GPS time or from the numbered photos beside it (`IMG_1234` between `IMG_1233` and `IMG_1235`), instead of the day it was copied. The photo's details say when a date is a guess
+- **Video thumbnails** show the video's best frame (sharp, not black), and square tiles keep faces in view
 - **Two-step login** (optional, per account, in **Login security**): a 6-digit code from an authenticator app after the password, with recovery codes for a lost phone. Wrong passwords are counted per device, so someone guessing at your name elsewhere can't lock you out of your own browser
 - **XMP files** (optional, Settings): descriptions, tags, people's names, stars, labels, favourites and dates and places you changed are written into small `.xmp` files beside the photos, which Lightroom, digiKam, darktable and Immich read. New photos that arrive with one get its details
 - **Start with Windows** (optional, off by default; a checkbox when you create the first account, and in Settings): Snapshots starts hidden when you sign in, so scans, backups and the health check keep running and your phone can reach it. No administrator rights are needed. Double-click Snapshots.exe to open its window, or use the address shown in Settings; an administrator can stop it from Settings. Turning it off in Windows' own Startup list works too. Turn it off before deleting Snapshots.exe
@@ -59,7 +66,7 @@ Snapshots is a self-hosted photo and video library for Windows. Your originals s
 - Select many photos at once (Shift-click for a range) to favourite, add to an album or move to the trash
 - Full-screen viewer with arrow-key navigation, details (who is in it, where it was taken, which albums) and download
 - HEIC, HEIF and AVIF photos from phones are shown as normal images
-- Dates come from EXIF, then from names like `IMG_20241005_142233.jpg`, then from the file's modified time
+- Dates come from EXIF, then from a sidecar, the GPS time, names like `IMG_20241005_142233.jpg`, the numbered photos beside it, and last the file's modified time
 - Upload from the browser by button or drag and drop, with duplicate detection
 - Video playback, plus video thumbnails, dates and positions when ffmpeg is installed
 - Works on a phone-sized screen and follows your light or dark setting
@@ -121,12 +128,15 @@ Copy `config.example.toml` to `config.toml` and edit it, or use command-line opt
 | | `face_merge_threshold` | `0.42` | Merge two groups of faces this alike on average; `0` turns it off |
 | | `photo_checks` | `true` | Look for copies, bursts, blurry and dark photos |
 | | `duplicate_distance` | `8` | How different (out of 64) copies' fingerprints may be |
+| | `lookalike_similarity` | `0.96` | Edited and cropped copies: how alike (by what they show) they must be; `0` turns it off. Needs `smart_search` |
 | | `burst_seconds`, `burst_distance` | `30`, `14` | Photos this close in time and this alike are a burst |
 | | `blur_threshold`, `dark_threshold` | `50`, `30` | Lower them to flag fewer photos as blurry or dark |
 | | `event_gap_hours`, `event_min_items` | `4`, `8` | A pause this long starts a new event; smaller events are not listed |
 | | `smart_search` | `true` | Search by what's in a photo (downloads 154 MB once) |
 | | `text_search` | `true` | Read text in photos (downloads 11 MB once) |
 | | `search_threads` | `2` | CPU threads the two above may use |
+| | `hide_clutter` | `false` | Leave screenshots, documents and receipts out of All and Photos (also set in the app: Settings) |
+| | `guess_dates` | `true` | Date files that have none from their GPS time or the files beside them (also set in the app: Settings) |
 | | `map_tiles` | OpenStreetMap | Where the map's pictures come from; `""` shows country outlines only, with nothing fetched |
 | | `map_attribution` | `© OpenStreetMap contributors` | Credit shown on the map for `map_tiles` |
 | | `extra_libraries` | none | More photo folders, like `["E:\\Phone backup"]` (also set in the app: Settings) |
@@ -159,6 +169,10 @@ Everything runs on your own computer, in the background after a scan, a few phot
 - **Places** come from the GeoNames list of towns (about 14 MB), downloaded once. Lookups happen on your computer: your photo locations are never sent anywhere. Neighbourhoods are left out, so photos are labelled with the town.
 - **Events** are worked out from dates and places. Photos belong together unless more than 4 hours pass or the location jumps more than 30 km. Home is the town most of your photos were taken in: a day's photos at home make one event, and days away that follow each other make one trip.
 - **Copies and bursts** are found with a 64-bit "difference hash" of each thumbnail. In a test on 400 real photos, resized and recompressed copies were always found, and no two different photos were ever mistaken for copies. Photos taken within 30 seconds of each other that look alike are a burst. The suggested photo to keep has the most pixels, then is the sharpest.
+- **Edited copies** are found by comparing the content vectors from search by content (below): a crop, rotation or filter moves the light and dark pattern the fingerprint looks at, but not what the picture shows. Every pair of photos is compared; copies must be at least 0.96 alike (0.98 for "Nearly identical only", 0.93 for "Also similar shots").
+- **The best shot of a burst** uses the faces: for each face the detector also finds the eyes, nose and mouth. Snapshots measures the detail around each eye (an open eye has white, iris and pupil; a closed one is mostly skin), the detail in the face, and whether the nose is midway between the eyes (looking at the camera). Eye detail is only compared between shots of the same person in that burst, where a blink makes it drop sharply. Faces found by older versions are measured once in the background.
+- **Highlights, screenshots and documents** use search by content too: each photo's vector is compared with short descriptions ("a beautiful photo", "a blurry photo", "a screenshot of a phone screen", "a photo of a receipt"). This is a rough judgement and was not tuned on a test set, so Highlights never hides anything, and anything can be moved back by hand. Without the model, screenshots are recognised by their name and screen shape, and receipts and documents by the text read in them.
+- **Dates in searches** are understood before the words are looked up: seasons are northern (summer is June to August), "last summer" is the most recent one that is over, and US holidays (Thanksgiving, Memorial Day, Labor Day, the 4th of July) and Easter are worked out for each year.
 - **Blurry and dark photos** are found by measuring fine detail in the sharpest part of each photo, in the direction camera shake would blur, and the light level. A photo only counts as too dark if even its brightest parts are dim, so night and concert photos with lights are left alone. In the test, none of the 400 normal photos was flagged.
 - **Search by what's in a photo** uses OpenAI's CLIP model (ViT-B/32, 8-bit, about 154 MB). Each photo is learned once from its thumbnail, at about 60 ms per photo. Searches show the best matches first. It is good at things, scenes and activities, but it is approximate: for a description of one particular photo, the right one was the first result 57% of the time and in the first five 84% of the time.
 - **Text in photos** is read with PaddleOCR's English models (about 11 MB). In a test, 97% of words on signs in photos were read exactly. Text-heavy photos take about a quarter of a second each, and this runs last.

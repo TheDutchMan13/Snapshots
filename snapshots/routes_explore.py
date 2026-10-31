@@ -1,17 +1,25 @@
-"""Events, and the Clean up page (copies, bursts, blurry and dark photos)."""
+"""Events, the Clean up page (copies, bursts, blurry and dark photos), screenshots and documents, and
+suggested albums."""
 
+import threading
+import time
 from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from . import analysis, db
+from . import analysis, db, smart, sorting
 from .app import current_user
 from .routes_library import asset_dict
 
 
 class Ids(BaseModel):
     ids: list[int] = Field(min_length=1, max_length=5000)
+
+
+class CategoryBody(BaseModel):
+    ids: list[int] = Field(min_length=1, max_length=5000)
+    category: str = Field(pattern="^(photo|screenshot|document|receipt)$")
 
 
 class KeepBody(BaseModel):
@@ -129,5 +137,75 @@ def router(ctx) -> APIRouter:
             found = events.events(conn)
             versions = db.versions(conn, [e["cover"] for e in found])
         return {"events": [dict(e, cover_v=versions.get(e["cover"])) for e in found]}
+
+    # ------------------------------------------------------------ screenshots, documents, receipts
+
+    @r.get("/api/sorting")
+    def sorting_summary(request: Request):
+        """How many screenshots, documents and receipts there are, and how many highlights."""
+        user = current_user(request)
+        with db.session(cfg.db_path) as conn:
+            counts = dict(conn.execute(
+                f"SELECT a.category, COUNT(*) FROM assets a WHERE {db.CLUTTER} AND a.trashed_at IS NULL"
+                f" AND {db.NOT_LOCKED} AND {db.LIVE_PART_HIDDEN} GROUP BY a.category").fetchall())
+            where, params = db.where_clause(db.Filter(highlights=True, archived="hide", stacks=True), user["id"])
+            highlights = conn.execute(f"SELECT COUNT(*) FROM assets a WHERE {where}", params).fetchone()[0]
+            covers = {}
+            for cat in sorting.CATEGORIES:
+                row = conn.execute(
+                    f"SELECT a.id FROM assets a WHERE a.category = ? AND a.trashed_at IS NULL AND {db.NOT_LOCKED}"
+                    " ORDER BY a.taken_at DESC LIMIT 1", (cat,)).fetchone()
+                covers[cat] = row[0] if row else None
+            versions = db.versions(conn, [c for c in covers.values() if c])
+            pending = worker.sort.pending(conn)
+        return {
+            "categories": [{"category": c, "count": counts.get(c, 0), "cover": covers[c],
+                            "cover_v": versions.get(covers[c])} for c in sorting.CATEGORIES],
+            "highlights": highlights, "pending": pending, "hide_clutter": cfg.hide_clutter,
+            "content": cfg.smart_search,
+        }
+
+    @r.post("/api/assets/category")
+    def set_category(body: CategoryBody, request: Request):
+        """'This is a screenshot' or 'this is a photo': set by hand, so sorting leaves it as it is."""
+        current_user(request)
+        with db.session(cfg.db_path) as conn:
+            ids = db.open_ids(conn, body.ids)
+            for start in range(0, len(ids), 900):
+                chunk = ids[start:start + 900]
+                # A screenshot or document has no place in Highlights.
+                conn.execute(f"UPDATE assets SET category = ?, category_hand = 1,"
+                             f" beauty = CASE WHEN ? = 'photo' THEN beauty END"
+                             f" WHERE id IN ({','.join('?' * len(chunk))})", [body.category, body.category] + chunk)
+        return {"updated": len(ids)}
+
+    # ------------------------------------------------------------ suggested albums
+
+    suggest_cache = {"key": None, "at": 0.0, "items": []}
+    suggest_lock = threading.Lock()
+
+    @r.get("/api/suggestions/albums")
+    def suggested_albums(request: Request):
+        """Smart albums worth making: things many photos show (dogs, sunsets, food...) with no album yet."""
+        current_user(request)
+        if not worker.clip.ready():
+            return {"suggestions": [], "ready": False}
+        with db.session(cfg.db_path) as conn:
+            key = worker.clip.index._version(conn)
+            with suggest_lock:
+                fresh = suggest_cache["key"] == key and time.time() - suggest_cache["at"] < 600
+                if not fresh:
+                    suggest_cache.update(key=key, at=time.time(), items=sorting.suggest_albums(conn, worker.clip))
+                items = list(suggest_cache["items"])
+            taken = set()
+            for name, rule in conn.execute("SELECT name, rule FROM albums"):
+                taken.add(name.strip().lower())
+                if rule:
+                    look = (smart.load(rule) or {}).get("look")
+                    if look:
+                        taken.add(look.strip().lower())
+            items = [x for x in items if x["name"].lower() not in taken and x["look"].lower() not in taken][:8]
+            versions = db.versions(conn, [x["cover"] for x in items])
+        return {"suggestions": [dict(x, cover_v=versions.get(x["cover"])) for x in items], "ready": True}
 
     return r

@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Upl
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from . import __version__, analysis, db, libraries, linking, media, smart, storage, webhooks
+from . import __version__, analysis, dates, db, libraries, linking, media, ranking, smart, sorting, storage, webhooks
 from .app import current_user, require_admin, safe_filename
 from .scanner import _make_thumb, index_file
 from .videos import Converter
@@ -80,12 +80,17 @@ def make_filter_params(cfg):
         rating: int = Query(0, ge=0, le=5),
         label: str = Query("", pattern="^(red|yellow|green|blue|purple)?$"),
         flag: str = Query("", pattern="^(pick|reject|unflagged)?$"),
+        category: str = Query("", pattern="^(screenshot|document|receipt|clutter|photos|all)?$"),
+        highlights: bool = False,
     ) -> db.Filter:
+        if not category and cfg.hide_clutter and archived == "hide" and not q.strip():
+            category = "photos"      # the timelines leave screenshots and documents out, if asked to
         return db.Filter(q=q, kind=kind, favorite=favorite, trashed=trashed, album=album, person=person,
                          country=country, state=state, city=city, start=start, end=end,
                          low_quality=analysis.low_quality_sql(cfg) if quality else None,
                          archived=archived, tag=tag, folder=folder, stacks=stacks, bbox=_bbox(bbox),
-                         locked=locked, rating=rating, label=label, flag=flag)
+                         locked=locked, rating=rating, label=label, flag=flag,
+                         category="" if category == "all" else category, highlights=highlights)
 
     return filter_params
 
@@ -117,8 +122,12 @@ def asset_dict(row, score: float | None = None) -> dict:
         "rating": row["rating"] or 0,
         "label": row["label"],
         "flag": row["flag"] or 0,
+        "category": row["category"] if row["category"] in sorting.CATEGORIES else None,
         "v": db.version(row),  # changes when the file (or its edit) changes, so browsers refetch
     }
+    focus = row["focus"] if "focus" in row.keys() else None
+    if focus and not row["edits"]:    # an edit (crop, rotation) moves the faces: then the middle is used
+        out["focus"] = [float(v) for v in focus.split(",")]
     if score is not None:
         out["score"] = round(score, 4)
     return out
@@ -151,6 +160,7 @@ def can_see(row, user) -> bool:
 
 
 TIME_FMT = "%Y-%m-%dT%H:%M:%S"
+ranking_limit = 500   # best matches listed at most
 
 
 def router(ctx) -> APIRouter:
@@ -170,18 +180,67 @@ def router(ctx) -> APIRouter:
 
     # ------------------------------------------------------------ browsing
 
+    def content_text(q: str) -> tuple[str, list]:
+        """What to search by content (q without its firm date words), and the date conditions that apply."""
+        text, firm = dates.for_content(q)
+        if not [w for w in text.lower().split() if w not in dates.STOPWORDS]:
+            return "", firm
+        return text, firm
+
     def content_matches(conn, f: db.Filter, user_id: int) -> list:
         """Rows that look like f.q (search by content), best first, within the rest of the filter."""
-        ranked = worker.clip.search(conn, f.q)
+        text, firm = content_text(f.q)
+        if not text:
+            return []
+        ranked = worker.clip.search(conn, text)
         if f.ids is not None:  # only within these (a smart album found by content, say)
             allowed = set(f.ids)
             ranked = [x for x in ranked if x[0] in allowed]
         if not ranked:
             return []
         score = dict(ranked)
-        g = db.Filter(**{**f.__dict__, "q": "", "ids": list(score)})
+        g = db.Filter(**{**f.__dict__, "q": "", "ids": list(score), "date_conds": (f.date_conds or []) + firm})
         rows, _ = db.list_assets(conn, g, user_id, "", len(score))
         return sorted(((row, score[row["id"]]) for row in rows), key=lambda x: -x[1])
+
+    def word_rows_ranked(conn, f: db.Filter, user_id: int, limit: int = 1000) -> list:
+        """Rows matching f.q by words, the strongest matches first (see ranking.word_strength), then newest."""
+        rows, _ = db.list_assets(conn, f, user_id, "", limit)
+        conds, rest, _ = dates.parse(f.q)
+        tokens = dates.word_tokens(rest, bool(conds))
+        if not rows or not tokens:
+            return rows
+        ids = [r["id"] for r in rows]
+        extra: dict[int, dict] = {i: {"people": [], "tags": []} for i in ids}
+        marks = json.dumps(ids)
+        for aid, name in conn.execute(
+                "SELECT f.asset_id, p.name FROM faces f JOIN people p ON p.id = f.person_id"
+                " WHERE p.hidden = 0 AND p.name IS NOT NULL AND f.asset_id IN (SELECT value FROM json_each(?))",
+                (marks,)):
+            extra[aid]["people"].append(name)
+        for aid, name in conn.execute(
+                "SELECT at.asset_id, t.name FROM asset_tags at JOIN tags t ON t.id = at.tag_id"
+                " WHERE at.asset_id IN (SELECT value FROM json_each(?))", (marks,)):
+            extra[aid]["tags"].append(name)
+        strength = {}
+        for r in rows:
+            d = {"description": r["description"], "city": r["city"], "state": r["state"],
+                 "country": r["country"], **extra[r["id"]]}
+            strength[r["id"]] = ranking.word_strength(d, tokens)
+        return sorted(rows, key=lambda r: -strength[r["id"]])   # stable: newest first within each level
+
+    def mixed_matches(conn, f: db.Filter, user_id: int) -> list | None:
+        """Best matches: words and content results together (ranking.fuse). None when only words apply."""
+        if not content_text(f.q)[0] or not worker.clip.ready():
+            return None
+        content = content_matches(conn, f, user_id)
+        if not content:
+            return None
+        words = word_rows_ranked(conn, f, user_id)
+        rows = {r["id"]: r for r in words}
+        rows.update({r["id"]: r for r, _ in content})
+        fused = ranking.fuse([r["id"] for r in words], [r["id"] for r, _ in content])
+        return [(rows[i], sc) for i, sc in fused[:ranking_limit]]
 
     def grid_user(request: Request, f: db.Filter) -> dict:
         user = current_user(request)
@@ -191,9 +250,16 @@ def router(ctx) -> APIRouter:
 
     @r.get("/api/assets")
     def list_assets(request: Request, f: db.Filter = Depends(filter_params), cursor: str = "",
-                    limit: int = Query(120, ge=1, le=500), look: bool = False):
-        """The photos in a grid, newest first. look=true: photos whose content matches q, best first."""
+                    limit: int = Query(120, ge=1, le=500), look: bool = False, mix: bool = False):
+        """The photos in a grid, newest first. look=true: photos whose content matches q, best first.
+        mix=true: words and content results together, best first (only words: newest first, as usual)."""
         user = grid_user(request, f)
+        if mix and f.q.strip() and not cursor:
+            with db.session(cfg.db_path) as conn:
+                f2, _ = smart.resolve(conn, cfg, worker, f)
+                found = mixed_matches(conn, f2, user["id"])
+            if found is not None:
+                return {"items": [asset_dict(row, sc) for row, sc in found], "next": None}
         if look:
             with db.session(cfg.db_path) as conn:
                 f, _ = smart.resolve(conn, cfg, worker, f)
@@ -222,9 +288,16 @@ def router(ctx) -> APIRouter:
             f, _ = smart.resolve(conn, cfg, worker, f)
             where, params = db.where_clause(f, user["id"])
             words = conn.execute(f"SELECT COUNT(*) FROM assets a WHERE {where}", params).fetchone()[0]
-            content = len(content_matches(conn, f, user["id"])) if f.q.strip() else 0
+            found = content_matches(conn, f, user["id"]) if f.q.strip() else []
+            content = len(found)
+            both = 0
+            if found:
+                g = db.Filter(**{**f.__dict__, "ids": [r["id"] for r, _ in found]})
+                gw, gp = db.where_clause(g, user["id"])
+                both = conn.execute(f"SELECT COUNT(*) FROM assets a WHERE {gw}", gp).fetchone()[0]
             pending = worker.clip.pending(conn) if cfg.smart_search else 0
-        return {"q": f.q, "words": words, "content": content, "content_enabled": cfg.smart_search,
+        mixed = min(ranking_limit, min(words, 1000) + content - both) if content and worker.clip.ready() else None
+        return {"q": f.q, "words": words, "content": content, "mixed": mixed, "content_enabled": cfg.smart_search,
                 "content_ready": worker.clip.ready(), "content_pending": pending,
                 "content_message": worker.clip.state.get("message")}
 
@@ -237,6 +310,7 @@ def router(ctx) -> APIRouter:
         out["description"] = row["description"]
         out["edits"] = media.parse_edits(row["edits"]) if row["edits"] else None
         out["date_edited"] = row["taken_at_file"] is not None
+        out["date_guess"] = row["date_guess"] if row["taken_at_file"] is None else None
         out["position_edited"] = bool(row["position_edited"])
         out["position"] = [row["lat"], row["lon"]] if row["lat"] is not None else None
         out["quality"] = None if row["keep_quality"] else analysis.quality_label(
@@ -442,7 +516,8 @@ def router(ctx) -> APIRouter:
                     except ValueError:
                         raise HTTPException(400, "That is not a valid date.") from None
                     kept = None if new == original and body.reset_date else original
-                    conn.execute("UPDATE assets SET taken_at = ?, taken_at_file = ? WHERE id = ?", (new, kept, i))
+                    conn.execute("UPDATE assets SET taken_at = ?, taken_at_file = ?, date_guess = NULL WHERE id = ?",
+                                 (new, kept, i))
             if body.reset_position:
                 # Read the position from the file again on the next look.
                 for i in ids:
@@ -581,6 +656,26 @@ def router(ctx) -> APIRouter:
             except OSError:
                 pass
             return {"name": upload.filename, "status": "rejected", "reason": f"Upload failed: {exc}"}
+
+    class HashList(BaseModel):
+        sha1: list[str]
+
+    @r.post("/api/upload/check")
+    def upload_check(body: HashList, request: Request):
+        """Which of these files (by SHA-1) does the library already have? The phone app asks before sending,
+        so a photo that is already here (even one put in the trash) is never sent twice."""
+        current_user(request)
+        wanted = {h.lower() for h in body.sha1[:1000] if len(h) == 40 and all(c in "0123456789abcdefABCDEF" for c in h)}
+        have: list[str] = []
+        with db.session(cfg.db_path) as conn:
+            marks = ",".join("?" * len(wanted))
+            if wanted:
+                # A copy in someone's locked folder doesn't count (the same rule as upload), so this
+                # can't be used to find out what is locked.
+                rows = conn.execute(f"SELECT DISTINCT sha1 FROM assets WHERE locked_by IS NULL AND sha1 IN ({marks})",
+                                    list(wanted)).fetchall()
+                have = [x["sha1"] for x in rows]
+        return {"have": have}
 
     @r.post("/api/upload")
     def upload(request: Request, files: list[UploadFile] = File(...)):

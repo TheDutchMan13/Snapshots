@@ -1,12 +1,13 @@
 """SQLite storage. One short-lived connection per request; the background worker keeps its own."""
 
-import calendar
 import json
 import re
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+
+from . import dates
 
 # Each entry upgrades the database by one version. Never edit an entry once released:
 # add a new one instead. PRAGMA user_version records how many have been applied.
@@ -339,6 +340,32 @@ MIGRATIONS = [
     ) WITHOUT ROWID;
     CREATE INDEX idx_health_issues_asset ON health_issues (asset_id);
     """,
+    # 9 - version 0.11: best-photo score, screenshots and documents, face quality, guessed dates
+    """
+    ALTER TABLE assets ADD COLUMN beauty REAL;              -- how good a photo looks (from its content vector)
+    ALTER TABLE assets ADD COLUMN category TEXT;            -- 'screenshot', 'document' or 'receipt'; NULL or 'photo': a photo
+    ALTER TABLE assets ADD COLUMN category_hand INTEGER NOT NULL DEFAULT 0;  -- someone set the category: it stays
+    ALTER TABLE assets ADD COLUMN sort_done INTEGER NOT NULL DEFAULT 0;   -- category and beauty worked out
+    ALTER TABLE assets ADD COLUMN faceq_done INTEGER NOT NULL DEFAULT 0;  -- eyes and sharpness of its faces measured
+    ALTER TABLE assets ADD COLUMN date_guess TEXT;          -- the file has no date: 'gps', 'nearby' or 'file' (its own time)
+    ALTER TABLE assets ADD COLUMN date_checked INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE faces ADD COLUMN landmarks TEXT;            -- JSON: eyes, nose tip and mouth corners, as fractions
+    ALTER TABLE faces ADD COLUMN eyes REAL;                 -- detail in the eye areas: drops when the eyes close
+    ALTER TABLE faces ADD COLUMN sharp REAL;                -- detail in the face
+    ALTER TABLE faces ADD COLUMN frontal REAL;              -- 1: looking at the camera, 0: turned away
+    CREATE INDEX idx_assets_category ON assets (category) WHERE category IS NOT NULL;
+    CREATE INDEX idx_assets_sort ON assets (sort_done) WHERE sort_done = 0;
+    CREATE INDEX idx_assets_beauty ON assets (beauty) WHERE beauty IS NOT NULL;
+    -- Faces found before this version are measured once; photos without faces need nothing.
+    UPDATE assets SET faceq_done = 1 WHERE NOT EXISTS (SELECT 1 FROM faces f WHERE f.asset_id = assets.id);
+    CREATE INDEX idx_assets_faceq ON assets (faceq_done) WHERE faceq_done = 0;
+    CREATE INDEX idx_assets_dates ON assets (date_checked) WHERE date_checked = 0;
+    -- Sorted again once more is known: what the photo shows, and the text read in it.
+    CREATE TRIGGER sort_clip AFTER INSERT ON clip_vectors
+        BEGIN UPDATE assets SET sort_done = 0 WHERE id = NEW.asset_id; END;
+    CREATE TRIGGER sort_text AFTER UPDATE OF ocr_text ON assets WHEN coalesce(NEW.ocr_text, '') != ''
+        BEGIN UPDATE assets SET sort_done = 0 WHERE id = NEW.id; END;
+    """,
 ]
 SCHEMA_VERSION = len(MIGRATIONS)
 
@@ -416,13 +443,11 @@ class Filter:
     rating: int = 0                # at least this many stars
     label: str = ""                # this colour label
     flag: str = ""                 # "pick", "reject" or "unflagged"
+    category: str = ""             # "screenshot", "document", "receipt", "clutter" (any of them) or "photos" (none)
+    highlights: bool = False       # only the best-looking photos (see sorting.py)
+    date_conds: list | None = None  # date conditions already worked out (dates.py), for results found by content
 
 
-_MONTHS = {}
-for _i in range(1, 13):
-    _MONTHS[calendar.month_name[_i].lower()] = _i
-    _MONTHS[calendar.month_abbr[_i].lower()] = _i
-_DATE_TOKEN = re.compile(r"\d{4}(-\d{2}(-\d{2})?)?")
 
 
 def _escape(text: str) -> str:
@@ -484,6 +509,12 @@ def versions(conn, ids) -> dict:
     return out
 
 
+# Screenshots, documents and receipts (sorting.py).
+CLUTTER = "a.category IN ('screenshot', 'document', 'receipt')"
+# Highlights: the best-looking 4% of photos (at least 1).
+HIGHLIGHT_CUTOFF = ("(SELECT h.beauty FROM assets h WHERE h.beauty IS NOT NULL ORDER BY h.beauty DESC LIMIT 1"
+                    " OFFSET (SELECT max(0, CAST(COUNT(beauty) * 0.04 AS INTEGER) - 1) FROM assets))")
+
 # Items in someone's locked folder are left out everywhere except that folder.
 NOT_LOCKED = "a.locked_by IS NULL"
 
@@ -499,10 +530,29 @@ def open_ids(conn, ids) -> list[int]:
     return [i for i in ids if i in out]
 
 
+def _word_sql(token: str) -> tuple[str, list]:
+    """A word looked for in the path, camera, place, text in the photo, description, tags and names."""
+    like = _like(token)
+    sql = (
+        "(lower(a.path) LIKE ?1 ESCAPE '\\' OR lower(coalesce(a.camera, '')) LIKE ?1 ESCAPE '\\'"
+        " OR lower(coalesce(a.city, '')) LIKE ?1 ESCAPE '\\'"
+        " OR lower(coalesce(a.state, '')) LIKE ?1 ESCAPE '\\'"
+        " OR lower(coalesce(a.country, '')) LIKE ?1 ESCAPE '\\'"
+        " OR lower(coalesce(a.ocr_text, '')) LIKE ?1 ESCAPE '\\'"
+        " OR lower(coalesce(a.description, '')) LIKE ?1 ESCAPE '\\'"
+        " OR a.id IN (SELECT at.asset_id FROM asset_tags at JOIN tags t ON t.id = at.tag_id"
+        "             WHERE lower(t.name) LIKE ?1 ESCAPE '\\')"
+        " OR a.id IN (SELECT f.asset_id FROM faces f JOIN people p ON p.id = f.person_id"
+        "             WHERE p.hidden = 0 AND lower(p.name) LIKE ?1 ESCAPE '\\'))"
+    ).replace("?1", "?")
+    return sql, [like] * 9
+
+
 def where_clause(f: Filter, user_id: int | None) -> tuple[str, list]:
     """SQL for a Filter, on table alias `a`. Every search word must match (AND).
 
-    A word can be a year / year-month / full date, a month name, or text looked for in
+    Dates are understood ("2019", "june 2021", "last summer", "christmas": see dates.py); other words are
+    looked for in
     the file path, camera, place names, description, text read in the photo and the names of people in it.
     """
     where: list[str] = ["a.trashed_at IS NOT NULL" if f.trashed else "a.trashed_at IS NULL", LIVE_PART_HIDDEN]
@@ -561,6 +611,15 @@ def where_clause(f: Filter, user_id: int | None) -> tuple[str, list]:
         params.append(f.label)
     if f.flag:
         where.append({"pick": "a.flag = 1", "reject": "a.flag = -1"}.get(f.flag, "a.flag = 0"))
+    if f.category == "clutter":
+        where.append(CLUTTER)
+    elif f.category == "photos":
+        where.append(f"NOT coalesce({CLUTTER}, 0)")
+    elif f.category:
+        where.append("a.category = ?")
+        params.append(f.category)
+    if f.highlights:
+        where.append(f"a.beauty >= {HIGHLIGHT_CUTOFF} AND a.flag != -1 AND a.kind = 'photo'")
     if f.start:
         where.append("a.taken_at >= ?")
         params.append(f.start)
@@ -577,29 +636,28 @@ def where_clause(f: Filter, user_id: int | None) -> tuple[str, list]:
         if value is not None:
             where.append(f"a.{column} IS ?")  # IS so that "no state" can be asked for with NULL
             params.append(value or None)
-    for token in (f.q.lower().split()[:10] + f.words.lower().split()[:10]):
-        if _DATE_TOKEN.fullmatch(token):
-            where.append("a.taken_at LIKE ?")
-            params.append(token + "%")
-        elif token in _MONTHS:
-            where.append("substr(a.taken_at, 6, 2) = ?")
-            params.append(f"{_MONTHS[token]:02d}")
-        else:
-            like = _like(token)
-            where.append(
-                "(lower(a.path) LIKE ?1 ESCAPE '\\' OR lower(coalesce(a.camera, '')) LIKE ?1 ESCAPE '\\'"
-                " OR lower(coalesce(a.city, '')) LIKE ?1 ESCAPE '\\'"
-                " OR lower(coalesce(a.state, '')) LIKE ?1 ESCAPE '\\'"
-                " OR lower(coalesce(a.country, '')) LIKE ?1 ESCAPE '\\'"
-                " OR lower(coalesce(a.ocr_text, '')) LIKE ?1 ESCAPE '\\'"
-                " OR lower(coalesce(a.description, '')) LIKE ?1 ESCAPE '\\'"
-                " OR a.id IN (SELECT at.asset_id FROM asset_tags at JOIN tags t ON t.id = at.tag_id"
-                "             WHERE lower(t.name) LIKE ?1 ESCAPE '\\')"
-                " OR a.id IN (SELECT f.asset_id FROM faces f JOIN people p ON p.id = f.person_id"
-                "             WHERE p.hidden = 0 AND lower(p.name) LIKE ?1 ESCAPE '\\'))"
-                .replace("?1", "?")
-            )
-            params += [like] * 9
+    for text in (f.q, f.words):
+        if not text.strip():
+            continue
+        conditions, rest, _ = dates.parse(text)
+        for cond in conditions[:10]:
+            sql, values = dates.sql(cond)
+            if cond.get("soft"):            # the date, or the word itself ("christmas" in a description)
+                word, word_values = _word_sql(cond["word"])
+                if cond.get("firm"):        # "christmas 2023": the word counts in that year only
+                    year, year_values = dates.sql(cond["firm"])
+                    word, word_values = f"({word} AND {year})", word_values + year_values
+                sql, values = f"({sql} OR {word})", values + word_values
+            where.append(sql)
+            params += values
+        for token in dates.word_tokens(rest, bool(conditions))[:10]:
+            sql, values = _word_sql(token)
+            where.append(sql)
+            params += values
+    for cond in f.date_conds or []:
+        sql, values = dates.sql(cond)
+        where.append(sql)
+        params += values
     return " AND ".join(where), params
 
 
@@ -609,7 +667,10 @@ ASSET_COLUMNS = (
     " a.highlights,"
     " a.keep_quality, a.ocr_text, a.archived_at, a.stack_id, a.live_video, a.motion_offset,"
     " a.description, a.taken_at_file, a.position_edited, a.edits, a.edit_v, a.projection, a.locked_by,"
-    " a.rating, a.label, a.flag,"
+    " a.rating, a.label, a.flag, a.category, a.beauty, a.date_guess,"
+    # Where the faces are (their middle, weighted by size), so cropped tiles keep them in view.
+    " (SELECT CASE WHEN COUNT(*) THEN printf('%.3f,%.3f', sum((fc.x + fc.w / 2) * fc.w * fc.h) / sum(fc.w * fc.h),"
+    "  sum((fc.y + fc.h / 2) * fc.w * fc.h) / sum(fc.w * fc.h)) END FROM faces fc WHERE fc.asset_id = a.id) AS focus,"
     " (SELECT COUNT(*) FROM assets sc WHERE sc.stack_id = a.stack_id AND sc.trashed_at IS NULL"
     "  AND sc.locked_by IS NULL) AS stack_count"
 )

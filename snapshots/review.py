@@ -14,6 +14,7 @@ The video (render_video) is made on this computer with Pillow and ffmpeg: a titl
 with a crossfade to the next, and an end title. Photos are shown edited (turned and cropped) as in the app.
 """
 
+import bisect
 import math
 import os
 import shutil
@@ -43,7 +44,8 @@ def years(conn) -> list[dict]:
 
 def _candidates(conn, cfg, year: int, user_id: int) -> list[dict]:
     rows = conn.execute(
-        f"SELECT a.id, a.taken_at, a.dhash, a.sharpness, a.rating, a.flag, a.label, a.city, a.state, a.country,"
+        f"SELECT a.id, a.taken_at, a.dhash, a.sharpness, a.beauty, a.rating, a.flag, a.label, a.city, a.state,"
+        f" a.country,"
         f" (SELECT COUNT(*) FROM favorites fv WHERE fv.asset_id = a.id) AS favs,"
         f" (SELECT COUNT(*) FROM favorites fv WHERE fv.asset_id = a.id AND fv.user_id = ?) AS mine,"
         f" (SELECT COUNT(DISTINCT f.person_id) FROM faces f JOIN people p ON p.id = f.person_id"
@@ -51,18 +53,24 @@ def _candidates(conn, cfg, year: int, user_id: int) -> list[dict]:
         f" (SELECT COUNT(*) FROM faces f WHERE f.asset_id = a.id) AS faces"
         f" FROM assets a WHERE a.kind = 'photo' AND a.taken_at >= ? AND a.taken_at < ?"
         f" AND a.trashed_at IS NULL AND a.archived_at IS NULL AND {db.NOT_LOCKED} AND {db.LIVE_PART_HIDDEN}"
-        f" AND {db.STACK_HIDDEN} AND a.flag != -1 AND NOT COALESCE({analysis.low_quality_sql(cfg)}, 0)",
+        f" AND {db.STACK_HIDDEN} AND a.flag != -1 AND NOT COALESCE({analysis.low_quality_sql(cfg)}, 0)"
+        f" AND NOT coalesce({db.CLUTTER}, 0)",
         (user_id, f"{year:04d}-01-01", f"{year + 1:04d}-01-01")).fetchall()
     out = [dict(r) for r in rows]
     for r in out:
         r["t"] = datetime.fromisoformat(r["taken_at"]).timestamp()
     sharp = sorted(r["sharpness"] for r in out if r["sharpness"] is not None)
     top = sharp[int(len(sharp) * 0.9)] if sharp else 1.0
+    # How good each photo looks (sorting.py), as its place among this year's photos: 0 (worst) to 1 (best).
+    pretty = sorted(r["beauty"] for r in out if r["beauty"] is not None)
+    for r in out:
+        r["pretty"] = (bisect.bisect_left(pretty, r["beauty"]) / max(1, len(pretty) - 1)
+                       if r["beauty"] is not None and len(pretty) > 1 else 0.5)
     for r in out:
         s = min(1.0, (r["sharpness"] or 0) / top) if top else 0
         r["score"] = (3.0 * bool(r["mine"]) + 1.5 * bool(r["favs"]) + 1.0 * r["rating"] + 1.5 * (r["flag"] == 1)
                       + 0.3 * bool(r["label"]) + 0.8 * min(r["named"], 3) + 0.25 * min(r["faces"], 4)
-                      + 0.4 * bool(r["city"] or r["country"]) + 0.6 * s
+                      + 0.4 * bool(r["city"] or r["country"]) + 0.6 * s + 1.5 * r["pretty"]
                       + (r["id"] * 2654435761 % 1000) / 1e5)   # a steady tie-break
     return out
 

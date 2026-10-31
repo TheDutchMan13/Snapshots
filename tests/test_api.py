@@ -230,6 +230,24 @@ def test_upload_dedupe_and_rejection(client):
     assert not list((lib / "Uploads" / ".incoming").glob("*"))  # no temp files left behind
 
 
+def test_upload_check_says_which_files_are_already_here(client):
+    import hashlib
+    c, cfg, lib = client
+    data = jpeg_bytes((11, 22, 33))
+    sha = hashlib.sha1(data).hexdigest()
+    other = hashlib.sha1(b"never uploaded").hexdigest()
+    assert c.post("/api/upload/check", json={"sha1": [sha, other]}).json() == {"have": []}
+    assert c.post("/api/upload", files=[("files", ("a.jpg", data, "image/jpeg"))]).json()["results"][0]["status"] == "added"
+    assert c.post("/api/upload/check", json={"sha1": [sha, other, "nonsense", sha.upper()]}).json() == {"have": [sha]}
+    assert c.post("/api/upload/check", json={"sha1": []}).json() == {"have": []}
+
+
+def test_upload_check_needs_a_login(client):
+    c, cfg, lib = client
+    c.cookies.clear()
+    assert c.post("/api/upload/check", json={"sha1": []}, headers={"x-snapshots-request": "1"}).status_code in (401, 403)
+
+
 def test_upload_cannot_escape_library(client):
     c, cfg, lib = client
     r = c.post("/api/upload", files=[("files", ("../../evil.jpg", jpeg_bytes((7, 7, 7)), "image/jpeg"))])
