@@ -60,9 +60,10 @@ a { color: var(--accent-ink); }
   padding: 20px 12px 12px; background: var(--surface); border-right: 1px solid var(--border);
 }
 .nav-group {
-  padding: 14px 10px 4px; font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase;
-  color: var(--muted);
+  padding: 14px 10px 4px; font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+  color: color-mix(in srgb, var(--muted) 55%, var(--text));
 }
+.nav-group.first { padding-top: 4px; }
 .brand { font-size: 17px; font-weight: 600; padding: 4px 10px 18px; margin: 0; }
 .nav {
   display: block; text-align: left; padding: 9px 10px; border: 0; border-radius: 6px;
@@ -910,7 +911,8 @@ a.bar-row:hover .bar-name { color: var(--accent-ink); text-decoration: underline
 /* ================================================================ 0.10: redesign */
 
 /* ---- sidebar: everyday things first, the library's housekeeping in a quieter group at the bottom */
-.nav-group.quiet { margin-top: auto; padding-top: 18px; }
+.nav-group.quiet { padding-top: 14px; }
+.nav-group.push { margin-top: auto; padding-top: 18px; }
 .nav.quiet { padding: 6px 10px; font-size: 13px; }
 .side-foot { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
 
@@ -1121,10 +1123,12 @@ a.bar-row:hover .bar-name { color: var(--accent-ink); text-decoration: underline
 @media (min-width: 721px) {
   .side { padding-top: 14px; padding-bottom: 0; gap: 1px; }
   .brand { padding-bottom: 10px; }
-  .nav { padding: 6px 10px; }
-  .nav-group { padding: 10px 10px 2px; }
-  .nav.quiet { padding: 4px 10px; font-size: 13px; }
-  .nav-group.quiet { padding-top: 12px; }
+  .nav { padding: 5px 10px; }
+  .nav-group { padding: 9px 10px 2px; }
+  .nav.quiet { padding: 3px 10px; font-size: 13px; }
+  .nav-group.quiet { padding-top: 10px; }
+  .nav-group.push { padding-top: 12px; }
+  .nav-group.first { padding-top: 2px; }
   .side-foot { position: sticky; bottom: 0; padding: 8px 0 12px; background: var(--surface); }
 }
 
