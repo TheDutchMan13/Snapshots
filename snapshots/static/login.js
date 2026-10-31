@@ -75,6 +75,7 @@ $("form").addEventListener("submit", async (e) => {
       return;
     }
     if (setupMode && $("startup").checked && !$("startup-row").hidden) await startWithWindows();
+    if (setupMode) { try { sessionStorage.setItem("snapshots-welcome", "1"); } catch (_) { /* fine */ } }
     location.replace("/");
   } catch (err) {
     $("error").textContent = err.message;

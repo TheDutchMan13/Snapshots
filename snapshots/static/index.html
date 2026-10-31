@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Snapshots</title>
 <link rel="icon" href="data:,">
 <link rel="stylesheet" href="/static/app.css">
@@ -27,14 +27,23 @@
     <a class="nav" href="#/albums" data-route="albums">Albums</a>
     <a class="nav" href="#/tags" data-route="tags">Tags</a>
     <a class="nav" href="#/folders" data-route="folders">Folders</a>
-    <a class="nav" href="#/archive" data-route="archive">Archive</a>
-    <a class="nav" href="#/locked" data-route="locked">Locked</a>
-    <a class="nav" href="#/cleanup" data-route="cleanup">Clean up</a>
-    <a class="nav" href="#/trash" data-route="trash">Trash</a>
+    <div class="nav-group quiet" aria-hidden="true">Library</div>
+    <a class="nav quiet" href="#/cleanup" data-route="cleanup">Clean up</a>
+    <a class="nav quiet" href="#/storage" data-route="storage">Storage</a>
+    <a class="nav quiet admin-only" href="#/health" data-route="health">Library health</a>
+    <a class="nav quiet" href="#/archive" data-route="archive">Archive</a>
+    <a class="nav quiet" href="#/locked" data-route="locked">Locked</a>
+    <a class="nav quiet" href="#/trash" data-route="trash">Trash</a>
+    <a class="nav quiet admin-only" href="#/settings" data-route="settings">Settings</a>
     <div class="side-foot">
-      <button id="account-btn" class="nav account" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="account-menu">
-        <span id="account-name">Account</span>
-      </button>
+      <div class="foot-row">
+        <button id="account-btn" class="nav account" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="account-menu">
+          <span id="account-name">Account</span>
+        </button>
+        <a id="settings-gear" class="icon-btn gear admin-only" href="#/settings" title="Settings" aria-label="Settings">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+        </a>
+      </div>
       <div id="account-menu" class="menu" hidden>
         <button type="button" data-action="password">Change password</button>
         <button type="button" data-action="pin">Locked folder PIN</button>
@@ -50,8 +59,13 @@
 
   <div class="main">
     <header class="top">
+      <span id="top-title" class="top-title" aria-hidden="true"></span>
+      <button id="search-open" class="icon-btn" type="button" aria-label="Search" title="Search">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>
+      </button>
       <label class="sr-only" for="search">Search</label>
-      <input id="search" type="search" placeholder="Search people, places, things, text or dates" autocomplete="off">
+      <input id="search" type="search" placeholder="Search people, places, things, text or dates" autocomplete="off" enterkeyhint="search">
+      <button id="search-close" class="btn search-close" type="button">Cancel</button>
       <button id="new-items" class="chip" type="button" hidden>New photos · Show</button>
       <span class="marks-wrap">
         <button id="marks-btn" class="btn" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="marks-pop" title="Show only photos with some stars, a colour label, or picks">Filter</button>
@@ -60,7 +74,10 @@
       <button id="show-btn" class="btn" type="button" title="Play these photos full screen">Slideshow</button>
       <button id="select-btn" class="btn" type="button" aria-pressed="false">Select</button>
       <button id="rescan" class="btn" type="button">Rescan</button>
-      <button id="upload-btn" class="btn primary" type="button">Upload</button>
+      <button id="layout-btn" class="icon-btn" type="button" aria-pressed="false" title="Show photos in their own shape" aria-label="Show photos in their own shape">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="8" height="7" rx="1"/><rect x="13" y="4" width="8" height="7" rx="1"/><rect x="3" y="13" width="8" height="7" rx="1"/><rect x="13" y="13" width="8" height="7" rx="1"/></svg>
+      </button>
+      <button id="upload-btn" class="btn primary" type="button" aria-label="Upload"><svg class="upload-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span class="upload-text">Upload</span></button>
       <input id="upload-input" class="sr-only" type="file" multiple tabindex="-1"
              accept="image/*,video/*,.heic,.heif,.avif,.mkv,.m4v,.3gp,.dng,.cr2,.cr3,.crw,.nef,.nrw,.arw,.srf,.sr2,.orf,.rw2,.raf,.pef,.srw,.3fr,.erf,.kdc,.dcr,.mrw,.mos,.iiq,.rwl,.x3f" aria-label="Choose files to upload">
     </header>
@@ -72,9 +89,16 @@
         <h2 id="empty-title"></h2>
         <p id="empty-text"></p>
       </div>
+      <div id="jumped" class="jumped" hidden></div>
       <div id="grid" class="grid"></div>
       <div id="sentinel" class="sentinel" aria-hidden="true"></div>
     </main>
+    <div id="scrubber" class="scrubber" hidden aria-label="Jump to a date" role="slider" tabindex="0"
+         aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+      <div id="scrub-marks" class="scrub-marks"></div>
+      <div id="scrub-pos" class="scrub-pos"></div>
+      <div id="scrub-tip" class="scrub-tip" hidden></div>
+    </div>
 
     <div id="actionbar" class="actionbar" role="toolbar" aria-label="Selected items" hidden>
       <span id="sel-count" class="sel-count"></span>
@@ -82,6 +106,26 @@
       <span id="sel-actions" class="sel-actions"></span>
       <button id="sel-cancel" class="btn" type="button">Done</button>
     </div>
+
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+    <nav id="tabbar" class="tabbar" aria-label="Main">
+      <a class="tab-item" href="#/" data-tab="photos">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="M4 17l5-5 4 4 3-3 4 4"/></svg>
+        <span>Photos</span></a>
+      <button class="tab-item" type="button" data-tab="search">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>
+        <span>Search</span></button>
+      <a class="tab-item" href="#/albums" data-tab="albums">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="7" width="16" height="13" rx="2"/><path d="M7 4h10"/></svg>
+        <span>Albums</span></a>
+      <a class="tab-item" href="#/people" data-tab="people">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 20c1.5-4 4.5-6 8-6s6.5 2 8 6"/></svg>
+        <span>People</span></a>
+      <button class="tab-item" type="button" data-tab="more" aria-haspopup="true" aria-expanded="false">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>
+        <span>More</span><span id="more-dot" class="more-dot" hidden></span></button>
+    </nav>
 
     <footer id="statusbar" class="status" role="status" aria-live="polite">
       <span id="st-counts"></span>
@@ -93,6 +137,7 @@
     </footer>
   </div>
 </div>
+<div id="sheet-backdrop" class="sheet-backdrop" hidden></div>
 
 <div id="drop" class="drop" hidden>Drop files to upload</div>
 
@@ -103,15 +148,28 @@
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20.5s-7.5-4.6-9.3-9.4C1.4 7.6 3.6 4 7.2 4c2 0 3.6 1.1 4.8 2.8C13.2 5.1 14.8 4 16.8 4c3.6 0 5.8 3.6 4.5 7.1C19.5 15.9 12 20.5 12 20.5z"/></svg>
       <span class="v-label">Favourite</span>
     </button>
-    <button id="v-album" class="v-btn" type="button"><span class="v-label">Add to album</span></button>
-    <button id="v-archive" class="v-btn" type="button"><span class="v-label">Archive</span></button>
-    <button id="v-edit" class="v-btn" type="button"><span class="v-label">Edit</span></button>
-    <button id="v-trim" class="v-btn" type="button" title="Save part of this video, or a still from it" hidden><span class="v-label">Trim</span></button>
-    <button id="v-play" class="v-btn" type="button" title="Slideshow from this photo"><span class="v-label">Slideshow</span></button>
-    <button id="v-trash" class="v-btn" type="button"><span class="v-label">Move to trash</span></button>
-    <button id="v-info" class="v-btn" type="button" aria-pressed="false"><span class="v-label">Info</span></button>
-    <a id="v-download" class="v-btn" href="#" download><span class="v-label">Download</span></a>
-    <button id="v-close" class="v-btn" type="button"><span class="v-label">Close</span></button>
+    <button id="v-info" class="v-btn" type="button" aria-pressed="false" title="Details (I)">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.5"/></svg>
+      <span class="v-label">Info</span>
+    </button>
+    <span class="v-more-wrap">
+      <button id="v-more" class="v-btn" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="v-menu" title="More">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/></svg>
+        <span class="v-label">More</span>
+      </button>
+      <div id="v-menu" class="v-menu" role="menu" hidden>
+        <button id="v-album" class="v-item" type="button" role="menuitem">Add to album</button>
+        <button id="v-edit" class="v-item" type="button" role="menuitem">Edit</button>
+        <button id="v-trim" class="v-item" type="button" role="menuitem" title="Save part of this video, or a still from it" hidden>Trim</button>
+        <button id="v-play" class="v-item" type="button" role="menuitem">Slideshow from here</button>
+        <a id="v-download" class="v-item" href="#" download role="menuitem">Download</a>
+        <button id="v-archive" class="v-item" type="button" role="menuitem"><span class="v-label">Archive</span></button>
+        <button id="v-trash" class="v-item danger" type="button" role="menuitem"><span class="v-label">Move to trash</span></button>
+      </div>
+    </span>
+    <button id="v-close" class="v-btn v-x" type="button" aria-label="Close" title="Close (Esc)">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
   </div>
   <button id="v-prev" class="v-nav prev" type="button" aria-label="Previous">
     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7" /></svg>

@@ -2,11 +2,14 @@
 
 Snapshots is a self-hosted photo and video library for Windows. Your originals stay on your own drive, and the app indexes them locally for browsing, search, people and places. You can reach your library from your phone over Tailscale, with no cloud account or subscription required.
 
-> **Status:** early development (v0.9). Browsing, search, accounts with two-step login, albums and smart albums, tags, stars and colour labels, favourites, archive, trash, people, places, the map, memories, events, the year in review, clean-up and the library health check, editing, comments, the locked folder, exports, imports from Immich and Google Photos, offsite copies, XMP files and webhooks all work. Automatic backup from a phone is not built yet, see [Roadmap](#roadmap).
+> **Status:** early development (v0.10). Browsing, search, accounts with two-step login, albums and smart albums, tags, stars and colour labels, favourites, archive, trash, people, places, the map, memories, events, the year in review, clean-up and the library health check, editing, comments, the locked folder, exports, imports from Immich and Google Photos, offsite copies, XMP files and webhooks all work. Automatic backup from a phone is not built yet, see [Roadmap](#roadmap).
 
 ## What works today
 
 - Runs natively on Windows, with no Docker or WSL, packaged as a single `Snapshots.exe` that opens in its own app window (no browser tab, no black console window)
+- **Made for phones too:** on a phone, Snapshots has a tab bar at the bottom (Photos, Search, Albums, People, More), and you swipe between photos and down to close one
+- **Jump to any date** with the year rail on the right of the timeline: drag or click it, or use the arrow keys and Page Up/Down on it
+- **Photos in their own shape** (the button beside Upload): rows of photos that keep their shape instead of even tiles. The choice is remembered on each device
 - **Keeps itself up to date:** rescans the library every 15 minutes (adjustable), and photos you move or rename keep their albums, favourites and faces
 - **Accounts:** everyone logs in. The first account is the administrator, who can add accounts for the family
 - **Albums** and **tags** shared by everyone, **favourites** for each person, and a **trash** you can restore from
@@ -212,7 +215,7 @@ If Windows Security removes the exe after a build (programs made with PyInstalle
 
 ## Upgrading
 
-Replace the exe (or pull the new code) and start it again. Your database is upgraded automatically the first time. Version 0.2 added accounts, so after upgrading from 0.1 you'll be asked to create the administrator account. Version 0.3 only changes how Snapshots opens (its own window instead of a browser tab); your accounts, albums and photos are untouched. You will need to log in once more, because the app window keeps its own login separate from your browser. Version 0.4 then checks every photo once in the background (copies, blur, content and text), which takes a while for a big library; everything keeps working meanwhile. Version 0.5 looks once through your JPEG and HEIC photos for motion photos and keywords (quick: it reads only the start of each file), pairs Live Photos, stacks RAW + JPEG pairs, and picks up RAW files that earlier versions skipped. Version 0.6 looks once through your JPEG and HEIC photos for 360° panoramas (again reading only the start of each file) and makes its first database backup when it starts. Version 0.7 changes nothing on its own: imports, the offsite copy and webhooks only start once you set them up. Version 0.8 changes nothing in your files unless you turn on XMP files; new uploads are filed by the date taken. Version 0.9.1 adds the optional Start with Windows switch; it stays off until you turn it on. Version 0.9 adds stars, labels and pick/reject (all empty to begin with); the library health check only runs when you ask, or on the schedule you set.
+Replace the exe (or pull the new code) and start it again. Your database is upgraded automatically the first time. Version 0.2 added accounts, so after upgrading from 0.1 you'll be asked to create the administrator account. Version 0.3 only changes how Snapshots opens (its own window instead of a browser tab); your accounts, albums and photos are untouched. You will need to log in once more, because the app window keeps its own login separate from your browser. Version 0.4 then checks every photo once in the background (copies, blur, content and text), which takes a while for a big library; everything keeps working meanwhile. Version 0.5 looks once through your JPEG and HEIC photos for motion photos and keywords (quick: it reads only the start of each file), pairs Live Photos, stacks RAW + JPEG pairs, and picks up RAW files that earlier versions skipped. Version 0.6 looks once through your JPEG and HEIC photos for 360° panoramas (again reading only the start of each file) and makes its first database backup when it starts. Version 0.7 changes nothing on its own: imports, the offsite copy and webhooks only start once you set them up. Version 0.8 changes nothing in your files unless you turn on XMP files; new uploads are filed by the date taken. Version 0.10 changes how the app looks, not your library: Settings is now a page (the gear by your name), Storage and Library health have their own places in the sidebar, and a short welcome walks a new install through its first choices. Version 0.9.1 adds the optional Start with Windows switch; it stays off until you turn it on. Version 0.9 adds stars, labels and pick/reject (all empty to begin with); the library health check only runs when you ask, or on the schedule you set.
 
 ## Roadmap
 
@@ -241,6 +244,7 @@ Replace the exe (or pull the new code) and start it again. Your database is upgr
 - [ ] Android app with automatic backup
 - [ ] Sharing links for people without an account
 - [x] Optional start with Windows (Settings)
+- [x] A layout for phones, a timeline scrubber, Settings as a page, a first-run welcome
 - [ ] A tray icon and a true Windows service that runs before anyone signs in
 
 ## Development

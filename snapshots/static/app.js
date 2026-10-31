@@ -199,9 +199,16 @@ function askText(title, label, value = "", ok = "Save") {
 }
 
 let flash = null;
+let toastTimer = null;
 function flashNote(text) {
   flash = { text, until: Date.now() + 8000 };
   $("st-note").textContent = text;
+  // On phones there is no status bar: the note shows for a moment above the tab bar.
+  const toast = $("toast");
+  toast.textContent = text;
+  toast.hidden = !text;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { toast.hidden = true; }, 4500);
   setTimeout(() => { if (flash && Date.now() >= flash.until) { flash = null; renderStatus(); } }, 8100);
 }
 
@@ -248,9 +255,12 @@ function parseRoute() {
       return { name: "map", view: "map" };
     case "cleanup":
       if (parts[1] === "quality") return { name: "cleanup", view: "grid", filter: { quality: "true" }, quality: true };
-      if (parts[1] === "storage") return { name: "cleanup", view: "storage" };
-      if (parts[1] === "health") return { name: "cleanup", view: "health" };
+      if (parts[1] === "storage") return { name: "storage", view: "storage" };   // older links
+      if (parts[1] === "health") return { name: "health", view: "health" };
       return { name: "cleanup", view: "cleanup" };
+    case "storage": return { name: "storage", view: "storage" };
+    case "health": return { name: "health", view: "health" };
+    case "settings": return { name: "settings", view: "settings", tab: parts[1] || "library" };
     case "albums":
       if (parts[1] && /^\d+$/.test(parts[1])) return { name: "albums", view: "grid", filter: { album: parts[1] }, album: +parts[1] };
       return { name: "albums", view: "albums" };
@@ -271,15 +281,32 @@ function parseRoute() {
 
 let keepSearch = false;   // true while the search box itself caused a change of page
 
+const ROUTE_TITLES = {
+  all: "Snapshots", photos: "Photos", videos: "Videos", favorites: "Favourites", activity: "Activity", people: "People",
+  places: "Places", map: "Map", events: "Events", review: "Year in review", albums: "Albums", tags: "Tags", folders: "Folders",
+  cleanup: "Clean up", storage: "Storage", health: "Library health", archive: "Archive", locked: "Locked", trash: "Trash",
+  settings: "Settings",
+};
+
 async function render() {
   S.route = parseRoute();
   document.querySelectorAll(".side .nav[data-route]").forEach((a) => {
     if (a.dataset.route === S.route.name) a.setAttribute("aria-current", "page");
     else a.removeAttribute("aria-current");
   });
+  $("top-title").textContent = ROUTE_TITLES[S.route.name] || "Snapshots";
+  if (S.route.name === "settings") $("settings-gear").setAttribute("aria-current", "page");
+  else $("settings-gear").removeAttribute("aria-current");
+  closeSheet();
+  markTab();
+  hideScrubber();
+  S.jumpedTo = null;
+  $("jumped").hidden = true;
   if (!keepSearch) { S.q = ""; $("search").value = ""; }
   S.look = null;
   keepSearch = false;
+  if (!S.q) topBar.classList.remove("searching");
+  markTab();
   stopSelecting();
   $("new-items").hidden = true;
   $("scroller").scrollTop = 0;
@@ -288,6 +315,7 @@ async function render() {
   $("grid").hidden = !grid;
   $("sentinel").hidden = !grid;
   $("select-btn").hidden = !grid;
+  $("layout-btn").hidden = !grid;
   $("show-btn").hidden = !grid || S.route.name === "trash";
   $("marks-btn").hidden = !grid || S.route.name === "trash" || !!S.route.locked;
   $("marks-pop").hidden = true;
@@ -329,6 +357,8 @@ async function render() {
       await renderLockedGate();
     } else if (S.route.view === "activity") {
       await renderActivity();
+    } else if (S.route.view === "settings") {
+      await renderSettings();
     }
   } catch (err) {
     showEmpty("Something went wrong", err.message);
@@ -632,6 +662,7 @@ function tile(item, index) {
   }
   if (item.stack && item.stack_count > 1) b.classList.add("stacked");
   if (item.favorite) b.insertAdjacentHTML("beforeend", HEART);
+  tileShape(b, item);
   tileMarks(b, item);
   b.append(el("span", "check"));
   if (S.selected.has(item.id)) { b.classList.add("selected"); b.setAttribute("aria-pressed", "true"); }
@@ -650,6 +681,8 @@ function appendItems(items) {
   for (const item of items) {
     const month = item.taken_at.slice(0, 7);
     if (!S.look && month !== S.lastMonth) {
+      // Ends the last row of the month before (for photos shown in their own shape).
+      if (S.lastMonth) frag.append(el("span", "row-end"));
       S.lastMonth = month;
       frag.append(monthHeader(month));
     }
@@ -699,7 +732,11 @@ async function reload() {
       S.counts = Object.fromEntries(t.months.map((m) => [m.month, m.count]));
     } catch (_) { S.counts = {}; }
   }
+  S.jumpedTo = null;
+  $("jumped").hidden = true;
+  buildScrubber();
   await loadMore();
+  updateScrubPos();
 }
 
 /** Take items out of the grid in place (keeps the scroll position). */
@@ -715,8 +752,9 @@ function removeItems(ids) {
   $("grid").querySelectorAll(".tile").forEach((t) => { if (gone.has(+t.dataset.id)) t.remove(); });
   $("grid").querySelectorAll(".tile").forEach((t, i) => { t.dataset.index = i; });
   $("grid").querySelectorAll(".month").forEach((h) => {
-    const next = h.nextElementSibling;
-    if (!next || next.classList.contains("month")) { h.remove(); return; }
+    const between = [];
+    for (let n = h.nextElementSibling; n && !n.classList.contains("month"); n = n.nextElementSibling) between.push(n);
+    if (!between.some((n) => n.classList.contains("tile"))) { between.forEach((n) => n.remove()); h.remove(); return; }
     const small = h.querySelector("small");
     const n = S.counts[h.dataset.month];
     if (small && n) small.textContent = plural(n, "item");
@@ -786,6 +824,7 @@ new IntersectionObserver((entries) => {
 
 function startSelecting() {
   S.selecting = true;
+  document.body.classList.add("selecting-items");
   $("grid").classList.add("selecting");
   $("select-btn").setAttribute("aria-pressed", "true");
   updateSelection();
@@ -793,6 +832,7 @@ function startSelecting() {
 
 function stopSelecting() {
   S.selecting = false;
+  document.body.classList.remove("selecting-items");
   S.selected.clear();
   S.lastClicked = -1;
   $("grid").classList.remove("selecting");
@@ -803,7 +843,7 @@ function stopSelecting() {
 
 function toggleTile(index, range) {
   const ids = [];
-  if (range && S.lastClicked >= 0) {
+  if (range && S.lastClicked >= 0 && S.lastClicked < S.items.length) {
     const [a, b] = [Math.min(S.lastClicked, index), Math.max(S.lastClicked, index)];
     for (let i = a; i <= b; i++) ids.push(S.items[i].id);
     ids.forEach((id) => S.selected.add(id));
@@ -978,11 +1018,15 @@ function renderMarksBar(item, bar = $("v-marks"), after = null) {
     labels.append(b);
   });
   const flags = el("span", "mk-flags");
-  const pick = button("✓ Pick", "mk-flag pick" + (item.flag === 1 ? " on" : ""), () => set({ flag: item.flag === 1 ? 0 : 1 }));
+  const pick = button("✓", "mk-flag pick" + (item.flag === 1 ? " on" : ""), () => set({ flag: item.flag === 1 ? 0 : 1 }));
+  pick.append(el("span", "mk-word", " Pick"));
   pick.title = "Pick (key P)";
+  pick.setAttribute("aria-label", "Pick");
   pick.setAttribute("aria-pressed", String(item.flag === 1));
-  const rej = button("✕ Reject", "mk-flag reject" + (item.flag === -1 ? " on" : ""), () => set({ flag: item.flag === -1 ? 0 : -1 }));
+  const rej = button("✕", "mk-flag reject" + (item.flag === -1 ? " on" : ""), () => set({ flag: item.flag === -1 ? 0 : -1 }));
+  rej.append(el("span", "mk-word", " Reject"));
   rej.title = "Reject (key X)";
+  rej.setAttribute("aria-label", "Reject");
   rej.setAttribute("aria-pressed", String(item.flag === -1));
   flags.append(pick, rej);
   bar.append(stars, labels, flags);
@@ -1482,16 +1526,58 @@ async function renderPeople() {
       : "Face recognition is turned off.");
     return;
   }
-  const grid = el("div", "people");
-  for (const p of data.people) {
+  const card = (p) => {
+    const cell = el("div", "person-cell");
+    cell.dataset.name = (p.name || "").toLowerCase();
     const a = link("", `#/people/${p.id}`, "person");
     a.append(p.face_id ? img(faceUrl(p.face_id), "", "avatar") : el("span", "avatar"));
     a.append(p.name ? el("span", null, p.name) : el("span", "unnamed", "Add a name"));
     a.append(el("small", null, plural(p.photos, "photo")));
-    grid.append(a);
+    const who = p.name || "this person";
+    const toggle = button(hidden ? "Show" : "×", hidden ? "person-hide show" : "person-hide", async () => {
+      try {
+        await patch(`/api/people/${p.id}`, { hidden: !hidden });
+        flashNote(hidden ? `${p.name || "They"} will show in People again` : `Hidden ${p.name || "this face"}. Find them under Hidden.`);
+        render();
+      } catch (err) { flashNote(err.message); }
+    });
+    toggle.title = hidden ? `Show ${who} in People` : `Hide ${who} from People`;
+    toggle.setAttribute("aria-label", toggle.title);
+    cell.append(a, toggle);
+    return cell;
+  };
+  const named = data.people.filter((p) => p.name);
+  const unnamed = data.people.filter((p) => !p.name);
+  const parts = [];
+  if (data.people.length > 12) {
+    const tools = el("div", "people-tools");
+    const find = el("input", "people-find");
+    find.type = "search";
+    find.placeholder = "Find a person";
+    find.setAttribute("aria-label", "Find a person by name");
+    find.addEventListener("input", () => {
+      const q = find.value.trim().toLowerCase();
+      coll.querySelectorAll(".person-cell").forEach((c) => { c.hidden = !!q && !c.dataset.name.includes(q); });
+      coll.querySelectorAll(".people-sub").forEach((h) => {
+        const g = h.nextElementSibling;
+        h.hidden = !!q && !(g && g.querySelector(".person-cell:not([hidden])"));
+      });
+    });
+    tools.append(find);
+    parts.push(tools);
   }
-  coll.replaceChildren(grid);
-  if (!hidden) suggestionStrip(null).then((strip) => { if (strip) coll.prepend(strip); });
+  const group = (list) => { const g = el("div", "people"); list.forEach((p) => g.append(card(p))); return g; };
+  if (named.length) parts.push(group(named));
+  if (unnamed.length) {
+    if (named.length) {
+      const h = el("h2", "section-title people-sub", "Not named yet");
+      h.append(el("span", "muted", hidden ? "" : "Add a name, or hide faces you don't want to see (×)"));
+      parts.push(h);
+    }
+    parts.push(group(unnamed));
+  }
+  coll.replaceChildren(...parts);
+  if (!hidden) suggestionStrip(null).then((strip) => { if (strip && coll.isConnected) coll.prepend(strip); });
 }
 
 /** "Same person?" questions: for everyone (person = null) or for one person. Null when there are none. */
@@ -1931,16 +2017,7 @@ async function renderCleanup() {
   const q = el("a", "cleanup-link");
   q.href = "#/cleanup/quality";
   q.append(el("strong", null, "Blurry or dark photos"), el("span", "muted", sum.low_quality ? plural(sum.low_quality, "photo") : "None found"));
-  const st2 = el("a", "cleanup-link");
-  st2.href = "#/cleanup/storage";
-  st2.append(el("strong", null, "Storage"), el("span", "muted", "Where the space goes"));
-  frag.append(q, st2);
-  if (S.me && S.me.is_admin) {
-    const hl = el("a", "cleanup-link");
-    hl.href = "#/cleanup/health";
-    hl.append(el("strong", null, "Library health"), el("span", "muted", "Check every file for damage"));
-    frag.append(hl);
-  }
+  frag.append(q);
 
   const h = el("h2", "section-title", "Duplicates");
   if (sum.groups) h.append(el("span", "muted", `${plural(sum.extra, "extra item")} · ${fmtSize(sum.space)} could be freed`));
@@ -2093,7 +2170,7 @@ function bar(fraction, cls = "") {
 }
 
 async function renderStorage() {
-  headRow("Storage", null, [link("Back to Clean up", "#/cleanup", "btn small")]);
+  headRow("Storage", null, []);
   $("collection").replaceChildren(el("p", "muted", "Adding it all up…"));
   let s;
   try { s = await api("/api/storage"); } catch (err) { showEmpty("Something went wrong", err.message); return; }
@@ -2101,7 +2178,7 @@ async function renderStorage() {
     refresh.disabled = true;
     try { await api("/api/storage?fresh=true"); renderStorage(); } catch (err) { flashNote(err.message); refresh.disabled = false; }
   });
-  headRow("Storage", `${fmtSize(s.total)} of photos and videos`, [refresh, link("Back to Clean up", "#/cleanup", "btn small")],
+  headRow("Storage", `${fmtSize(s.total)} of photos and videos`, [refresh],
     `Counted ${fmtDateTime(s.made_at)}. Locked folders are not included.`);
   const frag = document.createDocumentFragment();
 
@@ -2224,7 +2301,6 @@ async function renderHealth() {
   else actions.push(button(last ? "Check again" : "Check now", "btn small primary", async () => {
     try { await post("/api/library-health/run"); renderHealth(); } catch (err) { flashNote(err.message); }
   }));
-  actions.push(link("Back to Clean up", "#/cleanup", "btn small"));
   headRow("Library health", null, actions, "Reads every photo and video again and compares it with the checksum Snapshots stored, to find files damaged on disk before your backups copy the damage. Nothing is changed.");
   const frag = document.createDocumentFragment();
   if (st.running) {
@@ -2483,6 +2559,7 @@ function renderStatus() {
   const unread = st.activity_unread || 0;
   $("activity-count").hidden = !unread;
   $("activity-count").textContent = unread > 99 ? "99+" : String(unread);
+  $("more-dot").hidden = !unread;
   if (st.backup && st.backup.enabled && st.backup.message) $("st-note").textContent = st.backup.message;
 }
 
@@ -2916,7 +2993,7 @@ menu.addEventListener("click", async (e) => {
   } else if (action === "security") {
     loginSecurity();
   } else if (action === "settings") {
-    manageSettings();
+    location.hash = "#/settings";
   } else if (action === "import") {
     importDialog();
   }
@@ -4759,7 +4836,7 @@ function offsiteSection(ctl) {
     try {
       const o = (await api("/api/settings")).offsite;
       draw(o);
-      if (o.state && o.state.running && $("modal").open) setTimeout(refresh, 2000);
+      if (o.state && o.state.running && box.isConnected) setTimeout(refresh, 2000);
     } catch (_) { /* closed */ }
   };
   return { box, draw, refresh };
@@ -4822,109 +4899,670 @@ function webhookSection(ctl) {
 
 // ------------------------------------------------------------------ settings (administrators)
 
-async function manageSettings() {
-  await modal({
-    title: "Settings", ok: null, cancel: "Close", wide: true,
-    build: (body, ctl) => {
-      const libs = el("div");
-      const backups = el("div");
-      const video = el("div");
-      let data = null;
-      const draw = async () => {
-        try { data = await api("/api/settings"); } catch (err) { ctl.error(err.message); return; }
-        libs.replaceChildren();
-        for (const l of data.libraries) {
-          const r = el("div", "user-row");
-          const who = el("div", "who");
-          who.append(el("div", "path", l.path), el("div", "role",
-            `${l.main ? "Main library (uploads go here)" : "Extra folder"} · ${plural(l.items, "item")}${l.available ? "" : " · not connected"}`));
-          r.append(who);
-          if (!l.main) r.append(button("Remove", "btn small", async () => {
-            const ok = await confirmBox("Remove this folder from Snapshots?",
-              `Its ${plural(l.items, "item")} leave Snapshots, with their albums, tags and faces. The files in ${l.path} are not touched.`,
-              "Remove folder", true);
-            if (!ok) return;
-            try { await api(`/api/libraries?path=${encodeURIComponent(l.path)}`, { method: "DELETE" }); ctl.error(""); draw(); refreshStatus(); }
-            catch (err) { ctl.error(err.message); }
-          }));
-          libs.append(r);
-        }
-        const b = data.backups;
-        backups.replaceChildren();
-        backups.append(el("p", "muted", b.hours > 0
-          ? `A copy of the database is made every ${b.hours} hours into ${b.folder}. The newest ${b.keep} are kept. Your photos are not part of it: they are your own files.`
-          : "Automatic backups are off (backup_hours = 0)."));
-        if (b.message) backups.append(el("p", "form-error", b.message));
-        const blist = el("div", "backup-list");
-        for (const x of b.list.slice(0, 6)) {
-          const line = el("div", "backup");
-          line.append(el("span", null, fmtDateTime(x.made_at)), el("span", "muted", fmtSize(x.size)));
-          blist.append(line);
-        }
-        if (!b.list.length) blist.append(el("p", "muted small", "No backups yet."));
-        if (b.list.length > 6) blist.append(el("p", "muted small", `and ${plural(b.list.length - 6, "older one")}`));
-        backups.append(blist, button("Back up now", "btn small", async (e) => {
-          e.target.disabled = true;
-          try { await post("/api/backups"); ctl.error(""); flashNote("Database backed up"); draw(); } catch (err) { ctl.error(err.message); }
-          e.target.disabled = false;
+const SETTINGS_TABS = [
+  ["library", "Library"],
+  ["backups", "Backups"],
+  ["people", "People and accounts"],
+  ["videos", "Videos"],
+  ["system", "Windows and more"],
+];
+
+/** Settings, as a page with tabs (administrators). */
+async function renderSettings() {
+  if (!S.me || !S.me.is_admin) { showEmpty("Settings are for administrators", "Ask the person who set up Snapshots."); return; }
+  const tab = SETTINGS_TABS.some(([k]) => k === S.route.tab) ? S.route.tab : "library";
+  headRow("Settings", null, []);
+  const wrap = el("div", "settings");
+  const tabs = el("nav", "set-tabs");
+  tabs.setAttribute("aria-label", "Settings");
+  for (const [k, label] of SETTINGS_TABS) {
+    const a = link(label, `#/settings/${k}`, "set-tab");
+    if (k === tab) a.setAttribute("aria-current", "page");
+    tabs.append(a);
+  }
+  queueMicrotask(() => { const on = tabs.querySelector('[aria-current="page"]'); if (on && on.scrollIntoView) on.scrollIntoView({ inline: "center", block: "nearest" }); });
+  const panel = el("section", "set-panel");
+  const err = el("p", "form-error set-error");
+  err.setAttribute("role", "alert");
+  const ctl = { error: (m) => { err.textContent = m || ""; if (m) err.scrollIntoView({ block: "nearest" }); } };
+  panel.append(err);
+  wrap.append(tabs, panel);
+  $("collection").replaceChildren(wrap);
+
+  let data;
+  try { data = await api("/api/settings"); } catch (e) { ctl.error(e.message); return; }
+  if (!panel.isConnected) return;
+  const section = (title, ...content) => {
+    const box = el("div", "set-section");
+    box.append(el("h3", "section-title small", title), ...content);
+    panel.append(box);
+    return box;
+  };
+
+  if (tab === "library") {
+    const libs = el("div");
+    const drawLibs = async (fresh) => {
+      if (fresh) { try { data = await api("/api/settings"); } catch (e) { ctl.error(e.message); return; } }
+      libs.replaceChildren();
+      for (const l of data.libraries) {
+        const r = el("div", "user-row");
+        const who = el("div", "who");
+        who.append(el("div", "path", l.path), el("div", "role",
+          `${l.main ? "Main library (uploads go here)" : "Extra folder"} · ${plural(l.items, "item")}${l.available ? "" : " · not connected"}`));
+        r.append(who);
+        if (!l.main) r.append(button("Remove", "btn small", async () => {
+          const ok = await confirmBox("Remove this folder from Snapshots?",
+            `Its ${plural(l.items, "item")} leave Snapshots, with their albums, tags and faces. The files in ${l.path} are not touched.`,
+            "Remove folder", true);
+          if (!ok) return;
+          try { await api(`/api/libraries?path=${encodeURIComponent(l.path)}`, { method: "DELETE" }); ctl.error(""); drawLibs(true); refreshStatus(); }
+          catch (e) { ctl.error(e.message); }
         }));
-        backups.append(el("p", "muted small", "To restore one: close Snapshots, then run  Snapshots.exe --restore-backup \"<backup file>\". The database it replaces is kept beside it."));
-        video.replaceChildren();
-        const v = data.video;
-        video.append(el("p", "muted", v.ffmpeg
-          ? `Videos the app can't play (HEVC from phones, AVI, MKV) are converted once when opened. Setting: ${v.encoder}. Converted copies use up to ${v.cache_gb} GB.`
-          : "Install ffmpeg to convert videos the app can't play (HEVC from phones, AVI, MKV)."));
-        if (v.ffmpeg) {
-          const out = el("span", "muted small");
-          video.append(button("Check the graphics card", "btn small", async (e) => {
-            e.target.disabled = true;
-            out.textContent = " Testing…";
-            try {
-              const r = await api("/api/video-encoder");
-              out.textContent = r.using === "libx264" ? " Converting with the processor (no graphics card encoder found)."
-                : ` Converting with the graphics card (${r.using}).`;
-            } catch (err) { out.textContent = ` ${err.message}`; }
-            e.target.disabled = false;
-          }), out);
-        }
-        if (data.config_file) body.querySelector(".cfg-note").textContent = `Other settings are in ${data.config_file}.`;
-      };
-      body.append(el("h3", "section-title small", "Library folders"), libs);
-      const [a, path] = field("Add another folder (another drive, say)", { placeholder: "D:\\Phone backup", maxLength: 1000 });
-      const add = button("Add folder", "btn primary", async () => {
+        libs.append(r);
+      }
+    };
+    drawLibs(false);
+    const [a, path] = field("Add another folder (another drive, or a phone backup folder)", { placeholder: "D:\\Phone backup", maxLength: 1000 });
+    const add = button("Add folder", "btn primary", async () => {
+      try {
+        await post("/api/libraries", { path: path.value.trim() });
+        path.value = ""; ctl.error("");
+        flashNote("Folder added. Snapshots is reading it now.");
+        drawLibs(true); refreshStatus();
+      } catch (e) { ctl.error(e.message); }
+    });
+    section("Library folders", libs, a, add,
+      el("p", "muted small", "Snapshots only reads these folders. Nothing in them is changed, except by Delete permanently in the trash (and .xmp files beside photos, if you turn those on below)."));
+    const store = storageSection(ctl);
+    section("Where uploads go", store.box);
+    store.draw(data.storage);
+    const side = xmpSection(ctl);
+    section("XMP files beside photos", side.box);
+    side.draw(data.xmp);
+  } else if (tab === "backups") {
+    const backups = el("div");
+    const drawBackups = (b) => {
+      backups.replaceChildren();
+      backups.append(el("p", "muted", b.hours > 0
+        ? `A copy of the database is made every ${b.hours} hours into ${b.folder}. The newest ${b.keep} are kept. Your photos are not part of it: they are your own files.`
+        : "Automatic backups are off (backup_hours = 0)."));
+      if (b.message) backups.append(el("p", "form-error", b.message));
+      const blist = el("div", "backup-list");
+      for (const x of b.list.slice(0, 6)) {
+        const line = el("div", "backup");
+        line.append(el("span", null, fmtDateTime(x.made_at)), el("span", "muted", fmtSize(x.size)));
+        blist.append(line);
+      }
+      if (!b.list.length) blist.append(el("p", "muted small", "No backups yet."));
+      if (b.list.length > 6) blist.append(el("p", "muted small", `and ${plural(b.list.length - 6, "older one")}`));
+      backups.append(blist, button("Back up now", "btn small", async (e) => {
+        e.target.disabled = true;
         try {
-          await post("/api/libraries", { path: path.value.trim() });
-          path.value = ""; ctl.error("");
-          flashNote("Folder added. Snapshots is reading it now.");
-          draw(); refreshStatus();
-        } catch (err) { ctl.error(err.message); }
-      });
-      body.append(a, add, el("p", "muted small", "Snapshots only reads these folders. Nothing in them is changed, except by Delete permanently in the trash (and .xmp files beside photos, if you turn those on below)."));
-      const store = storageSection(ctl);
-      const side = xmpSection(ctl);
-      const faceSet = facesSection(ctl);
-      const boot = startupSection(ctl);
-      body.append(el("h3", "section-title small", "Where uploads go"), store.box);
-      body.append(el("h3", "section-title small", "XMP files beside photos"), side.box);
-      body.append(el("h3", "section-title small", "Face grouping"), faceSet.box);
-      body.append(el("h3", "section-title small", "Start with Windows"), boot.box);
-      body.append(el("h3", "section-title small", "Backups"), backups);
-      body.append(el("h3", "section-title small", "Videos"), video);
-      const off = offsiteSection(ctl);
-      const hooks = webhookSection(ctl);
-      body.append(el("h3", "section-title small", "Offsite copy of the photos"), off.box);
-      body.append(el("h3", "section-title small", "Webhooks"), hooks.box);
-      body.append(el("p", "muted small cfg-note", ""));
-      draw().then(() => {
-        if (!data) return;
-        off.draw(data.offsite);
-        if (data.offsite.state.running) off.refresh();
-        store.draw(data.storage);
-        side.draw(data.xmp);
-        boot.draw(data.startup);
-      });
-      faceSet.draw();
-      hooks.draw();
+          await post("/api/backups"); ctl.error(""); flashNote("Database backed up");
+          drawBackups((await api("/api/settings")).backups);
+        } catch (x) { ctl.error(x.message); }
+        e.target.disabled = false;
+      }));
+      backups.append(el("p", "muted small", "To restore one: close Snapshots, then run  Snapshots.exe --restore-backup \"<backup file>\". The database it replaces is kept beside it."));
+    };
+    drawBackups(data.backups);
+    section("Database backups", backups);
+    const off = offsiteSection(ctl);
+    section("Offsite copy of the photos", off.box);
+    off.draw(data.offsite);
+    if (data.offsite.state.running) off.refresh();
+  } else if (tab === "people") {
+    const faceSet = facesSection(ctl);
+    section("Face grouping", faceSet.box);
+    faceSet.draw();
+    const links = el("div", "set-links");
+    links.append(button("Accounts…", "btn", () => manageUsers()), button("Import from Immich or Google…", "btn", () => importDialog()));
+    section("Accounts and imports", el("p", "muted", "Add accounts for the rest of the family, reset a password, or bring in photos, albums and people from Immich or Google Photos."), links);
+  } else if (tab === "videos") {
+    const video = el("div");
+    const v = data.video;
+    video.append(el("p", "muted", v.ffmpeg
+      ? `Videos the app can't play (HEVC from phones, AVI, MKV) are converted once when opened. Setting: ${v.encoder}. Converted copies use up to ${v.cache_gb} GB.`
+      : "Install ffmpeg to convert videos the app can't play (HEVC from phones, AVI, MKV)."));
+    if (v.ffmpeg) {
+      const out = el("span", "muted small");
+      video.append(button("Check the graphics card", "btn small", async (e) => {
+        e.target.disabled = true;
+        out.textContent = " Testing…";
+        try {
+          const r = await api("/api/video-encoder");
+          out.textContent = r.using === "libx264" ? " Converting with the processor (no graphics card encoder found)."
+            : ` Converting with the graphics card (${r.using}).`;
+        } catch (x) { out.textContent = ` ${x.message}`; }
+        e.target.disabled = false;
+      }), out);
+    }
+    section("Video conversion", video);
+  } else {
+    const boot = startupSection(ctl);
+    section("Start with Windows", boot.box);
+    boot.draw(data.startup);
+    const hooks = webhookSection(ctl);
+    section("Webhooks", hooks.box);
+    hooks.draw();
+    if (data.config_file) panel.append(el("p", "muted small cfg-note", `Other settings are in ${data.config_file}.`));
+  }
+}
+
+// ------------------------------------------------------------------ phones: tab bar, "More" sheet, search
+
+const side = document.querySelector(".side");
+const topBar = document.querySelector(".top");
+const phone = window.matchMedia("(max-width: 720px)");
+
+function openSheet() {
+  side.style.bottom = `${$("tabbar").offsetHeight}px`;   // the tab bar stays usable (More closes it again)
+  side.classList.add("open");
+  $("sheet-backdrop").hidden = false;
+  document.querySelector('.tab-item[data-tab="more"]').setAttribute("aria-expanded", "true");
+  markTab();
+  const shown = [...side.querySelectorAll(".nav")].filter((n) => !n.hidden && n.offsetParent !== null);
+  const cur = shown.find((n) => n.getAttribute("aria-current") === "page") || shown[0];
+  if (cur) cur.focus({ preventScroll: true });
+}
+
+function closeSheet() {
+  if (!side.classList.contains("open")) return;
+  side.classList.remove("open");
+  $("sheet-backdrop").hidden = true;
+  document.querySelector('.tab-item[data-tab="more"]').setAttribute("aria-expanded", "false");
+  $("account-menu").hidden = true;
+  markTab();
+}
+
+function markTab() {
+  const n = S.route ? S.route.name : "all";
+  const which = side.classList.contains("open") ? "more"
+    : topBar.classList.contains("searching") ? "search"
+      : ["all", "photos", "videos", "favorites"].includes(n) ? "photos"
+        : n === "albums" || n === "people" ? n : "more";
+  document.querySelectorAll(".tab-item").forEach((t) => {
+    const on = t.dataset.tab === which;
+    t.classList.toggle("on", on);
+    if (t.tagName === "A") { if (on) t.setAttribute("aria-current", "page"); else t.removeAttribute("aria-current"); }
+  });
+}
+
+function openSearch() {
+  closeSheet();
+  topBar.classList.add("searching");
+  markTab();
+  $("search").focus();
+}
+
+function closeSearch() {
+  topBar.classList.remove("searching");
+  if ($("search").value) {
+    $("search").value = "";
+    $("search").dispatchEvent(new Event("input"));
+  }
+  markTab();
+}
+
+$("tabbar").addEventListener("click", (e) => {
+  const t = e.target.closest(".tab-item");
+  if (!t) return;
+  if (t.dataset.tab === "more") { if (side.classList.contains("open")) closeSheet(); else openSheet(); return; }
+  if (t.dataset.tab === "search") { openSearch(); return; }
+  closeSheet();
+  if (topBar.classList.contains("searching") || $("search").value) closeSearch();
+  // Tapping the tab of the page you are on scrolls back to the top.
+  if (t.getAttribute("href") === location.hash || (t.dataset.tab === "photos" && (location.hash === "" || location.hash === "#/"))) {
+    e.preventDefault();
+    $("scroller").scrollTo({ top: 0, behavior: "smooth" });
+  }
+  markTab();
+});
+$("sheet-backdrop").addEventListener("click", closeSheet);
+side.addEventListener("click", (e) => { if (e.target.closest("a.nav")) closeSheet(); });
+$("account-menu").addEventListener("click", (e) => { if (e.target.closest("button")) closeSheet(); });
+$("search-open").addEventListener("click", openSearch);
+$("search-close").addEventListener("click", closeSearch);
+$("search").addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && phone.matches) { e.preventDefault(); closeSearch(); }
+  if (e.key === "Enter" && phone.matches) $("search").blur();   // closes the phone keyboard
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && side.classList.contains("open") && !document.querySelector("dialog[open]")) closeSheet();
+});
+phone.addEventListener("change", () => { closeSheet(); if (!phone.matches) topBar.classList.remove("searching"); markTab(); });
+
+// ------------------------------------------------------------------ viewer: More menu, keys, swiping
+
+const vMenu = $("v-menu");
+function closeViewerMenu() {
+  vMenu.hidden = true;
+  $("v-more").setAttribute("aria-expanded", "false");
+}
+$("v-more").addEventListener("click", (e) => {
+  e.stopPropagation();
+  vMenu.hidden = !vMenu.hidden;
+  $("v-more").setAttribute("aria-expanded", String(!vMenu.hidden));
+  if (!vMenu.hidden) {
+    const first = [...vMenu.querySelectorAll(".v-item")].find((x) => !x.hidden);
+    if (first) first.focus();
+  }
+});
+vMenu.addEventListener("click", (e) => { if (e.target.closest(".v-item")) closeViewerMenu(); });
+vMenu.addEventListener("keydown", (e) => {
+  const items = [...vMenu.querySelectorAll(".v-item")].filter((x) => !x.hidden);
+  const at = items.indexOf(document.activeElement);
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    e.preventDefault();
+    e.stopPropagation();   // not the next photo
+    const next = items[(at + (e.key === "ArrowDown" ? 1 : -1) + items.length) % items.length];
+    if (next) next.focus();
+  } else if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+    e.stopPropagation();
+  }
+});
+viewer.addEventListener("click", (e) => {
+  if (!vMenu.hidden && !e.target.closest(".v-more-wrap")) closeViewerMenu();
+}, true);
+viewer.addEventListener("cancel", (e) => {
+  // Escape closes the menu first, then the viewer.
+  if (!vMenu.hidden) { e.preventDefault(); closeViewerMenu(); $("v-more").focus(); }
+});
+viewer.addEventListener("close", closeViewerMenu);
+vMenu.addEventListener("focusout", (e) => { if (!vMenu.hidden && e.relatedTarget && !e.relatedTarget.closest(".v-more-wrap")) closeViewerMenu(); });
+viewer.addEventListener("keydown", (e) => {
+  if (e.target.closest && e.target.closest("input, textarea, select")) return;
+  if ((e.key === "i" || e.key === "I") && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); $("v-info").click(); }
+});
+
+// Swipe left or right for the next or previous photo, down to close.
+(() => {
+  const stage = $("v-stage");
+  let t0 = null;
+  const reset = () => { stage.style.transform = ""; stage.style.opacity = ""; };
+  stage.addEventListener("touchstart", (e) => {
+    if (e.touches.length !== 1 || e.target.closest(".pano-view, .live-btn, button")) { t0 = null; return; }
+    const t = e.touches[0];
+    if (e.target.closest("video")) {
+      // The controls sit along the bottom of a video; a swipe anywhere above them changes photo.
+      const r = e.target.closest("video").getBoundingClientRect();
+      if (t.clientY > r.bottom - 64) { t0 = null; return; }
+    }
+    t0 = { x: t.clientX, y: t.clientY, at: Date.now(), dir: null };
+  }, { passive: true });
+  stage.addEventListener("touchmove", (e) => {
+    if (!t0 || e.touches.length !== 1) { t0 = null; reset(); return; }
+    const t = e.touches[0];
+    const dx = t.clientX - t0.x, dy = t.clientY - t0.y;
+    if (!t0.dir && Math.hypot(dx, dy) > 12) t0.dir = Math.abs(dx) > Math.abs(dy) ? "x" : "y";
+    if (t0.dir === "x") stage.style.transform = `translateX(${dx * 0.5}px)`;
+    else if (t0.dir === "y" && dy > 0) { stage.style.transform = `translateY(${dy * 0.5}px)`; stage.style.opacity = String(Math.max(0.4, 1 - dy / 600)); }
+  }, { passive: true });
+  stage.addEventListener("touchend", (e) => {
+    if (!t0) return;
+    const t = e.changedTouches[0];
+    const dx = t.clientX - t0.x, dy = t.clientY - t0.y, dir = t0.dir, quick = Date.now() - t0.at < 900;
+    t0 = null;
+    reset();
+    if (!quick) return;
+    if (dir === "x" && Math.abs(dx) > 50) step(dx < 0 ? 1 : -1);
+    else if (dir === "y" && dy > 100) viewer.close();
+  });
+  stage.addEventListener("touchcancel", () => { t0 = null; reset(); });
+})();
+
+// ------------------------------------------------------------------ photos in their own shape
+
+const LAYOUT_KEY = "snapshots.layout";
+let layoutChoice = null;   // used when the browser won't remember it
+function shapeLayout() {
+  if (layoutChoice !== null) return layoutChoice;
+  try { return localStorage.getItem(LAYOUT_KEY) === "shape"; } catch (_) { return false; }
+}
+function applyLayout() {
+  const on = shapeLayout();
+  $("grid").classList.toggle("shape", on);
+  const b = $("layout-btn");
+  b.setAttribute("aria-pressed", String(on));
+  const text = on ? "Show photos as even tiles" : "Show photos in their own shape";
+  b.title = text;
+  b.setAttribute("aria-label", text);
+}
+$("layout-btn").addEventListener("click", () => {
+  const on = !shapeLayout();
+  try { localStorage.setItem(LAYOUT_KEY, on ? "shape" : "tiles"); layoutChoice = null; } catch (_) { layoutChoice = on; }
+  if (shapeLayout() !== on) layoutChoice = on;
+  applyLayout();
+  updateScrubPos();
+});
+applyLayout();
+
+function tileShape(b, item) {
+  const fit = (w, h) => Math.min(2.6, Math.max(0.5, w / h));
+  b.style.setProperty("--ar", (item.width && item.height ? fit(item.width, item.height) : 4 / 3).toFixed(3));
+  // An edited photo (cropped, turned) has the shape of its thumbnail, not of the original file.
+  if (item.edited) {
+    const i = b.querySelector("img");
+    if (i) i.addEventListener("load", () => {
+      if (i.naturalWidth && i.naturalHeight) b.style.setProperty("--ar", fit(i.naturalWidth, i.naturalHeight).toFixed(3));
+    }, { once: true });
+  }
+}
+
+// ------------------------------------------------------------------ timeline scrubber
+
+const SCRUB = { months: [], starts: [], total: 0, current: null, drag: false, wake: null };
+
+function nextMonthKey(m) {
+  let [y, mo] = m.split("-").map(Number);
+  mo += 1;
+  if (mo > 12) { mo = 1; y += 1; }
+  return `${y}-${String(mo).padStart(2, "0")}`;
+}
+
+function hideScrubber() {
+  $("scrubber").hidden = true;
+  document.querySelector(".main").classList.remove("has-scrubber");
+  SCRUB.months = [];
+}
+
+function buildScrubber() {
+  const months = Object.keys(S.counts).sort().reverse();
+  const total = months.reduce((n, m) => n + S.counts[m], 0);
+  if (S.look || months.length < 3 || total < 60) { hideScrubber(); return; }
+  // Each month gets room by how many photos it has, plus a little so that small months can be reached.
+  const weights = months.map((m) => S.counts[m] + total * 0.004);
+  const sum = weights.reduce((a, b) => a + b, 0);
+  let acc = 0;
+  SCRUB.starts = weights.map((w) => { const at = acc / sum; acc += w; return at; });
+  SCRUB.months = months;
+  SCRUB.total = total;
+  $("scrubber").hidden = false;
+  document.querySelector(".main").classList.add("has-scrubber");
+  drawScrubMarks();
+  updateScrubPos();
+}
+
+function drawScrubMarks() {
+  const marks = $("scrub-marks");
+  marks.replaceChildren();
+  const h = $("scrubber").clientHeight || 1;
+  let lastY = -100;
+  let lastYear = null;
+  SCRUB.months.forEach((m, i) => {
+    const year = m.slice(0, 4);
+    if (year === lastYear) return;
+    lastYear = year;
+    const y = SCRUB.starts[i] * h;
+    if (y - lastY >= 18) {
+      const label = el("span", "scrub-year", year);
+      label.style.top = `${Math.max(7, y)}px`;
+      marks.append(label);
+      lastY = Math.max(7, y);
+    } else {
+      const dot = el("span", "scrub-dot");
+      dot.style.top = `${y}px`;
+      marks.append(dot);
+    }
+  });
+}
+
+function monthAtFraction(f) {
+  let i = 0;
+  while (i + 1 < SCRUB.months.length && SCRUB.starts[i + 1] <= f) i++;
+  return i;
+}
+
+function scrubLabel(m) { return monthLabel(m); }
+
+function setScrubPos(fraction) {
+  const h = $("scrubber").clientHeight;
+  $("scrub-pos").style.top = `${Math.min(h - 2, Math.max(2, fraction * h))}px`;
+}
+
+function updateScrubPos() {
+  if (!SCRUB.months.length || SCRUB.drag) return;
+  const sc = $("scroller");
+  const heads = $("grid").querySelectorAll(".month");
+  let cur = null, next = null;
+  for (const hd of heads) {
+    if (hd.offsetTop - sc.offsetTop <= sc.scrollTop + 40) cur = hd;
+    else { next = hd; break; }
+  }
+  if (!cur) cur = heads[0];
+  if (!cur) return;
+  const i = SCRUB.months.indexOf(cur.dataset.month);
+  if (i < 0) return;
+  const end = i + 1 < SCRUB.starts.length ? SCRUB.starts[i + 1] : 1;
+  const top = cur.offsetTop, bottom = next ? next.offsetTop : $("grid").offsetTop + $("grid").offsetHeight;
+  const within = bottom > top ? Math.min(1, Math.max(0, (sc.scrollTop + 40 - (top - sc.offsetTop)) / (bottom - top))) : 0;
+  const f = SCRUB.starts[i] + (end - SCRUB.starts[i]) * within;
+  setScrubPos(f);
+  SCRUB.current = i;
+  const sb = $("scrubber");
+  sb.setAttribute("aria-valuenow", String(Math.round(f * 100)));
+  sb.setAttribute("aria-valuetext", scrubLabel(SCRUB.months[i]));
+}
+
+function showScrubTip(i, y) {
+  const tip = $("scrub-tip");
+  tip.textContent = scrubLabel(SCRUB.months[i]);
+  tip.style.top = `${y}px`;
+  tip.hidden = false;
+}
+
+async function scrollToMonth(m) {
+  const gen = S.gen;
+  const find = () => $("grid").querySelector(`.month[data-month="${m}"]`);
+  let head = find();
+  if (!head && !S.jumpedTo && S.lastMonth && m < S.lastMonth) {
+    // Not far: load the pages in between rather than starting over at that month.
+    const between = SCRUB.months.filter((x) => x < S.lastMonth && x > m).reduce((n, x) => n + S.counts[x], 0);
+    if (between <= 1500) {
+      for (let tries = 0, waits = 0; !head && !S.done && tries < 20 && waits < 100 && S.gen === gen; ) {
+        if (S.loading) { waits++; await new Promise((r) => setTimeout(r, 50)); head = find(); continue; }   // a page is already loading
+        tries++;
+        await loadMore();
+        head = find();
+      }
+    }
+  }
+  if (S.gen !== gen) return;   // the page changed while we were loading
+  if (!head && m === SCRUB.months[0]) { $("scroller").scrollTop = 0; await reload(); return; }   // the newest: start over
+  if (!head) { await jumpToMonth(m); return; }
+  const sc = $("scroller");
+  sc.scrollTop = head.offsetTop - sc.offsetTop - ($("jumped").hidden ? 4 : 52);
+}
+
+/** Show the timeline from one month on (older photos load as you scroll; "Back to newest" returns). */
+async function jumpToMonth(m) {
+  S.gen++;
+  S.cursor = `${nextMonthKey(m)}|0`;
+  S.done = false; S.loading = false; S.loaded = false;
+  S.items = []; S.lastMonth = null; S.lastClicked = -1;
+  S.jumpedTo = m;
+  $("grid").replaceChildren();
+  const bar = $("jumped");
+  bar.replaceChildren(el("span", null, `Showing from ${monthLabel(m)}`), button("Back to newest", "btn small", () => {
+    $("scroller").scrollTop = 0;
+    reload();
+  }));
+  bar.hidden = false;
+  $("scroller").scrollTop = 0;
+  await loadMore();
+  updateScrubPos();
+}
+
+(() => {
+  const sb = $("scrubber");
+  const at = (e) => {
+    const r = sb.getBoundingClientRect();
+    const y = Math.min(r.height, Math.max(0, e.clientY - r.top));
+    return { y, i: monthAtFraction(y / r.height) };
+  };
+  sb.addEventListener("pointerdown", (e) => {
+    if (!SCRUB.months.length) return;
+    e.preventDefault();
+    sb.setPointerCapture(e.pointerId);
+    SCRUB.drag = true;
+    sb.classList.add("dragging");
+    const { y, i } = at(e);
+    setScrubPos(y / sb.clientHeight);
+    showScrubTip(i, y);
+  });
+  sb.addEventListener("pointermove", (e) => {
+    if (!SCRUB.months.length) return;
+    const { y, i } = at(e);
+    if (SCRUB.drag) setScrubPos(y / sb.clientHeight);
+    if (SCRUB.drag || e.pointerType === "mouse") showScrubTip(i, y);
+  });
+  const end = (e, go) => {
+    if (!SCRUB.drag) return;
+    SCRUB.drag = false;
+    sb.classList.remove("dragging");
+    $("scrub-tip").hidden = true;
+    if (go) scrollToMonth(SCRUB.months[at(e).i]).then(updateScrubPos);
+  };
+  sb.addEventListener("pointerup", (e) => end(e, true));
+  sb.addEventListener("pointercancel", (e) => end(e, false));
+  sb.addEventListener("pointerleave", () => { if (!SCRUB.drag) $("scrub-tip").hidden = true; });
+  sb.addEventListener("keydown", (e) => {
+    if (!SCRUB.months.length) return;
+    const i = SCRUB.current ?? 0;
+    let to = null;
+    if (e.key === "ArrowDown") to = i + 1;
+    else if (e.key === "ArrowUp") to = i - 1;
+    else if (e.key === "PageDown" || e.key === "PageUp") {
+      const year = SCRUB.months[i].slice(0, 4);
+      if (e.key === "PageDown") { to = SCRUB.months.findIndex((m) => m.slice(0, 4) < year); }
+      else { const newer = SCRUB.months.filter((m) => m.slice(0, 4) > year); to = newer.length ? SCRUB.months.indexOf(newer[newer.length - 1]) : 0; }
+      if (to < 0) to = SCRUB.months.length - 1;
+    } else if (e.key === "Home") to = 0;
+    else if (e.key === "End") to = SCRUB.months.length - 1;
+    if (to === null) return;
+    e.preventDefault();
+    to = Math.min(SCRUB.months.length - 1, Math.max(0, to));
+    SCRUB.current = to;
+    scrollToMonth(SCRUB.months[to]).then(updateScrubPos);
+  });
+  let ticking = false;
+  $("scroller").addEventListener("scroll", () => {
+    if (!SCRUB.months.length) return;
+    sb.classList.add("awake");
+    clearTimeout(SCRUB.wake);
+    SCRUB.wake = setTimeout(() => sb.classList.remove("awake"), 1500);
+    if (ticking) return;
+    ticking = true;
+    requestAnimationFrame(() => { ticking = false; updateScrubPos(); });
+  }, { passive: true });
+  new ResizeObserver(() => { if (SCRUB.months.length) { drawScrubMarks(); updateScrubPos(); } }).observe(sb);
+})();
+
+// ------------------------------------------------------------------ welcome (after creating the first account)
+
+async function welcomeDialog() {
+  let settings = null;
+  try { settings = await api("/api/settings"); } catch (_) { /* the steps that need it are skipped */ }
+  await modal({
+    title: "Welcome to Snapshots", ok: null, cancel: null, wide: true,
+    build: (body, ctl) => {
+      $("modal").classList.add("welcome");
+      const steps = ["library", "folders", ...(settings ? ["running"] : []), "family"];
+      let at = 0;
+      let poll = null;
+      const after = { action: null };
+      const bars = el("div", "welcome-steps");
+      steps.forEach(() => bars.append(el("span")));
+      const page = el("div");
+      const nav = el("div", "modal-foot");
+      body.append(bars, page);
+      const finish = () => { clearTimeout(poll); ctl.close(true); if (after.action) after.action(); };
+
+      const show = () => {
+        clearTimeout(poll);
+        [...bars.children].forEach((b, i) => b.classList.toggle("on", i <= at));
+        page.replaceChildren();
+        ctl.error("");
+        const step = steps[at];
+        if (step === "library") {
+          const st = S.status || {};
+          page.append(el("p", "welcome-big", "Snapshots is reading your photo folder:"), el("p", "muted", st.library_path || ""));
+          const count = el("div", "welcome-count", "");
+          const line = el("p", "muted", "");
+          page.append(count, line, el("p", "muted small",
+            "You can start looking right away: photos appear as they are found. Faces, places and search by what's in a photo are worked out in the background, which takes a while the first time."));
+          const tick = async () => {
+            try { await refreshStatus(); } catch (_) { /* keep the last numbers */ }
+            const s2 = S.status || {};
+            count.textContent = `${fmtInt((s2.photos || 0) + (s2.videos || 0))}`;
+            line.textContent = s2.scan && s2.scan.running ? "photos and videos found so far…" : "photos and videos in your library";
+            if (page.isConnected && $("modal").open && steps[at] === "library") poll = setTimeout(tick, 1500);
+          };
+          tick();
+        } else if (step === "folders") {
+          page.append(el("p", "welcome-big", "Are some photos somewhere else?"),
+            el("p", "muted", "Add more folders, like another drive or the folder your phone backs up to. Snapshots only reads them. You can add or remove folders later in Settings."));
+          const [wrap, input] = field("Folder", { placeholder: "D:\\Phone backup", maxLength: 1000 });
+          const added = el("div");
+          const add = button("Add folder", "btn", async () => {
+            const path = input.value.trim();
+            if (!path) { ctl.error("Type the folder's full path, like D:\\Phone backup."); return; }
+            try {
+              await post("/api/libraries", { path });
+              input.value = "";
+              ctl.error("");
+              added.append(el("p", "small", `✓ Added ${path}`));
+              refreshStatus();
+            } catch (err) { ctl.error(err.message); }
+          });
+          input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); add.click(); } });
+          page.append(wrap, add, added);
+        } else if (step === "running") {
+          page.append(el("p", "welcome-big", "Keep Snapshots running"));
+          const st = settings.startup || {};
+          if (st.supported) {
+            const choice = el("label", "welcome-choice");
+            const box = el("input");
+            box.type = "checkbox";
+            box.checked = !!st.enabled;
+            const text = el("span");
+            text.append(el("strong", null, "Start Snapshots when I sign in to Windows"),
+              el("span", "muted small", "It runs in the background with no window, so new photos are picked up and your phone can reach it."));
+            choice.append(box, text);
+            box.addEventListener("change", async () => {
+              try {
+                const r = await api("/api/settings/startup", { method: "PUT", json: { enabled: box.checked } });
+                box.checked = r.enabled;
+                ctl.error("");
+              } catch (err) { box.checked = !box.checked; ctl.error(err.message); }
+            });
+            page.append(choice);
+          }
+          const b = settings.backups || {};
+          page.append(el("p", "muted", b.hours > 0
+            ? `Your albums, people, tags and favourites are backed up every ${b.hours} hours to ${b.folder}.`
+            : "Automatic database backups are turned off in config.toml."),
+          el("p", "muted small", "Your photos themselves are your own files. To keep a second copy on another drive or in the cloud, use Settings › Backups › Offsite copy."));
+        } else {
+          page.append(el("p", "welcome-big", "You're all set"),
+            el("p", "muted", "Add accounts for the rest of the family (each person gets their own favourites and locked folder), or bring in photos from Immich or Google Photos."));
+          const links = el("div", "set-links");
+          links.append(
+            button("Add accounts…", "btn", () => { after.action = manageUsers; finish(); }),
+            button("Import from Immich or Google…", "btn", () => { after.action = importDialog; finish(); }),
+          );
+          page.append(links, el("p", "muted small", "Everything here is also in Settings."));
+        }
+        nav.replaceChildren();
+        const last = at === steps.length - 1;
+        const next = button(last ? "Start using Snapshots" : "Next", "btn primary", () => { if (last) finish(); else { at++; show(); } });
+        nav.append(next);
+        if (at > 0) nav.append(button("Back", "btn", () => { at--; show(); }));
+        if (!last) nav.append(button("Skip", "btn", finish));
+        next.focus();
+      };
+      // The dialog puts the body in place right after this; the buttons go under it.
+      queueMicrotask(() => { body.after(nav); show(); });
     },
   });
 }
@@ -4943,6 +5581,9 @@ async function manageSettings() {
   let startNote = null;
   try { startNote = sessionStorage.getItem("snapshots-startup-note"); sessionStorage.removeItem("snapshots-startup-note"); } catch (_) { /* fine */ }
   if (startNote) flashNote(startNote);
+  let welcome = null;
+  try { welcome = sessionStorage.getItem("snapshots-welcome"); sessionStorage.removeItem("snapshots-welcome"); } catch (_) { /* fine */ }
+  if (welcome && S.me && S.me.is_admin) welcomeDialog();
   if (left !== null) {
     flashNote(+left > 0 ? `You used a recovery code: ${plural(+left, "code")} left. Make new ones in Login security if you lost your phone.`
       : "You used your last recovery code. Make new ones now in Login security.");
