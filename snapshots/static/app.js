@@ -604,6 +604,7 @@ async function renderPersonHead(id) {
   wrap.append(input);
   headRow(wrap, plural(person.photos, "photo"), [
     button("Same person as…", "btn small", () => mergePerson(person)),
+    button("Check faces", "btn small", () => checkFaces(person)),
     button("Smart album", "btn small", () => smartAlbumDialog(null, { people: [person.id] }, person.name || "")),
     button(person.hidden ? "Show in People" : "Hide", "btn small", async () => {
       try {
@@ -617,6 +618,38 @@ async function renderPersonHead(id) {
       if (strip && S.route.person === id) $("page-head").append(strip);
     });
   }
+}
+
+// The faces least like the rest of this person first: where a face of someone else is most likely to be.
+async function checkFaces(person) {
+  let data;
+  try { data = await api(`/api/people/${person.id}/faces?limit=60`); } catch (err) { flashNote(err.message); return; }
+  if (!data.faces.length) { flashNote("No faces to check."); return; }
+  const who = person.name || "this person";
+  let removed = 0;
+  await modal({
+    title: `Check ${person.name ? person.name + "'s" : "these"} faces`, ok: null, cancel: "Done", wide: true,
+    build: (body) => {
+      body.append(el("p", "muted", `The faces least like the rest come first. Take out any that aren't ${who}.` +
+        (data.total > data.faces.length ? ` Showing ${data.faces.length} of ${data.total}.` : "")));
+      const grid = el("div", "face-check");
+      for (const f of data.faces) {
+        const cell = el("div", "face-check-item");
+        const pic = img(faceUrl(f.face_id), "", "avatar");
+        pic.title = "Open the photo";
+        pic.addEventListener("click", () => openPhoto(f.asset_id));
+        const out = button(`Not ${person.name || "them"}`, "btn small", async () => {
+          out.disabled = true;
+          try { await post(`/api/faces/${f.face_id}/unassign`); cell.classList.add("gone"); out.textContent = "Taken out"; removed++; }
+          catch (err) { out.disabled = false; flashNote(err.message); }
+        });
+        cell.append(pic, out);
+        grid.append(cell);
+      }
+      body.append(grid);
+    },
+  });
+  if (removed) { flashNote(`${plural(removed, "face")} taken out`); renderHead(); }
 }
 
 async function mergePerson(person) {

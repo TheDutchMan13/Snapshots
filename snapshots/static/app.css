@@ -1160,3 +1160,9 @@ a.bar-row:hover .bar-name { color: var(--accent-ink); text-decoration: underline
 .suggested .section-title { margin-top: 0; }
 .suggested .card { display: flex; flex-direction: column; }
 .suggested .card .btn { margin-top: 6px; align-self: flex-start; }
+
+/* Check faces: the least alike first, each with "Not them" */
+.face-check { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 12px; max-height: 60vh; overflow-y: auto; margin: 8px 0; }
+.face-check-item { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+.face-check-item .avatar { width: 88px; height: 88px; cursor: pointer; }
+.face-check-item.gone .avatar { opacity: 0.3; }

@@ -58,11 +58,16 @@ def _faces_db(tmp_path, groups):
     conn = db.connect(path)
     conn.execute("INSERT INTO assets (id, path, filename, kind, size, mtime_ns, sha1, taken_at, added_at)"
                  " VALUES (1, 'a', 'a', 'photo', 1, 1, 'x', '2020-01-01T00:00:00', 'x')")
+    photo = 10_000          # each face in a photo of its own: people seen together in one photo never merge
     for pid, (name, hidden, embs) in groups.items():
         conn.execute("INSERT INTO people (id, name, hidden, created_at) VALUES (?, ?, ?, 'x')", (pid, name, hidden))
         for e in embs:
+            photo += 1
+            conn.execute("INSERT INTO assets (id, path, filename, kind, size, mtime_ns, sha1, taken_at, added_at)"
+                         " VALUES (?, ?, ?, 'photo', 1, 1, ?, '2020-01-01T00:00:00', 'x')",
+                         (photo, f"f{photo}", f"f{photo}", f"s{photo}"))
             conn.execute("INSERT INTO faces (asset_id, person_id, x, y, w, h, score, embedding, created_at)"
-                         " VALUES (1, ?, 0, 0, 1, 1, 1, ?, 'x')", (pid, e.astype(np.float32).tobytes()))
+                         " VALUES (?, ?, 0, 0, 1, 1, 1, ?, 'x')", (photo, pid, e.astype(np.float32).tobytes()))
     conn.commit()
     return conn
 

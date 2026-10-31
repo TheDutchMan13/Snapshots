@@ -366,6 +366,17 @@ MIGRATIONS = [
     CREATE TRIGGER sort_text AFTER UPDATE OF ocr_text ON assets WHEN coalesce(NEW.ocr_text, '') != ''
         BEGIN UPDATE assets SET sort_done = 0 WHERE id = NEW.id; END;
     """,
+    # 10 - version 0.11: how much each face can be trusted when grouping (size and angle)
+    """
+    ALTER TABLE faces ADD COLUMN quality REAL;              -- 0..1: small or turned-away faces are low
+    -- Faces found before: from their size in the photo the detector saw (longest side at most 1920)
+    -- and how much they face the camera (unknown until measured: taken as fairly frontal).
+    UPDATE faces SET quality = (
+        SELECT round(0.5 * max(0.0, min(1.0, (min(faces.w * a.width, faces.h * a.height)
+                                              * min(1.0, 1920.0 / max(a.width, a.height)) - 40) / 60.0))
+                     + 0.5 * coalesce(faces.frontal, 0.7), 3)
+        FROM assets a WHERE a.id = faces.asset_id AND a.width > 0 AND a.height > 0);
+    """,
 ]
 SCHEMA_VERSION = len(MIGRATIONS)
 

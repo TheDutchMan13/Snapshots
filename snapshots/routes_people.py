@@ -228,6 +228,28 @@ def router(ctx) -> APIRouter:
         worker.faces.invalidate()
         return result
 
+    @r.get("/api/people/{person_id}/faces")
+    def person_faces(person_id: int, request: Request, limit: int = 60):
+        """This person's faces, the least like the rest first: where a wrong face is most likely to be."""
+        current_user(request)
+        import numpy as np
+
+        with db.session(cfg.db_path) as conn:
+            get_person(conn, person_id)
+            rows = conn.execute(
+                "SELECT f.id, f.asset_id, f.embedding, f.quality FROM faces f JOIN assets a ON a.id = f.asset_id"
+                " WHERE f.person_id = ? AND a.trashed_at IS NULL AND a.locked_by IS NULL", (person_id,)).fetchall()
+        if not rows:
+            return {"faces": [], "total": 0}
+        V = np.stack([np.frombuffer(r["embedding"], dtype=np.float32) for r in rows])
+        w = np.array([faces.weight_of(r["quality"]) for r in rows], dtype=np.float32)
+        rest = (V * w[:, None]).sum(axis=0)[None, :] - V * w[:, None]
+        norms = np.linalg.norm(rest, axis=1)
+        alike = np.where(norms > 0, (rest * V).sum(axis=1) / np.maximum(norms, 1e-9), 1.0)
+        order = np.argsort(alike, kind="stable")[:max(1, min(limit, 200))]
+        return {"faces": [{"face_id": rows[k]["id"], "asset_id": rows[k]["asset_id"], "alike": round(float(alike[k]), 3)}
+                          for k in order], "total": len(rows)}
+
     @r.post("/api/faces/{face_id}/unassign")
     def unassign(face_id: int, request: Request):
         """'This is not them': take one face out of its person."""
