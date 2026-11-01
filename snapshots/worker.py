@@ -21,6 +21,9 @@ from .config import Config
 from .analysis import QualityJob
 from .backup import BackupJob
 from .clipsearch import ClipJob
+from .colors import ColorJob
+from .sideways import TurnJob
+from .pets import PetsJob
 from .dateguess import DateGuessJob
 from .faces import FacesJob
 from .xmp import XmpJob
@@ -49,6 +52,9 @@ class Worker:
         self.clip = ClipJob(cfg)
         self.ocr = OcrJob(cfg)
         self.sort = SortJob(cfg, self.clip)
+        self.colors = ColorJob(cfg)
+        self.turns = TurnJob(cfg, self.clip)
+        self.pets = PetsJob(cfg, self.clip)
         self.backup = BackupJob(cfg)
         self.offsite = OffsiteJob(cfg)
         self._wake = threading.Event()
@@ -110,6 +116,7 @@ class Worker:
             "content": dict(self.clip.state, enabled=self.cfg.smart_search),
             "text": dict(self.ocr.state, enabled=self.cfg.text_search),
             "sorting": dict(self.sort.state, enabled=True),
+            "pets": dict(self.pets.state, enabled=self.cfg.find_pets and self.cfg.smart_search),
             "backup": dict(self.backup.state, enabled=bool(self.cfg.backup_hours and self.cfg.backup_hours > 0)),
             "offsite": dict(self.offsite.state, enabled=self.offsite.enabled()),
             "xmp": dict(self.xmp.state, enabled=self.cfg.xmp_sidecars),
@@ -131,6 +138,9 @@ class Worker:
             (self.clip, self.cfg.smart_search),
             (self.ocr, self.cfg.text_search),
             (self.sort, True),
+            (self.colors, True),
+            (self.pets, self.cfg.find_pets and self.cfg.smart_search),
+            (self.turns, self.cfg.find_sideways and self.cfg.smart_search),
         ]
 
     # ------------------------------------------------------------ internals

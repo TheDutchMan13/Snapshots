@@ -211,6 +211,7 @@ def index_file(cfg: Config, conn, rel: str, full: Path, digest: str | None = Non
         for (owner,) in conn.execute("SELECT id FROM assets WHERE live_video = ?", (asset_id,)).fetchall():
             _unlink(cfg.motion_path(owner))  # a Live Photo's clip changed: its playable copy is stale
         conn.execute("DELETE FROM clip_vectors WHERE asset_id = ?", (asset_id,))
+        conn.execute("DELETE FROM pet_sightings WHERE asset_id = ?", (asset_id,))
         conn.execute("DELETE FROM not_duplicates WHERE a = ? OR b = ?", (asset_id, asset_id))
         conn.execute(
             """
@@ -221,6 +222,7 @@ def index_file(cfg: Config, conn, rel: str, full: Path, digest: str | None = Non
                 city = NULL, state = NULL, country = NULL, has_thumb = 0,
                 dhash = NULL, sharpness = NULL, brightness = NULL, highlights = NULL, quality_done = 0, keep_quality = 0,
                 clip_done = 0, ocr_done = 0, ocr_text = NULL, sort_done = 0, beauty = NULL, faceq_done = 0,
+                colors = NULL, colors_done = 0, turn = NULL, turn_done = 0, pets_done = 0,
                 trashed_at = NULL   -- a different picture now: never inherit the old one's trash state
             WHERE id = ?
             """,

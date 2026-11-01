@@ -17,6 +17,10 @@ class Ids(BaseModel):
     ids: list[int] = Field(min_length=1, max_length=5000)
 
 
+class IdsBody(BaseModel):
+    ids: list[int] = Field(min_length=1, max_length=5000)
+
+
 class CategoryBody(BaseModel):
     ids: list[int] = Field(min_length=1, max_length=5000)
     category: str = Field(pattern="^(photo|screenshot|document|receipt)$")
@@ -158,7 +162,10 @@ def router(ctx) -> APIRouter:
                 covers[cat] = row[0] if row else None
             versions = db.versions(conn, [c for c in covers.values() if c])
             pending = worker.sort.pending(conn)
+            sideways = conn.execute(f"SELECT COUNT(*) FROM assets a WHERE a.turn IS NOT NULL AND a.trashed_at IS NULL"
+                                    f" AND {db.NOT_LOCKED}").fetchone()[0]
         return {
+            "sideways": sideways,
             "categories": [{"category": c, "count": counts.get(c, 0), "cover": covers[c],
                             "cover_v": versions.get(covers[c])} for c in sorting.CATEGORIES],
             "highlights": highlights, "pending": pending, "hide_clutter": cfg.hide_clutter,
@@ -177,6 +184,18 @@ def router(ctx) -> APIRouter:
                 conn.execute(f"UPDATE assets SET category = ?, category_hand = 1,"
                              f" beauty = CASE WHEN ? = 'photo' THEN beauty END"
                              f" WHERE id IN ({','.join('?' * len(chunk))})", [body.category, body.category] + chunk)
+        return {"updated": len(ids)}
+
+    @r.post("/api/sideways/dismiss")
+    def not_sideways(body: IdsBody, request: Request):
+        """'This one is the right way up': stop suggesting a turn for these photos."""
+        current_user(request)
+        with db.session(cfg.db_path) as conn:
+            ids = db.open_ids(conn, body.ids)
+            for start in range(0, len(ids), 900):
+                chunk = ids[start:start + 900]
+                conn.execute(f"UPDATE assets SET turn = NULL, turn_done = 1 WHERE id IN ({','.join('?' * len(chunk))})",
+                             chunk)
         return {"updated": len(ids)}
 
     # ------------------------------------------------------------ suggested albums

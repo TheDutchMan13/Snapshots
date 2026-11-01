@@ -505,15 +505,17 @@ def find_events(rows: list[dict], gap_hours: float = 4, jump_km: float = 30, tri
 
     1. "Moments": photos follow on from each other unless more than gap_hours pass, or the place jumps
        more than jump_km.
-    2. Home is the town most photos were taken in. Moments away from home that follow each other within
-       trip_gap_hours (in the same country) become one trip.
+    2. Home is the town photos were taken in on the most different days (not the most photos: one big
+       holiday can have more photos than a year at home), worked out for each year, so moving house moves
+       home too. Moments away from home that follow each other within trip_gap_hours (in the same country)
+       become one trip.
     3. At home, the moments of one day become one event.
     Events with fewer than min_items photos are left out.
     """
     if not rows:
         return []
-    towns = Counter((r["city"], r["country"]) for r in rows if r["city"])
-    home = towns.most_common(1)[0][0] if towns else None
+    homes = homes_by_year(rows)
+    home = homes.get(None)                       # over all the years: for naming places
     home_states = Counter(r["state"] or r["country"] for r in rows if home and (r["city"], r["country"]) == home)
     home_region = home_states.most_common(1)[0][0] if home_states else None
 
@@ -534,7 +536,8 @@ def find_events(rows: list[dict], gap_hours: float = 4, jump_km: float = 30, tri
     for m in moments:
         known = [(r["city"], r["country"]) for r in m.rows if r["city"]]
         if known:
-            m.away = home is not None and Counter(known).most_common(1)[0][0] != home
+            here = homes.get(m.rows[0]["taken_at"][:4], home)
+            m.away = here is not None and Counter(known).most_common(1)[0][0] != here
 
     def country(m):
         c = Counter(r["country"] for r in m.rows if r["country"])
@@ -575,6 +578,32 @@ def find_events(rows: list[dict], gap_hours: float = 4, jump_km: float = 30, tri
             "cover": _cover(items),
         })
     out.reverse()
+    return out
+
+
+HOME_MIN_DAYS = 5   # a year needs photos in a town on this many days to have a home of its own
+
+
+def homes_by_year(rows: list[dict]) -> dict:
+    """{year: (city, country)} where photos were taken on the most different days that year, and
+    {None: ...} the same over all years. A year with too few days of photos uses the overall home."""
+    days: dict = {}
+    for r in rows:
+        if r["city"]:
+            days.setdefault((r["city"], r["country"]), set()).add(r["taken_at"][:10])
+    if not days:
+        return {}
+    out: dict = {None: max(days, key=lambda t: (len(days[t]), t[0] or "", t[1] or ""))}
+    by_year: dict = {}
+    for town, ds in days.items():
+        for d in ds:
+            by_year.setdefault(d[:4], Counter())[town] += 1
+    for year, c in by_year.items():
+        town, n = max(c.items(), key=lambda x: (x[1], x[0][0] or "", x[0][1] or ""))
+        # A long holiday doesn't move home: another town takes over only with clearly more days than
+        # the usual home that year (after a move, the old home has few or none).
+        usual = c.get(out[None], 0)
+        out[year] = town if n >= HOME_MIN_DAYS and n > 1.5 * usual else out[None]
     return out
 
 

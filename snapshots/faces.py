@@ -644,6 +644,30 @@ def _group_sums(conn):
     return sums, counts
 
 
+YEARS_APART_BONUS = 0.05   # how much more alike two groups count when one comes after the other in time
+YEARS_APART_MAX = 3        # ... with at most this many years between them
+
+
+def _spans(conn) -> dict[int, tuple[str, str]]:
+    """{person: (first, last date)} of each person's photos."""
+    return {r[0]: (r[1], r[2]) for r in conn.execute(
+        "SELECT f.person_id, min(a.taken_at), max(a.taken_at) FROM faces f JOIN assets a ON a.id = f.asset_id"
+        " WHERE f.person_id IS NOT NULL AND a.trashed_at IS NULL GROUP BY f.person_id")}
+
+
+def years_apart_bonus(a: tuple[str, str] | None, b: tuple[str, str] | None) -> float:
+    """Faces change as people grow up: a child's photos at 3 and at 8 can end up in two groups, one after
+    the other in time. Two groups whose dates don't overlap, but follow on within a few years, are more
+    likely one person than their faces alone say."""
+    if not a or not b:
+        return 0.0
+    first, second = (a, b) if a[0] <= b[0] else (b, a)
+    if first[1] >= second[0]:
+        return 0.0                                     # at the same time: two people, or just a split
+    gap = int(second[0][:4]) - int(first[1][:4])
+    return YEARS_APART_BONUS if gap <= YEARS_APART_MAX else 0.0
+
+
 def suggestions(conn, min_faces: int, threshold: float, limit: int = 200) -> list[dict]:
     """People who may be the same person, most alike first. Two kinds:
     * "merge": two listed people (named, or with at least min_faces faces) that look alike;
@@ -655,7 +679,9 @@ def suggestions(conn, min_faces: int, threshold: float, limit: int = 200) -> lis
     if len(sums) < 2:
         return []
     names = {r[0]: r[1] for r in conn.execute("SELECT id, name FROM people WHERE hidden = 0")}
-    apart = {(a, b) for a, b in conn.execute("SELECT a, b FROM people_not_same")}
+    # People someone said are different, and people seen side by side in one photo, are never asked about.
+    apart = {(a, b) for a, b in conn.execute("SELECT a, b FROM people_not_same")} | set(seen_together(conn))
+    spans = _spans(conn)
     listed = [i for i in sums if names.get(i) or counts[i] >= min_faces]
     small = [i for i in sums if not names.get(i) and counts[i] < min_faces]
     if not listed:
@@ -676,7 +702,7 @@ def suggestions(conn, min_faces: int, threshold: float, limit: int = 200) -> lis
             both_named = bool(names.get(a)) and bool(names.get(b))
             if both_named and not same_name(a, b):
                 continue
-            score = float(link[x, y])
+            score = float(link[x, y]) + years_apart_bonus(spans.get(a), spans.get(b))
             if score >= threshold or same_name(a, b):
                 out.append({"kind": "merge", "a": a, "b": b, "score": round(score, 3), "same_name": same_name(a, b)})
     for start in range(0, len(small), 2000):
@@ -684,6 +710,9 @@ def suggestions(conn, min_faces: int, threshold: float, limit: int = 200) -> lis
         U = np.array([sums[i] for i in chunk], dtype=np.float32)
         un = np.array([counts[i] for i in chunk], dtype=np.float32)
         sim = (U @ L.T) / np.outer(un, ln)
+        for k, pid in enumerate(chunk):
+            for j in np.nonzero(sim[k] >= threshold - YEARS_APART_BONUS)[0]:
+                sim[k, j] += years_apart_bonus(spans.get(pid), spans.get(listed[int(j)]))
         best = sim.argmax(axis=1)
         for k, pid in enumerate(chunk):
             j = int(best[k])

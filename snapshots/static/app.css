@@ -1170,3 +1170,6 @@ a.bar-row:hover .bar-name { color: var(--accent-ink); text-decoration: underline
 .face-check-item { display: flex; flex-direction: column; align-items: center; gap: 6px; }
 .face-check-item .avatar { width: 88px; height: 88px; cursor: pointer; }
 .face-check-item.gone .avatar { opacity: 0.3; }
+
+/* More like this: the photo it started from */
+.avatar.square { border-radius: 8px; }

@@ -232,6 +232,9 @@ function parseRoute() {
       if (S.status && S.status.locked && S.status.locked.open) return { name: "locked", view: "grid", filter: { locked: "true" }, locked: true };
       return { name: "locked", view: "locked" };
     case "activity": return { name: "activity", view: "activity" };
+    case "like":
+      if (/^\d+$/.test(parts[1] || "")) return { name: "like", view: "grid", filter: { like: parts[1] }, like: +parts[1] };
+      return { name: "all", view: "grid", filter: TIMELINE };
     case "highlights": return { name: "highlights", view: "grid", filter: { highlights: "true", archived: "hide", stacks: "true" }, highlights: true };
     case "sorted":
       if (SORTED[parts[1]]) return { name: "cleanup", view: "grid", filter: { category: parts[1] }, sorted: parts[1] };
@@ -259,6 +262,7 @@ function parseRoute() {
       return { name: "map", view: "map" };
     case "cleanup":
       if (parts[1] === "quality") return { name: "cleanup", view: "grid", filter: { quality: "true" }, quality: true };
+      if (parts[1] === "sideways") return { name: "cleanup", view: "grid", filter: { turned: "true" }, sideways: true };
       if (parts[1] === "storage") return { name: "storage", view: "storage" };   // older links
       if (parts[1] === "health") return { name: "health", view: "health" };
       return { name: "cleanup", view: "cleanup" };
@@ -271,6 +275,9 @@ function parseRoute() {
     case "people":
       if (parts[1] && /^\d+$/.test(parts[1])) return { name: "people", view: "grid", filter: { person: parts[1] }, person: +parts[1] };
       return { name: "people", view: "people", hidden: params.get("hidden") === "1" };
+    case "pets":
+      if (parts[1] && /^\d+$/.test(parts[1])) return { name: "pets", view: "grid", filter: { pet: parts[1] }, pet: +parts[1] };
+      return { name: "pets", view: "pets", hidden: params.get("hidden") === "1" };
     case "places":
       if (parts.length > 1) {
         const filter = { country: un(parts[1]) };
@@ -294,7 +301,7 @@ let keepSearch = false;   // true while the search box itself caused a change of
 
 const ROUTE_TITLES = {
   all: "Snapshots", photos: "Photos", videos: "Videos", favorites: "Favourites", activity: "Activity", people: "People",
-  places: "Places", map: "Map", events: "Events", review: "Year in review", highlights: "Highlights", albums: "Albums", tags: "Tags", folders: "Folders",
+  places: "Places", map: "Map", events: "Events", review: "Year in review", highlights: "Highlights", like: "More like this", pets: "Pets", albums: "Albums", tags: "Tags", folders: "Folders",
   cleanup: "Clean up", storage: "Storage", health: "Library health", archive: "Archive", locked: "Locked", trash: "Trash",
   settings: "Settings",
 };
@@ -314,7 +321,7 @@ async function render() {
   S.jumpedTo = null;
   $("jumped").hidden = true;
   if (!keepSearch) { S.q = ""; $("search").value = ""; }
-  S.look = null;
+  S.look = S.route.like ? "like" : null;      // More like this: most alike first, no months
   keepSearch = false;
   if (!S.q) topBar.classList.remove("searching");
   markTab();
@@ -348,6 +355,8 @@ async function render() {
       await renderAlbums();
     } else if (S.route.view === "people") {
       await renderPeople();
+    } else if (S.route.view === "pets") {
+      await renderPets();
     } else if (S.route.view === "places") {
       await renderPlaces();
     } else if (S.route.view === "events") {
@@ -419,9 +428,33 @@ async function renderHead() {
     await renderEventHead(r.event);
   } else if (r.quality) {
     renderQualityHead();
+  } else if (r.sideways) {
+    headRow("Sideways photos", null, [
+      button("Turn them all upright", "btn small", async () => {
+        const ok = await confirmBox("Turn every photo here upright?", "Each is turned the way it seems to belong. Only a note of the turn is kept: the files don't change, and you can undo it in Edit.", "Turn them");
+        if (!ok) return;
+        try {
+          const all = [];
+          let cursor = "";
+          for (;;) {
+            const page = await api(`/api/assets?turned=true&limit=500${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
+            all.push(...page.items);
+            if (!page.next) break;
+            cursor = page.next;
+          }
+          await turnUpright(all);
+        } catch (err) { flashNote(err.message); }
+      }),
+      link("Back to Clean up", "#/cleanup", "btn small"),
+    ], "These look like they are on their side or upside down, judged by what's in them. Photos with faces aren't listed: faces show which way is up. Select a photo and press Turn upright, or Not sideways if it's fine.");
+  } else if (r.like) {
+    const box = el("div", "person-title");
+    box.append(img(thumbUrl(r.like), "", "avatar small square"), el("h1", null, "More like this"));
+    headRow(box, null, [button("Back", "btn small", () => history.back())],
+      "Photos that look most like this one, most alike first. Found by what they show, so it's approximate.");
   } else if (r.highlights) {
     headRow("Highlights", null, [],
-      "Your best-looking photos, about one in 25, picked by what they show and how well they are taken. It's a rough judgement: favourites, stars and picks are yours to set.");
+      "Your best-looking photos, picked by what they show and how well they are taken: the best of each moment (no near-copies), and at most five a day. It's a rough judgement: favourites, stars and picks are yours to set.");
   } else if (r.sorted) {
     const k = SORTED[r.sorted];
     headRow(k.title, null, [link("Back to Clean up", "#/cleanup", "btn small")],
@@ -453,6 +486,8 @@ async function renderHead() {
     ], note);
   } else if (r.person) {
     await renderPersonHead(r.person);
+  } else if (r.pet) {
+    await renderPetHead(r.pet);
   } else if (r.place) {
     headRow(placeName(r.place) || "Unknown place", null, [link("All places", "#/places", "btn small")]);
   } else if (r.name === "trash") {
@@ -503,8 +538,14 @@ async function renderSearchHead() {
     else if (S.look === true) note = "Best matches first. Matching by content is approximate.";
   }
   const save = button("Save as smart album", "btn small", () =>
-    smartAlbumDialog(null, S.look === true || (S.look === "mix" && !sum.words) ? { look: q } : { words: q }, q));
-  headRow(el("h1", null, `“${q}”`), null, [tabs, save], note);
+    smartAlbumDialog(null, S.look === true || (S.look === "mix" && !sum.words) ? { look: sum.q || q } : { words: sum.q || q }, sum.q || q));
+  // A misspelled word was corrected (spelling.py): say what was searched for.
+  const title = sum.typed ? `“${sum.q}”` : `“${q}”`;
+  const fixed = sum.typed ? `Showing results for “${sum.q}” (you typed “${sum.typed}”).` : "";
+  const asTyped = sum.typed ? [button(`Search for “${sum.typed}”`, "btn small", () => {
+    S.exact = S.q; S.look = null; reload(); renderHead();
+  })] : [];
+  headRow(el("h1", null, title), null, [tabs, ...asTyped, save], [fixed, note].filter(Boolean).join(" ") || undefined);
 }
 
 async function renderEventHead(ev) {
@@ -548,6 +589,7 @@ function renderQualityHead() {
 
 /** How search results are ranked: by content (look), words and content together (mix), or by date. */
 function rankParam(p) {
+  if (S.look === "like") return;          // the like= in the route's filter says it
   if (S.look === "mix") p.set("mix", "true");
   else if (S.look) p.set("look", "true");
 }
@@ -688,6 +730,7 @@ function filterParams(extra) {
     p.set(k, v);
   }
   if (S.q) p.set("q", S.q);
+  if (S.q && S.exact === S.q) p.set("exact", "true");     // "search for what I typed" (no spelling fixes)
   if (S.marks.rating) p.set("rating", S.marks.rating);
   if (S.marks.label) p.set("label", S.marks.label);
   if (S.marks.flag) p.set("flag", S.marks.flag);
@@ -850,6 +893,7 @@ function updateEmpty() {
   if (S.items.length > 0 || !S.loaded) { $("empty").hidden = true; return; }
   const st = S.status;
   const r = S.route;
+  if (r.like) { showEmpty("Nothing else looks like it", "No other photo looks much like this one, or what's in it hasn't been read yet."); return; }
   if (S.q && S.look === true) showEmpty("Nothing looks like that", S.search && !S.search.content_ready
     ? "Search by what's in the photo is not ready yet." : "Try other words, like “dog”, “snow” or “birthday cake”.");
   else if (S.q) showEmpty("No matches", S.search && S.search.content
@@ -948,6 +992,21 @@ function updateSelection() {
     actions.append(button(`Not a ${SORTED[r.sorted].one}`, "btn", async () => {
       const chosen = ids();
       try { await post("/api/assets/category", { ids: chosen, category: "photo" }); removeItems(chosen); flashNote(`${plural(chosen.length, "item")} moved back to the photos`); }
+      catch (err) { flashNote(err.message); }
+    }));
+  }
+  if (r.pet) {
+    actions.append(button("Not this pet", "btn", async () => {
+      const chosen = ids();
+      try { await post(`/api/pets/${r.pet}/remove`, { ids: chosen }); removeItems(chosen); flashNote(`${plural(chosen.length, "photo")} taken out`); }
+      catch (err) { flashNote(err.message); }
+    }));
+  }
+  if (r.sideways) {
+    actions.append(button("Turn upright", "btn", () => turnUpright(ids().map((id) => S.items.find((it) => it.id === id)).filter(Boolean))));
+    actions.append(button("Not sideways", "btn", async () => {
+      const chosen = ids();
+      try { await post("/api/sideways/dismiss", { ids: chosen }); removeItems(chosen); flashNote(`${plural(chosen.length, "photo")} left as they are`); }
       catch (err) { flashNote(err.message); }
     }));
   }
@@ -1681,6 +1740,86 @@ async function renderPeople() {
   if (!hidden) suggestionStrip(null).then((strip) => { if (strip && coll.isConnected) coll.prepend(strip); });
 }
 
+// ------------------------------------------------------------------ pets (dogs and cats, grouped like people)
+
+const petUrl = (p) => `/api/pets/${p.id}/thumb?c=${p.cover || ""}`;
+const petName = (p) => p.name || (p.species === "cat" ? "A cat" : "A dog");
+
+async function renderPets() {
+  const hidden = S.route.hidden;
+  const data = await api(`/api/pets${hidden ? "?hidden=true" : ""}`);
+  headRow(hidden ? "Hidden pets" : "Pets", null, hidden ? [link("Back to pets", "#/pets", "btn small")] : [link("Hidden", "#/pets?hidden=1", "btn small")],
+    "Dogs and cats, found by what's in your photos, with the same animal grouped together. Name them, join two groups of the same pet, or hide ones you don't want here.");
+  if (!data.pets.length) {
+    showEmpty(hidden ? "No hidden pets" : "No pets yet", !data.enabled
+      ? "Finding pets needs search by what's in the photo (smart_search) to be on."
+      : `Pets show up here once the same dog or cat is in ${3} or more photos.`);
+    return;
+  }
+  const g = el("div", "people");
+  for (const p of data.pets) {
+    const cell = el("div", "person-cell");
+    const a = link("", `#/pets/${p.id}`, "person");
+    a.append(p.cover ? img(petUrl(p), "", "avatar") : el("span", "avatar"));
+    a.append(p.name ? el("span", null, p.name) : el("span", "unnamed", `Name this ${p.species}`));
+    a.append(el("small", null, plural(p.photos, "photo")));
+    const toggle = button(hidden ? "Show" : "×", hidden ? "person-hide show" : "person-hide", async () => {
+      try { await patch(`/api/pets/${p.id}`, { hidden: !hidden }); render(); } catch (err) { flashNote(err.message); }
+    });
+    toggle.title = hidden ? `Show ${petName(p)} in Pets` : `Hide ${petName(p)} from Pets`;
+    toggle.setAttribute("aria-label", toggle.title);
+    cell.append(a, toggle);
+    g.append(cell);
+  }
+  $("collection").replaceChildren(g);
+}
+
+async function renderPetHead(id) {
+  const pet = await api(`/api/pets/${id}`);
+  const wrap = el("div", "person-title");
+  if (pet.cover) wrap.append(img(petUrl(pet), "", "avatar small"));
+  const input = el("input", "name-input");
+  input.value = pet.name || "";
+  input.placeholder = `Name this ${pet.species}`;
+  input.setAttribute("aria-label", "Name");
+  input.maxLength = 200;
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); input.blur(); } });
+  input.addEventListener("change", async () => {
+    const name = input.value.trim();
+    try { await patch(`/api/pets/${pet.id}`, name ? { name } : { clear_name: true }); flashNote(name ? `Named ${name}` : "Name removed"); }
+    catch (err) { flashNote(err.message); }
+  });
+  wrap.append(input);
+  headRow(wrap, plural(pet.photos, "photo"), [
+    button("Same pet as…", "btn small", async () => {
+      const others = (await api("/api/pets")).pets.filter((p) => p.id !== pet.id);
+      if (!others.length) { flashNote("There is no other pet to join yet."); return; }
+      const target = await modal({
+        title: "Which pet is this the same as?", ok: null, cancel: "Cancel",
+        build: (body, ctl) => {
+          const list = el("div", "pick-list");
+          for (const p of others) {
+            const b = button("", "pick", () => ctl.close(p));
+            b.append(p.cover ? img(petUrl(p), "", "avatar small") : el("span", "pick-ph"));
+            const t = el("span", null, petName(p));
+            t.append(el("small", null, plural(p.photos, "photo")));
+            b.append(t);
+            list.append(b);
+          }
+          body.append(list);
+        },
+      });
+      if (!target) return;
+      try { await post(`/api/pets/${pet.id}/merge`, { into: target.id }); location.hash = `#/pets/${target.id}`; }
+      catch (err) { flashNote(err.message); }
+    }),
+    button(pet.hidden ? "Show in Pets" : "Hide", "btn small", async () => {
+      try { await patch(`/api/pets/${pet.id}`, { hidden: !pet.hidden }); if (!pet.hidden) location.hash = "#/pets"; else renderHead(); }
+      catch (err) { flashNote(err.message); }
+    }),
+  ], "A photo that isn't this pet? Select it and press Not this pet.");
+}
+
 /** "Same person?" questions: for everyone (person = null) or for one person. Null when there are none. */
 async function suggestionStrip(person) {
   let data;
@@ -1798,10 +1937,25 @@ function eventDates(e) {
 }
 const eventHash = (e) => `#/events/${encodeURIComponent(e.start)}/${encodeURIComponent(e.end)}`;
 
+let eventKind = "all";      // Events page: all, trips (away from home) or days out
+
 async function renderEvents() {
-  const { events } = await api("/api/events");
-  headRow("Events", events.length ? plural(events.length, "event") : null, [],
-    "Days out and trips, found from when and where photos were taken.");
+  const { events: all } = await api("/api/events");
+  const trips = all.filter((e) => e.kind === "trip").length;
+  const tabs = el("div", "tabs");
+  tabs.setAttribute("role", "group");
+  tabs.setAttribute("aria-label", "Show");
+  const tab = (label, count, kind) => {
+    const b = button("", "tab", () => { if (eventKind !== kind) { eventKind = kind; renderEvents(); } });
+    b.append(el("span", null, label), el("span", "count", fmtInt(count)));
+    b.setAttribute("aria-pressed", String(eventKind === kind));
+    return b;
+  };
+  if (trips && trips < all.length) tabs.append(tab("All", all.length, "all"), tab("Trips", trips, "trip"), tab("Days", all.length - trips, "day"));
+  if (!tabs.children.length) eventKind = "all";
+  const events = eventKind === "all" ? all : all.filter((e) => e.kind === eventKind);
+  headRow("Events", all.length ? plural(all.length, "event") : null, tabs.children.length ? [tabs] : [],
+    "Days out and trips, found from when and where photos were taken. Trips are times away from home: the town you took photos in on the most days each year.");
   if (!events.length) {
     showEmpty("No events yet", "Events appear when several photos were taken close together. Trips are found from photos with a location.");
     return;
@@ -1819,7 +1973,7 @@ async function renderEvents() {
     const card = link("", eventHash(e), "card");
     const box = el("div", "card-img");
     box.append(img(thumbUrl(e.cover, e.cover_v)));
-    if (e.kind === "trip") box.append(el("span", "card-badge", "Trip"));
+    if (e.kind === "trip") box.append(el("span", "card-badge", e.days > 1 ? `Trip · ${e.days} days` : "Trip"));
     card.append(box, el("div", "card-title", eventTitle(e)));
     card.append(el("div", "card-meta", `${eventDates(e)} · ${plural(e.count, "item")}`));
     cards.append(card);
@@ -2105,6 +2259,20 @@ const CLEANUP_HELP = {
   burst: "Photos taken seconds apart. The one where everyone's eyes are open and faces are sharpest is marked to keep. Keep your favourite instead, or stack them so they show as one.",
 };
 
+/** Turn photos the way they seem to belong (their suggested turn), as an edit: the files don't change. */
+async function turnUpright(items) {
+  const done = [];
+  for (const it of items) {
+    if (!it.turn) continue;
+    try { await post(`/api/assets/${it.id}/edits`, { edits: { rotate: it.turn } }); done.push(it.id); }
+    catch (err) { flashNote(err.message); break; }
+  }
+  if (done.length) {
+    if (S.route.sideways) removeItems(done);
+    flashNote(`${plural(done.length, "photo")} turned upright`);
+  }
+}
+
 async function renderCleanup() {
   const kind = S.cleanupKind || "";
   const strictness = S.cleanupStrictness || "normal";
@@ -2121,6 +2289,12 @@ async function renderCleanup() {
   frag.append(q);
   try {
     const so = await api("/api/sorting");
+    if (so.sideways) {
+      const a = el("a", "cleanup-link");
+      a.href = "#/cleanup/sideways";
+      a.append(el("strong", null, "Sideways photos"), el("span", "muted", plural(so.sideways, "photo")));
+      frag.append(a);
+    }
     for (const c of so.categories) {
       if (!c.count) continue;
       const k = SORTED[c.category];
@@ -2803,6 +2977,7 @@ function showPicture(item) {
   $("v-edit").hidden = trashed || locked || item.kind !== "photo";
   $("v-trim").hidden = trashed || item.kind !== "video" || !(S.status && S.status.ffmpeg);
   $("v-play").hidden = trashed;
+  $("v-like").hidden = trashed || locked || !(S.status && S.status.content && S.status.content.enabled);
   $("v-trash").hidden = locked;
 
   const stage = $("v-stage");
@@ -3031,6 +3206,7 @@ $("v-fav").addEventListener("click", () => {
 $("v-album").addEventListener("click", () => { if (S.detail) addToAlbum([S.detail.id]); });
 $("v-edit").addEventListener("click", () => { if (S.detail) openEditor(S.detail); });
 $("v-trim").addEventListener("click", () => { if (S.detail) trimDialog(S.detail); });
+$("v-like").addEventListener("click", () => { if (S.detail) { const id = S.detail.id; viewer.close(); location.hash = `#/like/${id}`; } });
 $("v-play").addEventListener("click", () => { const at = S.viewing; viewer.close(); startSlideshow(Math.max(0, at)); });
 $("v-archive").addEventListener("click", async () => {
   if (!S.detail) return;

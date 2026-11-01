@@ -8,10 +8,9 @@ documents by the text read in them.
 
 * category: 'screenshot', 'document' or 'receipt', or None for a photo. Someone can change it by hand,
   and then it stays.
-* beauty: how much more a photo looks like the "good photo" descriptions than the "bad photo" ones. The
-  numbers are small (about -0.05 to 0.05); only their order matters. It picks covers, memories, the year
-  in review and Highlights. Judging photos this way agrees only roughly with people (Hentschel, Kobs and
-  Hotho, "CLIP knows image aesthetics", 2022), so it is used to choose among photos, never to hide any.
+* beauty: the rating (about 1 to 10) people would give the photo, predicted from its content vector by
+  LAION's aesthetic model (aesthetic.py). Only the order matters. It picks covers, memories, the year in
+  review and Highlights. It is a rough judgement, so it is used to choose among photos, never to hide any.
 """
 
 import logging
@@ -44,10 +43,6 @@ CLASS_PROMPTS = {
         "a photo of an invoice",
     ],
 }
-GOOD = ["a beautiful photo", "a stunning, professional photograph", "an award-winning photo",
-        "a high quality photo with great composition", "a breathtaking photo", "a lovely, well lit photo"]
-BAD = ["a blurry photo", "a bad photo", "a boring, low quality snapshot", "an out of focus picture",
-       "a dark, underexposed photo", "a photo taken by accident"]
 LOGIT_SCALE = 100.0   # CLIP's own temperature
 SURE = 0.70           # a category needs at least this share (after softmax over the four)
 
@@ -121,14 +116,8 @@ class Prompts:
     def __init__(self, engine):
         import numpy as np
 
-        def mean(texts):
-            v = np.mean([engine.embed_text(t) for t in texts], axis=0)
-            return v / np.linalg.norm(v)
-
         self.classes = list(CLASS_PROMPTS)
         self.class_vecs = [np.stack([engine.embed_text(t) for t in CLASS_PROMPTS[c]]) for c in self.classes]
-        self.good = mean(GOOD)
-        self.bad = mean(BAD)
 
     def probs(self, vec) -> dict[str, float]:
         import numpy as np
@@ -138,8 +127,11 @@ class Prompts:
         p = e / e.sum()
         return {c: float(x) for c, x in zip(self.classes, p)}
 
-    def beauty(self, vec) -> float:
-        return float(vec @ self.good - vec @ self.bad)
+    @staticmethod
+    def beauty(vec) -> float:
+        from . import aesthetic
+
+        return aesthetic.score(vec)
 
 
 class SortJob:
@@ -153,6 +145,7 @@ class SortJob:
         self._wait_until = 0.0
         self.state = {"running": False, "pending": 0, "message": None}
         self._lock = threading.Lock()
+        self._picked = None           # what Highlights were last picked from
 
     def pending(self, conn) -> int:
         return conn.execute("SELECT COUNT(*) FROM assets WHERE sort_done = 0 AND trashed_at IS NULL").fetchone()[0]
@@ -188,6 +181,16 @@ class SortJob:
             + (" AND c.asset_id IS NULL" if waiting else "") + " LIMIT ?", (batch,)).fetchall()
         if not rows:
             self.state.update(running=False, pending=0 if not waiting else self.pending(conn))
+            key = tuple(conn.execute(
+                "SELECT COUNT(beauty), COALESCE(SUM(CAST(beauty * 1000 AS INTEGER)), 0), COALESCE(MAX(id), 0),"
+                " COALESCE(SUM(CASE WHEN flag = -1 THEN id END), 0), COUNT(category), COUNT(trashed_at),"
+                " COALESCE(SUM(CASE WHEN locked_by IS NOT NULL OR archived_at IS NOT NULL THEN id END), 0),"
+                " (SELECT COUNT(*) FROM clip_vectors) FROM assets").fetchone())
+            if key != self._picked:   # done sorting, and something changed: pick the Highlights again
+                self._picked = key
+                pick_highlights(conn)
+                conn.commit()
+                return True
             return False
         import numpy as np
 
@@ -212,7 +215,7 @@ class SortJob:
                 category = classify(filename=r["filename"], camera=r["camera"], width=r["width"], height=r["height"],
                                     text=r["ocr_text"], probs=prompts.probs(vec) if vec is not None else None)
             if vec is not None and category is None:
-                beauty = round(prompts.beauty(vec), 5)
+                beauty = round(prompts.beauty(vec), 4)
             # Someone may set the category by hand meanwhile (the descriptions take a while the first
             # time): theirs stays, and a picture they called a screenshot gets no beauty.
             conn.execute("UPDATE assets SET category = ?, beauty = ?, sort_done = 1 WHERE id = ? AND category_hand = 0",
@@ -222,6 +225,58 @@ class SortJob:
         conn.commit()
         self.state["pending"] = self.pending(conn)
         return True
+
+
+# ---------------------------------------------------------------- Highlights: one photo per moment
+
+HIGHLIGHT_SHARE = 0.04     # the best-looking 4% of photos are candidates
+MOMENT_SECONDS = 30 * 60   # candidates this close in time ...
+SAME_MOMENT = 0.88         # ... and this alike (content vectors) show the same moment: only the best stays
+QUICK_SECONDS = 120        # without vectors, photos this close in time count as one moment
+PER_DAY = 5                # at most this many highlights from one day
+
+
+def pick_highlights(conn) -> int:
+    """Fill highlight_picks: the best-looking photos, without near-copies (one per moment) and at most
+    PER_DAY per day, so Highlights shows many moments instead of the same scene five times. Returns how
+    many were picked."""
+    import numpy as np
+
+    total = conn.execute("SELECT COUNT(*) FROM assets WHERE beauty IS NOT NULL AND trashed_at IS NULL").fetchone()[0]
+    want = max(1, int(total * HIGHLIGHT_SHARE)) if total else 0
+    rows = conn.execute(
+        "SELECT a.id, a.taken_at, a.beauty, c.vec FROM assets a LEFT JOIN clip_vectors c ON c.asset_id = a.id"
+        " WHERE a.beauty IS NOT NULL AND a.trashed_at IS NULL AND a.kind = 'photo' AND a.flag != -1"
+        " AND a.locked_by IS NULL AND a.archived_at IS NULL"
+        " AND coalesce(a.category, 'photo') = 'photo' ORDER BY a.beauty DESC LIMIT ?", (want,)).fetchall()
+    rows = sorted(rows, key=lambda r: r["taken_at"])
+    picks: list = []                                        # [row, vector or None, time]
+    for r in rows:
+        from datetime import datetime
+
+        t = datetime.fromisoformat(r["taken_at"])
+        v = None
+        if r["vec"]:
+            v = np.frombuffer(r["vec"], dtype=np.float16).astype(np.float32)
+            n = float(np.linalg.norm(v))
+            v = v / n if n else None
+        if picks:
+            last, lv, lt = picks[-1]
+            close = (t - lt).total_seconds()
+            same = close <= QUICK_SECONDS if (v is None or lv is None) else \
+                close <= MOMENT_SECONDS and float(v @ lv) >= SAME_MOMENT
+            if same:
+                if r["beauty"] > last["beauty"]:
+                    picks[-1] = [r, v, t]
+                continue
+        picks.append([r, v, t])
+    by_day: dict[str, list] = {}
+    for p in picks:
+        by_day.setdefault(p[0]["taken_at"][:10], []).append(p[0])
+    chosen = [r["id"] for day in by_day.values() for r in sorted(day, key=lambda r: -r["beauty"])[:PER_DAY]]
+    conn.execute("DELETE FROM highlight_picks")
+    conn.executemany("INSERT INTO highlight_picks (asset_id) VALUES (?)", [(i,) for i in chosen])
+    return len(chosen)
 
 
 # ---------------------------------------------------------------- suggested albums

@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Upl
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from . import __version__, analysis, dates, db, libraries, linking, media, ranking, smart, sorting, storage, webhooks
+from . import __version__, analysis, colors, dates, db, libraries, linking, media, ranking, smart, sorting, spelling, storage, webhooks
 from .app import current_user, require_admin, safe_filename
 from .scanner import _make_thumb, index_file
 from .videos import Converter
@@ -55,7 +55,7 @@ def _bbox(text: str | None):
     return south, west, north, east
 
 
-def make_filter_params(cfg):
+def make_filter_params(cfg, speller=None):
     """The query parameters every grid understands, turned into a db.Filter."""
 
     def filter_params(
@@ -82,15 +82,29 @@ def make_filter_params(cfg):
         flag: str = Query("", pattern="^(pick|reject|unflagged)?$"),
         category: str = Query("", pattern="^(screenshot|document|receipt|clutter|photos|all)?$"),
         highlights: bool = False,
+        turned: bool = False,
+        pet: int | None = None,
+        exact: bool = False,
     ) -> db.Filter:
         if not category and cfg.hide_clutter and archived == "hide" and not q.strip():
             category = "photos"      # the timelines leave screenshots and documents out, if asked to
-        return db.Filter(q=q, kind=kind, favorite=favorite, trashed=trashed, album=album, person=person,
+        typed = q
+        if speller is not None and q.strip() and not exact:
+            speller.ensure()
+
+            def finds_as_typed(text: str) -> bool:
+                with db.session(cfg.db_path) as conn:
+                    where, params = db.where_clause(db.Filter(q=text, archived=""), None)
+                    return conn.execute(f"SELECT 1 FROM assets a WHERE {where} LIMIT 1", params).fetchone() is not None
+
+            q = speller.checked_fix(q, finds_as_typed)    # "birthdy" -> "birthday" (spelling.py)
+        return db.Filter(q=q, typed=typed, kind=kind, favorite=favorite, trashed=trashed, album=album, person=person,
                          country=country, state=state, city=city, start=start, end=end,
                          low_quality=analysis.low_quality_sql(cfg) if quality else None,
                          archived=archived, tag=tag, folder=folder, stacks=stacks, bbox=_bbox(bbox),
                          locked=locked, rating=rating, label=label, flag=flag,
-                         category="" if category == "all" else category, highlights=highlights)
+                         category="" if category == "all" else category, highlights=highlights,
+                         turned=turned, pet=pet)
 
     return filter_params
 
@@ -123,6 +137,7 @@ def asset_dict(row, score: float | None = None) -> dict:
         "label": row["label"],
         "flag": row["flag"] or 0,
         "category": row["category"] if row["category"] in sorting.CATEGORIES else None,
+        "turn": row["turn"] if "turn" in row.keys() else None,   # looks sideways: turn this far clockwise
         "v": db.version(row),  # changes when the file (or its edit) changes, so browsers refetch
     }
     focus = row["focus"] if "focus" in row.keys() else None
@@ -166,7 +181,9 @@ ranking_limit = 500   # best matches listed at most
 def router(ctx) -> APIRouter:
     cfg, worker = ctx.cfg, ctx.worker
     r = APIRouter()
-    filter_params = make_filter_params(cfg)
+    speller = spelling.Speller(cfg)
+    ctx.speller = speller
+    filter_params = make_filter_params(cfg, speller)
 
     converter = Converter(cfg)
     ctx.videos = converter
@@ -193,6 +210,13 @@ def router(ctx) -> APIRouter:
         if not text:
             return []
         ranked = worker.clip.search(conn, text)
+        wanted = colors.color_words(text)
+        if wanted and ranked:   # "red car": photos that are red come a little higher (colors.py)
+            have = {i: set((c or "").split()[:2]) for i, c in conn.execute(
+                "SELECT id, colors FROM assets WHERE id IN (SELECT value FROM json_each(?))",
+                (json.dumps([i for i, _ in ranked]),))}
+            ranked = sorted(((i, sc + (colors.CONTENT_BOOST if wanted & have.get(i, set()) else 0.0))
+                             for i, sc in ranked), key=lambda x: -x[1])
         if f.ids is not None:  # only within these (a smart album found by content, say)
             allowed = set(f.ids)
             ranked = [x for x in ranked if x[0] in allowed]
@@ -226,7 +250,7 @@ def router(ctx) -> APIRouter:
         for r in rows:
             d = {"description": r["description"], "city": r["city"], "state": r["state"],
                  "country": r["country"], **extra[r["id"]]}
-            strength[r["id"]] = ranking.word_strength(d, tokens)
+            strength[r["id"]] = ranking.word_strength(d, tokens, {t: speller.rarity(t) for t in tokens})
         return sorted(rows, key=lambda r: -strength[r["id"]])   # stable: newest first within each level
 
     def mixed_matches(conn, f: db.Filter, user_id: int) -> list | None:
@@ -250,10 +274,25 @@ def router(ctx) -> APIRouter:
 
     @r.get("/api/assets")
     def list_assets(request: Request, f: db.Filter = Depends(filter_params), cursor: str = "",
-                    limit: int = Query(120, ge=1, le=500), look: bool = False, mix: bool = False):
+                    limit: int = Query(120, ge=1, le=500), look: bool = False, mix: bool = False,
+                    like: int | None = None):
         """The photos in a grid, newest first. look=true: photos whose content matches q, best first.
-        mix=true: words and content results together, best first (only words: newest first, as usual)."""
+        mix=true: words and content results together, best first (only words: newest first, as usual).
+        like=<id>: the photos that look most like that one, most alike first (More like this)."""
         user = grid_user(request, f)
+        if like is not None:
+            get_row(like, user)                       # someone who can't see it can't ask what it looks like
+            if cursor:
+                return {"items": [], "next": None}
+            from .clipsearch import similar
+
+            with db.session(cfg.db_path) as conn:
+                near = similar(worker.clip.index, conn, like)
+                score = dict(near)
+                g = db.Filter(**{**f.__dict__, "ids": list(score)})
+                rows, _ = db.list_assets(conn, g, user["id"], "", max(1, len(score)))
+            rows = sorted(rows, key=lambda row: -score[row["id"]])
+            return {"items": [asset_dict(row, score[row["id"]]) for row in rows], "next": None}
         if mix and f.q.strip() and not cursor:
             with db.session(cfg.db_path) as conn:
                 f2, _ = smart.resolve(conn, cfg, worker, f)
@@ -297,7 +336,7 @@ def router(ctx) -> APIRouter:
                 both = conn.execute(f"SELECT COUNT(*) FROM assets a WHERE {gw}", gp).fetchone()[0]
             pending = worker.clip.pending(conn) if cfg.smart_search else 0
         mixed = min(ranking_limit, min(words, 1000) + content - both) if content and worker.clip.ready() else None
-        return {"q": f.q, "words": words, "content": content, "mixed": mixed, "content_enabled": cfg.smart_search,
+        return {"q": f.q, "typed": f.typed if f.typed != f.q else None, "words": words, "content": content, "mixed": mixed, "content_enabled": cfg.smart_search,
                 "content_ready": worker.clip.ready(), "content_pending": pending,
                 "content_message": worker.clip.state.get("message")}
 
@@ -476,8 +515,9 @@ def router(ctx) -> APIRouter:
             p.unlink(missing_ok=True)
         with db.session(cfg.db_path) as conn:
             # The thumbnail is what Clean up and search by content look at: measure it again.
-            conn.execute("UPDATE assets SET edits = ?, edit_v = ?, quality_done = 0, clip_done = 0 WHERE id = ?",
-                         (text, edit_v, asset_id))
+            conn.execute("UPDATE assets SET edits = ?, edit_v = ?, quality_done = 0, clip_done = 0, colors_done = 0,"
+                         " turn = NULL, turn_done = 1 WHERE id = ?", (text, edit_v, asset_id))
+            conn.execute("DELETE FROM pet_sightings WHERE asset_id = ?", (asset_id,))
             conn.execute("DELETE FROM clip_vectors WHERE asset_id = ?", (asset_id,))
             _make_thumb(cfg, conn, asset_id, "photo", full, text)
             row = db.get_asset(conn, asset_id, user["id"])

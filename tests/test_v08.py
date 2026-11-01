@@ -62,11 +62,23 @@ def _near(base, noise, seed):
     return _unit(base + rng.normal(0, noise, 128))
 
 
+_copies = [0]
+
+
 def _person(conn, asset_id, vectors, name=None, hidden=0):
+    """A person with these faces, each in a photo of its own: the first in asset_id if nobody is in it yet,
+    the others in copies of it (people seen in the same photo are never suggested as one)."""
     pid = conn.execute("INSERT INTO people (name, hidden, created_at) VALUES (?, ?, '2024')", (name, hidden)).lastrowid
-    for v in vectors:
+    for k, v in enumerate(vectors):
+        aid = asset_id
+        if k or conn.execute("SELECT 1 FROM faces WHERE asset_id = ?", (asset_id,)).fetchone():
+            _copies[0] += 1
+            aid = conn.execute(
+                "INSERT INTO assets (path, filename, kind, size, mtime_ns, sha1, taken_at, added_at, has_thumb)"
+                " SELECT path || '-copy' || ?, filename, kind, size, mtime_ns, sha1 || ?, taken_at, added_at, has_thumb"
+                " FROM assets WHERE id = ?", (_copies[0], _copies[0], asset_id)).lastrowid
         conn.execute("INSERT INTO faces (asset_id, person_id, x, y, w, h, score, embedding, created_at)"
-                     " VALUES (?, ?, 0.1, 0.1, 0.2, 0.2, 0.99, ?, '2024')", (asset_id, pid, v.tobytes()))
+                     " VALUES (?, ?, 0.1, 0.1, 0.2, 0.2, 0.99, ?, '2024')", (aid, pid, v.tobytes()))
     return pid
 
 

@@ -7,6 +7,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from . import db, faces, webhooks
+from . import pets as pets_mod
 from .app import current_user, require_admin
 from .config import save_settings
 
@@ -19,6 +20,10 @@ class PersonUpdate(BaseModel):
 
 class MergeBody(BaseModel):
     into: int
+
+
+class PetPhotos(BaseModel):
+    ids: list[int] = Field(min_length=1, max_length=5000)
 
 
 class PairBody(BaseModel):
@@ -272,6 +277,111 @@ def router(ctx) -> APIRouter:
         if row is None or row["locked_by"] is not None or not path.is_file():
             raise HTTPException(404, "No picture")
         return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=86400"})
+
+    # ------------------------------------------------------------ pets (pets.py)
+
+    _PET_SQL = (
+        "SELECT p.id, p.name, p.species, p.hidden, COUNT(DISTINCT s.asset_id) AS photos,"
+        " (SELECT s2.id FROM pet_sightings s2 JOIN assets a2 ON a2.id = s2.asset_id WHERE s2.pet_id = p.id"
+        "  AND a2.trashed_at IS NULL AND a2.locked_by IS NULL ORDER BY s2.score DESC LIMIT 1) AS cover"
+        " FROM pets p LEFT JOIN pet_sightings s ON s.pet_id = p.id"
+        " AND s.asset_id IN (SELECT id FROM assets WHERE trashed_at IS NULL AND locked_by IS NULL)")
+
+    def _pet_json(row) -> dict:
+        return {"id": row["id"], "name": row["name"], "species": row["species"], "hidden": bool(row["hidden"]),
+                "photos": row["photos"], "cover": row["cover"]}
+
+    def get_pet(conn, pet_id: int) -> dict:
+        row = conn.execute(_PET_SQL + " WHERE p.id = ? GROUP BY p.id", (pet_id,)).fetchone()
+        if row is None or not row["photos"]:      # only in locked or trashed photos: not for anyone's eyes
+            raise HTTPException(404, "No such pet.")
+        return _pet_json(row)
+
+    @r.get("/api/pets")
+    def list_pets(request: Request, hidden: bool = False):
+        """Named pets, and groups of the same animal with enough photos to be worth showing."""
+        current_user(request)
+        with db.session(cfg.db_path) as conn:
+            rows = conn.execute(_PET_SQL + " WHERE p.hidden = ? GROUP BY p.id"
+                                " HAVING p.name IS NOT NULL OR photos >= ? ORDER BY p.name IS NULL, photos DESC",
+                                (int(hidden), pets_mod.MIN_PHOTOS)).fetchall()
+        return {"pets": [_pet_json(r) for r in rows if r["photos"]],
+                "enabled": cfg.find_pets and cfg.smart_search, "state": worker.pets.state}
+
+    @r.get("/api/pets/{pet_id}")
+    def pet(pet_id: int, request: Request):
+        current_user(request)
+        with db.session(cfg.db_path) as conn:
+            return get_pet(conn, pet_id)
+
+    @r.patch("/api/pets/{pet_id}")
+    def update_pet(pet_id: int, body: PersonUpdate, request: Request):
+        current_user(request)
+        with db.session(cfg.db_path) as conn:
+            get_pet(conn, pet_id)
+            if body.clear_name:
+                conn.execute("UPDATE pets SET name = NULL WHERE id = ?", (pet_id,))
+            elif body.name is not None:
+                conn.execute("UPDATE pets SET name = ? WHERE id = ?", (body.name.strip() or None, pet_id))
+            if body.hidden is not None:
+                conn.execute("UPDATE pets SET hidden = ? WHERE id = ?", (int(body.hidden), pet_id))
+            return get_pet(conn, pet_id)
+
+    @r.post("/api/pets/{pet_id}/merge")
+    def merge_pets(pet_id: int, body: MergeBody, request: Request):
+        """'Same pet': all of this pet's photos move to `into`."""
+        current_user(request)
+        if body.into == pet_id:
+            raise HTTPException(400, "That is the same pet.")
+        with db.session(cfg.db_path) as conn:
+            src = conn.execute("SELECT * FROM pets WHERE id = ?", (pet_id,)).fetchone()
+            dst = conn.execute("SELECT * FROM pets WHERE id = ?", (body.into,)).fetchone()
+            if src is None or dst is None:
+                raise HTTPException(404, "No such pet.")
+            conn.execute("UPDATE pet_sightings SET pet_id = ?, species = ? WHERE pet_id = ?",
+                         (body.into, dst["species"], pet_id))
+            if not dst["name"] and src["name"]:
+                conn.execute("UPDATE pets SET name = ? WHERE id = ?", (src["name"], body.into))
+            conn.execute("DELETE FROM pets WHERE id = ?", (pet_id,))
+            return get_pet(conn, body.into)
+
+    @r.post("/api/pets/{pet_id}/remove")
+    def remove_from_pet(pet_id: int, body: PetPhotos, request: Request):
+        """'This isn't them': take these photos out of the pet (they won't be put back)."""
+        current_user(request)
+        with db.session(cfg.db_path) as conn:
+            get_pet(conn, pet_id)
+            ids = db.open_ids(conn, body.ids)
+            marks = ",".join("?" * len(ids)) or "NULL"
+            conn.execute(f"UPDATE pet_sightings SET pet_id = NULL WHERE pet_id = ? AND asset_id IN ({marks})",
+                         [pet_id] + ids)
+            return get_pet(conn, pet_id)
+
+    @r.get("/api/pets/{pet_id}/thumb")
+    def pet_thumb(pet_id: int, request: Request):
+        """The part of the clearest photo that shows the animal."""
+        current_user(request)
+        with db.session(cfg.db_path) as conn:
+            cover = get_pet(conn, pet_id)["cover"]
+            row = conn.execute("SELECT asset_id, x, y, w, h FROM pet_sightings WHERE id = ?", (cover,)).fetchone() \
+                if cover else None
+        if row is None:
+            raise HTTPException(404, "No picture")
+        out = cfg.data_dir / "pets" / f"{cover}.jpg"
+        if not out.is_file():
+            from PIL import Image
+
+            try:
+                with Image.open(cfg.thumb_path(row["asset_id"])) as img:
+                    w, h = img.size
+                    part = img.convert("RGB").crop((int(row["x"] * w), int(row["y"] * h),
+                                                    int((row["x"] + row["w"]) * w), int((row["y"] + row["h"]) * h)))
+                    part.thumbnail((240, 240))
+                    out.parent.mkdir(parents=True, exist_ok=True)
+                    part.save(out, "JPEG", quality=85)
+            except OSError:
+                raise HTTPException(404, "No picture") from None
+        return FileResponse(out, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=3600"})
 
     # ------------------------------------------------------------ places
 

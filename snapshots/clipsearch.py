@@ -238,6 +238,31 @@ class VectorIndex:
         return [(int(ids[i]), float(scores[i])) for i in keep]
 
 
+# More like this: photos whose content vectors are close to one photo's. Two photos of the same kind of
+# scene are about 0.8 alike; unrelated photos about 0.5.
+LIKE_MIN = 0.72
+LIKE_MAX = 200
+
+
+def similar(index: "VectorIndex", conn, asset_id: int, min_score: float = LIKE_MIN, limit: int = LIKE_MAX):
+    """[(asset_id, score)] most alike first, leaving out the photo itself. Empty without its vector."""
+    import numpy as np
+
+    if not index.load(conn):
+        return []
+    with index._lock:
+        ids, matrix = index.ids, index.matrix
+    where = np.nonzero(ids == asset_id)[0]
+    if not len(where):
+        return []
+    v = matrix[where[0]].astype(np.float32)
+    scores = matrix.astype(np.float32) @ v
+    scores[where[0]] = -1.0
+    keep = np.where(scores >= min_score)[0]
+    keep = keep[np.argsort(-scores[keep])][:limit]
+    return [(int(ids[i]), float(scores[i])) for i in keep]
+
+
 class ClipJob:
     """Turns photos (and videos, from their thumbnail) into CLIP vectors, in small batches."""
 

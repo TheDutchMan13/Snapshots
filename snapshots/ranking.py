@@ -32,17 +32,25 @@ def fuse(*lists: list[int], k: int = K, weights: tuple[float, ...] | None = None
 STRONG_FIELDS = ("people", "tags", "description", "city", "state", "country")
 
 
-def word_strength(row: dict, tokens: list[str]) -> int:
-    """How many of the words were found in a strong place for this row (see STRONG_FIELDS)."""
-    hits = 0
+def word_strength(row: dict, tokens: list[str], weights: dict[str, float] | None = None) -> float:
+    """How strongly this row matches: each word found in a strong place (see STRONG_FIELDS) counts its
+    weight (its rarity, see spelling.py; 1 without weights), a word found only elsewhere counts a fifth."""
+    from .spelling import related
+
+    total = 0.0
     for t in tokens:
-        for field in STRONG_FIELDS:
-            value = row.get(field)
-            if isinstance(value, (list, tuple)):
-                if any(t in (v or "").lower() for v in value):
-                    hits += 1
+        w = (weights or {}).get(t, 1.0)
+        strong = False
+        for word in related(t):
+            for field in STRONG_FIELDS:
+                value = row.get(field)
+                if isinstance(value, (list, tuple)):
+                    strong = any(word in (v or "").lower() for v in value)
+                else:
+                    strong = bool(value) and word in str(value).lower()
+                if strong:
                     break
-            elif value and t in str(value).lower():
-                hits += 1
+            if strong:
                 break
-    return hits
+        total += w if strong else 0.2 * w
+    return total

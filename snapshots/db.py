@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import dates
+from .spelling import related
 
 # Each entry upgrades the database by one version. Never edit an entry once released:
 # add a new one instead. PRAGMA user_version records how many have been applied.
@@ -377,6 +378,44 @@ MIGRATIONS = [
                      + 0.5 * coalesce(faces.frontal, 0.7), 3)
         FROM assets a WHERE a.id = faces.asset_id AND a.width > 0 AND a.height > 0);
     """,
+    # 11 - version 0.12: colours, sideways photos, varied highlights, pets, the photo-quality model
+    """
+    ALTER TABLE assets ADD COLUMN colors TEXT;              -- main colours, most first: 'blue white'
+    ALTER TABLE assets ADD COLUMN colors_done INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE assets ADD COLUMN turn INTEGER;             -- looks sideways: degrees clockwise to put it upright
+    ALTER TABLE assets ADD COLUMN turn_done INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE assets ADD COLUMN pets_done INTEGER NOT NULL DEFAULT 0;
+    CREATE INDEX idx_assets_colors ON assets (colors_done) WHERE colors_done = 0;
+    CREATE INDEX idx_assets_turn ON assets (turn_done) WHERE turn_done = 0;
+    CREATE INDEX idx_assets_turned ON assets (turn) WHERE turn IS NOT NULL;
+    CREATE INDEX idx_assets_pets ON assets (pets_done) WHERE pets_done = 0;
+    -- Highlights: the best photo of each moment (sorting.pick_highlights)
+    CREATE TABLE highlight_picks (asset_id INTEGER PRIMARY KEY REFERENCES assets (id) ON DELETE CASCADE) WITHOUT ROWID;
+    CREATE TABLE pets (
+        id         INTEGER PRIMARY KEY,
+        name       TEXT,
+        species    TEXT NOT NULL,                -- 'dog' or 'cat'
+        hidden     INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL
+    );
+    CREATE TABLE pet_sightings (                 -- an animal in a photo (pets.py)
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,  -- never reused: its picture is kept under this id
+        asset_id   INTEGER NOT NULL REFERENCES assets (id) ON DELETE CASCADE,
+        pet_id     INTEGER REFERENCES pets (id) ON DELETE SET NULL,
+        species    TEXT NOT NULL,
+        x REAL NOT NULL, y REAL NOT NULL, w REAL NOT NULL, h REAL NOT NULL,   -- fractions of the picture
+        vec        BLOB NOT NULL,                -- 512 float16 values: what the animal looks like
+        score      REAL NOT NULL,                -- how clearly it shows the animal (the clearest is the cover)
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX idx_pet_sightings_pet ON pet_sightings (pet_id);
+    CREATE INDEX idx_pet_sightings_asset ON pet_sightings (asset_id);
+    -- Sideways photos and pets are looked for with the content model, once a photo has its vector.
+    CREATE TRIGGER looks_clip AFTER INSERT ON clip_vectors
+        BEGIN UPDATE assets SET turn_done = 0, pets_done = 0 WHERE id = NEW.asset_id; END;
+    -- The photo-quality model (aesthetic.py) replaces the old beauty score: sort every photo again.
+    UPDATE assets SET sort_done = 0;
+    """,
 ]
 SCHEMA_VERSION = len(MIGRATIONS)
 
@@ -451,11 +490,14 @@ class Filter:
     locked: bool = False           # the Locked folder: only the asking person's locked items
     people: list[int] | None = None  # all of these people are in it (a smart album)
     words: str = ""                # more words that must match, like q (a smart album's own words)
+    typed: str = ""                # q as typed, before spelling corrections (spelling.py)
     rating: int = 0                # at least this many stars
     label: str = ""                # this colour label
     flag: str = ""                 # "pick", "reject" or "unflagged"
     category: str = ""             # "screenshot", "document", "receipt", "clutter" (any of them) or "photos" (none)
     highlights: bool = False       # only the best-looking photos (see sorting.py)
+    turned: bool = False           # only photos that look sideways (see sideways.py)
+    pet: int | None = None         # only photos of this pet (see pets.py)
     date_conds: list | None = None  # date conditions already worked out (dates.py), for results found by content
 
 
@@ -522,9 +564,6 @@ def versions(conn, ids) -> dict:
 
 # Screenshots, documents and receipts (sorting.py).
 CLUTTER = "a.category IN ('screenshot', 'document', 'receipt')"
-# Highlights: the best-looking 4% of photos (at least 1).
-HIGHLIGHT_CUTOFF = ("(SELECT h.beauty FROM assets h WHERE h.beauty IS NOT NULL ORDER BY h.beauty DESC LIMIT 1"
-                    " OFFSET (SELECT max(0, CAST(COUNT(beauty) * 0.04 AS INTEGER) - 1) FROM assets))")
 
 # Items in someone's locked folder are left out everywhere except that folder.
 NOT_LOCKED = "a.locked_by IS NULL"
@@ -551,12 +590,19 @@ def _word_sql(token: str) -> tuple[str, list]:
         " OR lower(coalesce(a.country, '')) LIKE ?1 ESCAPE '\\'"
         " OR lower(coalesce(a.ocr_text, '')) LIKE ?1 ESCAPE '\\'"
         " OR lower(coalesce(a.description, '')) LIKE ?1 ESCAPE '\\'"
+        " OR (' ' || coalesce(a.colors, '') || ' ') LIKE ?2 ESCAPE '\\'"
         " OR a.id IN (SELECT at.asset_id FROM asset_tags at JOIN tags t ON t.id = at.tag_id"
         "             WHERE lower(t.name) LIKE ?1 ESCAPE '\\')"
         " OR a.id IN (SELECT f.asset_id FROM faces f JOIN people p ON p.id = f.person_id"
+        "             WHERE p.hidden = 0 AND lower(p.name) LIKE ?1 ESCAPE '\\')"
+        " OR a.id IN (SELECT s.asset_id FROM pet_sightings s JOIN pets p ON p.id = s.pet_id"
         "             WHERE p.hidden = 0 AND lower(p.name) LIKE ?1 ESCAPE '\\'))"
-    ).replace("?1", "?")
-    return sql, [like] * 9
+    )
+    # The colours (colors.py) are whole words: "ray" must not find gray photos.
+    whole = "% " + like[1:-1] + " %"
+    params = [like] * 7 + [whole] + [like] * 3
+    assert len(params) == sql.count("?1") + sql.count("?2")
+    return sql.replace("?1", "?").replace("?2", "?"), params
 
 
 def where_clause(f: Filter, user_id: int | None) -> tuple[str, list]:
@@ -629,8 +675,14 @@ def where_clause(f: Filter, user_id: int | None) -> tuple[str, list]:
     elif f.category:
         where.append("a.category = ?")
         params.append(f.category)
+    if f.turned:
+        where.append("a.turn IS NOT NULL")
+    if f.pet is not None:
+        where.append("a.id IN (SELECT asset_id FROM pet_sightings WHERE pet_id = ?)")
+        params.append(f.pet)
     if f.highlights:
-        where.append(f"a.beauty >= {HIGHLIGHT_CUTOFF} AND a.flag != -1 AND a.kind = 'photo'")
+        # the best photo of each moment (sorting.pick_highlights), not five of the same scene
+        where.append("a.id IN (SELECT asset_id FROM highlight_picks) AND a.flag != -1 AND a.kind = 'photo'")
     if f.start:
         where.append("a.taken_at >= ?")
         params.append(f.start)
@@ -662,9 +714,9 @@ def where_clause(f: Filter, user_id: int | None) -> tuple[str, list]:
             where.append(sql)
             params += values
         for token in dates.word_tokens(rest, bool(conditions))[:10]:
-            sql, values = _word_sql(token)
-            where.append(sql)
-            params += values
+            parts = [_word_sql(w) for w in related(token)]      # "pup" finds "dog" too
+            where.append("(" + " OR ".join(p for p, _ in parts) + ")")
+            params += [v for _, vs in parts for v in vs]
     for cond in f.date_conds or []:
         sql, values = dates.sql(cond)
         where.append(sql)
@@ -678,7 +730,7 @@ ASSET_COLUMNS = (
     " a.highlights,"
     " a.keep_quality, a.ocr_text, a.archived_at, a.stack_id, a.live_video, a.motion_offset,"
     " a.description, a.taken_at_file, a.position_edited, a.edits, a.edit_v, a.projection, a.locked_by,"
-    " a.rating, a.label, a.flag, a.category, a.beauty, a.date_guess,"
+    " a.rating, a.label, a.flag, a.category, a.beauty, a.date_guess, a.turn,"
     # Where the faces are (their middle, weighted by size), so cropped tiles keep them in view.
     " (SELECT CASE WHEN COUNT(*) THEN printf('%.3f,%.3f', sum((fc.x + fc.w / 2) * fc.w * fc.h) / sum(fc.w * fc.h),"
     "  sum((fc.y + fc.h / 2) * fc.w * fc.h) / sum(fc.w * fc.h)) END FROM faces fc WHERE fc.asset_id = a.id) AS focus,"

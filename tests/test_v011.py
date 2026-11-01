@@ -101,7 +101,10 @@ def test_fuse_puts_items_found_both_ways_first():
 
 def test_word_strength():
     row = {"people": ["Mia"], "tags": ["beach"], "description": None, "city": "Phoenix"}
-    assert ranking.word_strength(row, ["mia", "phoenix", "img"]) == 2
+    # two strong words, and one found only in a weak place (counts a fifth)
+    assert ranking.word_strength(row, ["mia", "phoenix", "img"]) == pytest.approx(2.2)
+    # rarer words weigh more
+    assert ranking.word_strength(row, ["mia", "phoenix"], {"mia": 3.0, "phoenix": 1.0}) == pytest.approx(4.0)
 
 
 def _colour_library(root, n_red=3):
@@ -335,11 +338,15 @@ def test_highlights(tmp_path):
         wait_scan(c)
         assert ids_by_name(c, highlights=True) == {}
         conn = db.connect(cfg.db_path)
+        # let the sorting job finish first, so it doesn't sort these again under the test's feet
+        wait_for(lambda: conn.execute("SELECT COUNT(*) FROM assets WHERE sort_done = 0").fetchone()[0] == 0)
         for k, (aid,) in enumerate(conn.execute("SELECT id FROM assets ORDER BY filename").fetchall()):
             conn.execute("UPDATE assets SET beauty = ? WHERE id = ?", (k / 1000, aid))
+        sorting.pick_highlights(conn)        # the sorting job does this when it has sorted everything
         conn.commit()
         assert list(ids_by_name(c, highlights=True)) == ["p29.jpg"]       # the best 4% of 30: one
         conn.execute("UPDATE assets SET beauty = NULL WHERE filename = 'p29.jpg'")
+        sorting.pick_highlights(conn)
         conn.commit()
         assert list(ids_by_name(c, highlights=True)) == ["p28.jpg"]
         assert c.get("/api/sorting").json()["highlights"] == 1
