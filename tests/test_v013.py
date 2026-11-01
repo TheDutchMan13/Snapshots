@@ -106,6 +106,10 @@ def test_eyes_job_marks_photos_and_clean_up_lists_them(tmp_path):
         setup_admin(c)
         wait_scan(c)
         ids = ids_by_name(c)
+        def measured():
+            with db.session(cfg.db_path) as conn:
+                return conn.execute("SELECT COUNT(*) FROM assets WHERE quality_done = 0").fetchone()[0] == 0
+        wait_for(measured, timeout=60)      # or the worker would overwrite the numbers set next
         with db.session(cfg.db_path) as conn:
             conn.execute("UPDATE assets SET sharpness = 999, brightness = 120, highlights = 200")   # sharp, not dark
             conn.execute("INSERT INTO people (id, name, created_at) VALUES (1, 'Anna', 't')")

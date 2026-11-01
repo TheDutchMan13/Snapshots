@@ -83,8 +83,16 @@ def wait_scan(client, timeout=30):
 
 
 def rescan(client):
+    before = client.get("/api/status").json()["scan"].get("finished_at")
     assert client.post("/api/scan").status_code == 202
-    time.sleep(0.05)
+    # A slow machine may start the scan late: wait until it runs or has finished anew
+    # (up to a moment, since a scan within the same second as the last one looks unchanged).
+    deadline = time.time() + 0.3
+    while time.time() < deadline:
+        s = client.get("/api/status").json()["scan"]
+        if s["running"] or s.get("finished_at") != before:
+            break
+        time.sleep(0.02)
     return wait_scan(client)
 
 

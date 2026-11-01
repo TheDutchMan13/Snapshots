@@ -584,7 +584,8 @@ def test_import_from_immich(tmp_path, monkeypatch):
         assert "refused the API key" in state["error"]
 
         r = c.post("/api/imports/immich", json={"url": "http://localhost:2283/", "key": "good-key", "dry_run": True})
-        state = wait_for(lambda: (s := c.get("/api/imports").json()["current"]) and not s["running"] and s)
+        state = wait_for(lambda: (s := c.get("/api/imports").json()["current"]) and s["dry_run"]
+                         and not s["running"] and s)      # (the first run's state is not this one's)
         assert state["error"] is None, state
         s = state["summary"]
         assert (s["assets"], s["matched"], s["missing"], s["skipped"]) == (5, 3, 1, 1)
@@ -592,7 +593,8 @@ def test_import_from_immich(tmp_path, monkeypatch):
         assert names(c, favorite="true") == []       # a dry run changes nothing
 
         c.post("/api/imports/immich", json={"url": "http://localhost:2283", "key": "good-key"})
-        state = wait_for(lambda: (s := c.get("/api/imports").json()["current"]) and not s["running"] and s)
+        state = wait_for(lambda: (s := c.get("/api/imports").json()["current"]) and not s["dry_run"]
+                         and not s["running"] and s)      # (the first run's state is not this one's)
         assert state["error"] is None, state
         s = state["summary"]
         assert s["copied"] == 1 and s["favourites"] == 2 and s["archived"] == 1 and s["trashed"] == 1
@@ -711,13 +713,15 @@ def test_import_from_google_takeout(tmp_path, monkeypatch):
         assert "whole path" in state["error"]
 
         c.post("/api/imports/takeout", json={"path": str(export), "dry_run": True})
-        state = wait_for(lambda: (s := c.get("/api/imports").json()["current"]) and not s["running"] and s)
+        state = wait_for(lambda: (s := c.get("/api/imports").json()["current"]) and s["dry_run"]
+                         and not s["running"] and s)      # (the first run's state is not this one's)
         assert state["error"] is None, state
         s = state["summary"]
         assert (s["files"], s["matched"], s["missing"], s["without_details"], s["albums_found"]) == (6, 2, 2, 1, 1)
 
         c.post("/api/imports/takeout", json={"path": str(export)})
-        state = wait_for(lambda: (s := c.get("/api/imports").json()["current"]) and not s["running"] and s)
+        state = wait_for(lambda: (s := c.get("/api/imports").json()["current"]) and not s["dry_run"]
+                         and not s["running"] and s)      # (the first run's state is not this one's)
         assert state["error"] is None, state
         s = state["summary"]
         assert s["copied"] == 2 and s["favourites"] == 1 and s["archived"] == 1 and s["names"] == 1
