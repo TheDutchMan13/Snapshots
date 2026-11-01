@@ -4,7 +4,7 @@ python-multipart>=0.0.9
 pillow>=10.4
 pillow-heif>=0.18
 numpy>=1.26
-opencv-python-headless>=4.8
+opencv-python-headless>=4.8,<5
 onnxruntime>=1.17
 rawpy>=0.24
 pywebview>=6.0; sys_platform == "win32"
