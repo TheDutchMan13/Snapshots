@@ -45,6 +45,10 @@ class Config:
     guess_dates: bool = True               # date files that have none from GPS time or the files beside them
     find_sideways: bool = True             # look for photos stored on their side (needs smart_search)
     find_pets: bool = True                 # find dogs and cats and group each animal (needs smart_search)
+    guess_places: bool = True              # give photos without GPS the place of photos taken just before or after
+    landmarks: bool = True                 # recognise famous places (needs smart_search)
+    captions: bool = False                 # describe each photo in a sentence (downloads a 275 MB model; slow)
+    bright_threshold: float = 235          # average brightness (0-255) above this is too bright (washed out)
     text_search: bool = True               # read text in photos so it can be searched (11 MB model)
     search_threads: int = 2                # CPU threads content and text search may use
     map_tiles: str = ""  # map pictures; "" = country outlines only, nothing fetched (set a tile URL for street maps)
@@ -142,7 +146,8 @@ _FILE_KEYS = {
     "lookalike_similarity": float,
     "blur_threshold": float, "dark_threshold": float, "event_gap_hours": float, "event_min_items": int,
     "smart_search": bool, "text_search": bool, "search_threads": int, "hide_clutter": bool, "guess_dates": bool,
-    "find_sideways": bool, "find_pets": bool,
+    "find_sideways": bool, "find_pets": bool, "guess_places": bool, "landmarks": bool, "captions": bool,
+    "bright_threshold": float,
     "map_tiles": str, "map_attribution": str,
     "backup_hours": float, "backup_keep": int, "video_encoder": str, "video_cache_gb": float,
     "offsite_method": str, "offsite_target": str, "offsite_hours": float,

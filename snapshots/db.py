@@ -416,6 +416,28 @@ MIGRATIONS = [
     -- The photo-quality model (aesthetic.py) replaces the old beauty score: sort every photo again.
     UPDATE assets SET sort_done = 0;
     """,
+    # 12 - version 0.13: guessed places, captions, landmarks, closed eyes, too bright, birthdays
+    """
+    ALTER TABLE assets ADD COLUMN place_guess TEXT;         -- position guessed: 'nearby' or 'landmark' (placeguess.py)
+    ALTER TABLE assets ADD COLUMN place_checked INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE assets ADD COLUMN caption TEXT;             -- what the photo shows, in a sentence (captions.py)
+    ALTER TABLE assets ADD COLUMN caption_done INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE assets ADD COLUMN landmark TEXT;            -- a famous place it shows (landmarks.py)
+    ALTER TABLE assets ADD COLUMN landmark_done INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE assets ADD COLUMN eyes_closed INTEGER NOT NULL DEFAULT 0;  -- someone in it has their eyes shut
+    ALTER TABLE people ADD COLUMN birthday TEXT;            -- 'YYYY-MM-DD', or '--MM-DD' when the year isn't known
+    ALTER TABLE pets ADD COLUMN birthday TEXT;
+    ALTER TABLE faces ADD COLUMN shut REAL;                 -- chance that both eyes are shut (eyes.py)
+    -- Faces found before are looked at once more, for their eyes.
+    UPDATE assets SET faceq_done = 0 WHERE EXISTS (SELECT 1 FROM faces f WHERE f.asset_id = assets.id);
+    CREATE INDEX idx_assets_placeguess ON assets (place_checked) WHERE place_checked = 0;
+    CREATE INDEX idx_assets_caption ON assets (caption_done) WHERE caption_done = 0;
+    CREATE INDEX idx_assets_landmark ON assets (landmark_done) WHERE landmark_done = 0;
+    CREATE INDEX idx_assets_taken_gps ON assets (taken_at) WHERE lat IS NOT NULL AND place_guess IS NULL;
+    -- Landmarks are looked for with the content model, once a photo has its vector.
+    CREATE TRIGGER landmark_clip AFTER INSERT ON clip_vectors
+        BEGIN UPDATE assets SET landmark_done = 0 WHERE id = NEW.asset_id; END;
+    """,
 ]
 SCHEMA_VERSION = len(MIGRATIONS)
 
@@ -590,6 +612,8 @@ def _word_sql(token: str) -> tuple[str, list]:
         " OR lower(coalesce(a.country, '')) LIKE ?1 ESCAPE '\\'"
         " OR lower(coalesce(a.ocr_text, '')) LIKE ?1 ESCAPE '\\'"
         " OR lower(coalesce(a.description, '')) LIKE ?1 ESCAPE '\\'"
+        " OR lower(coalesce(a.caption, '')) LIKE ?1 ESCAPE '\\'"
+        " OR lower(coalesce(a.landmark, '')) LIKE ?1 ESCAPE '\\'"
         " OR (' ' || coalesce(a.colors, '') || ' ') LIKE ?2 ESCAPE '\\'"
         " OR a.id IN (SELECT at.asset_id FROM asset_tags at JOIN tags t ON t.id = at.tag_id"
         "             WHERE lower(t.name) LIKE ?1 ESCAPE '\\')"
@@ -600,7 +624,7 @@ def _word_sql(token: str) -> tuple[str, list]:
     )
     # The colours (colors.py) are whole words: "ray" must not find gray photos.
     whole = "% " + like[1:-1] + " %"
-    params = [like] * 7 + [whole] + [like] * 3
+    params = [like] * 9 + [whole] + [like] * 3
     assert len(params) == sql.count("?1") + sql.count("?2")
     return sql.replace("?1", "?").replace("?2", "?"), params
 
@@ -730,7 +754,8 @@ ASSET_COLUMNS = (
     " a.highlights,"
     " a.keep_quality, a.ocr_text, a.archived_at, a.stack_id, a.live_video, a.motion_offset,"
     " a.description, a.taken_at_file, a.position_edited, a.edits, a.edit_v, a.projection, a.locked_by,"
-    " a.rating, a.label, a.flag, a.category, a.beauty, a.date_guess, a.turn,"
+    " a.rating, a.label, a.flag, a.category, a.beauty, a.date_guess, a.turn, a.place_guess, a.caption,"
+    " a.landmark, a.eyes_closed,"
     # Where the faces are (their middle, weighted by size), so cropped tiles keep them in view.
     " (SELECT CASE WHEN COUNT(*) THEN printf('%.3f,%.3f', sum((fc.x + fc.w / 2) * fc.w * fc.h) / sum(fc.w * fc.h),"
     "  sum((fc.y + fc.h / 2) * fc.w * fc.h) / sum(fc.w * fc.h)) END FROM faces fc WHERE fc.asset_id = a.id) AS focus,"

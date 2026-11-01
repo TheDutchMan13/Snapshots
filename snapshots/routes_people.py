@@ -16,6 +16,24 @@ class PersonUpdate(BaseModel):
     name: str | None = Field(default=None, max_length=200)
     hidden: bool | None = None
     clear_name: bool = False
+    # 'YYYY-MM-DD', or '--MM-DD' without the year; "" removes it
+    birthday: str | None = Field(default=None, pattern=r"^$|^(\d{4}|-)-\d{2}-\d{2}$")
+
+
+def clean_birthday(text: str) -> str | None:
+    """A stored birthday from what was typed ("" removes it). Raises HTTPException for a date that doesn't exist."""
+    from datetime import date
+
+    if not text:
+        return None
+    year = 2000 if text.startswith("--") else int(text[:4])     # 2000 has a 29 February
+    try:
+        when = date(year, int(text[-5:-3]), int(text[-2:]))
+    except ValueError:
+        raise HTTPException(400, "That date doesn't exist.") from None
+    if not text.startswith("--") and when > date.today():
+        raise HTTPException(400, "That birthday is in the future.")
+    return text
 
 
 class MergeBody(BaseModel):
@@ -71,11 +89,11 @@ class Suggester:
 
 def _person_json(row) -> dict:
     return {"id": row["id"], "name": row["name"], "hidden": bool(row["hidden"]),
-            "photos": row["photos"], "face_id": row["face_id"]}
+            "photos": row["photos"], "face_id": row["face_id"], "birthday": row["birthday"]}
 
 
 _PEOPLE_SQL = """
-    SELECT p.id, p.name, p.hidden, COUNT(DISTINCT f.asset_id) AS photos, COUNT(f.id) AS faces,
+    SELECT p.id, p.name, p.hidden, p.birthday, COUNT(DISTINCT f.asset_id) AS photos, COUNT(f.id) AS faces,
            (SELECT f2.id FROM faces f2 JOIN assets a2 ON a2.id = f2.asset_id AND a2.trashed_at IS NULL
               AND a2.locked_by IS NULL
              WHERE f2.person_id = p.id ORDER BY f2.score * f2.w DESC LIMIT 1) AS face_id
@@ -94,7 +112,8 @@ def router(ctx) -> APIRouter:
         row = conn.execute(_PEOPLE_SQL + " WHERE p.id = ? GROUP BY p.id", (person_id,)).fetchone()
         if row is None:
             if conn.execute("SELECT 1 FROM people WHERE id = ?", (person_id,)).fetchone():
-                return {"id": person_id, "name": None, "hidden": False, "photos": 0, "face_id": None}
+                return {"id": person_id, "name": None, "hidden": False, "photos": 0, "face_id": None,
+                        "birthday": None}
             raise HTTPException(404, "No such person.")
         return _person_json(row)
 
@@ -211,7 +230,31 @@ def router(ctx) -> APIRouter:
                     webhooks.emit(conn, "person.named", {"id": person_id, "name": name, "before": before})
             if body.hidden is not None:
                 conn.execute("UPDATE people SET hidden = ? WHERE id = ?", (int(body.hidden), person_id))
+            if body.birthday is not None:
+                conn.execute("UPDATE people SET birthday = ? WHERE id = ?", (clean_birthday(body.birthday), person_id))
             return get_person(conn, person_id)
+
+    @r.get("/api/people/{person_id}/together")
+    def together(person_id: int, request: Request):
+        """Who this person is most often photographed with, and the events they were at."""
+        current_user(request)
+        with db.session(cfg.db_path) as conn:
+            get_person(conn, person_id)
+            rows = conn.execute(
+                "SELECT o.person_id, COUNT(DISTINCT o.asset_id) AS n FROM faces me"
+                " JOIN faces o ON o.asset_id = me.asset_id AND o.person_id != me.person_id"
+                " JOIN people p ON p.id = o.person_id AND p.hidden = 0 AND p.name IS NOT NULL"
+                " JOIN assets a ON a.id = me.asset_id AND a.trashed_at IS NULL AND a.locked_by IS NULL"
+                " WHERE me.person_id = ? GROUP BY o.person_id ORDER BY n DESC LIMIT 12", (person_id,)).fetchall()
+            people = []
+            for pid, n in rows:
+                info = get_person(conn, pid)
+                people.append(dict(info, together=n))
+            found = [e for e in ctx.events.events(conn) if any(p["id"] == person_id for p in e.get("people", []))]
+            versions = db.versions(conn, [e["cover"] for e in found])
+        from .routes_explore import event_json
+
+        return {"people": people, "events": [event_json(e, versions) for e in found[:60]]}
 
     @r.post("/api/people/{person_id}/merge")
     def merge(person_id: int, body: MergeBody, request: Request):
@@ -281,7 +324,7 @@ def router(ctx) -> APIRouter:
     # ------------------------------------------------------------ pets (pets.py)
 
     _PET_SQL = (
-        "SELECT p.id, p.name, p.species, p.hidden, COUNT(DISTINCT s.asset_id) AS photos,"
+        "SELECT p.id, p.name, p.species, p.hidden, p.birthday, COUNT(DISTINCT s.asset_id) AS photos,"
         " (SELECT s2.id FROM pet_sightings s2 JOIN assets a2 ON a2.id = s2.asset_id WHERE s2.pet_id = p.id"
         "  AND a2.trashed_at IS NULL AND a2.locked_by IS NULL ORDER BY s2.score DESC LIMIT 1) AS cover"
         " FROM pets p LEFT JOIN pet_sightings s ON s.pet_id = p.id"
@@ -289,7 +332,7 @@ def router(ctx) -> APIRouter:
 
     def _pet_json(row) -> dict:
         return {"id": row["id"], "name": row["name"], "species": row["species"], "hidden": bool(row["hidden"]),
-                "photos": row["photos"], "cover": row["cover"]}
+                "photos": row["photos"], "cover": row["cover"], "birthday": row["birthday"]}
 
     def get_pet(conn, pet_id: int) -> dict:
         row = conn.execute(_PET_SQL + " WHERE p.id = ? GROUP BY p.id", (pet_id,)).fetchone()
@@ -325,6 +368,8 @@ def router(ctx) -> APIRouter:
                 conn.execute("UPDATE pets SET name = ? WHERE id = ?", (body.name.strip() or None, pet_id))
             if body.hidden is not None:
                 conn.execute("UPDATE pets SET hidden = ? WHERE id = ?", (int(body.hidden), pet_id))
+            if body.birthday is not None:
+                conn.execute("UPDATE pets SET birthday = ? WHERE id = ?", (clean_birthday(body.birthday), pet_id))
             return get_pet(conn, pet_id)
 
     @r.post("/api/pets/{pet_id}/merge")

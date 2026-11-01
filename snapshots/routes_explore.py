@@ -37,10 +37,18 @@ def _rows_by_id(conn, ids: list[int], user_id: int) -> dict:
     return {row["id"]: row for row in rows}
 
 
+def event_json(e: dict, versions: dict) -> dict:
+    """An event for the app: without its list of photos, with who was there (names only, no birthdays)."""
+    out = {k: v for k, v in e.items() if k not in ("ids", "people")}
+    out["people"] = [{"id": p["id"], "name": p["name"], "photos": p["photos"]} for p in e.get("people", [])]
+    out["cover_v"] = versions.get(e["cover"])
+    return out
+
+
 def router(ctx) -> APIRouter:
     cfg, worker = ctx.cfg, ctx.worker
     duplicates = analysis.DuplicateFinder(cfg)
-    events = analysis.EventFinder(cfg)
+    events = analysis.EventFinder(cfg, worker.clip)
     ctx.duplicates, ctx.events = duplicates, events
     r = APIRouter()
 
@@ -140,7 +148,7 @@ def router(ctx) -> APIRouter:
         with db.session(cfg.db_path) as conn:
             found = events.events(conn)
             versions = db.versions(conn, [e["cover"] for e in found])
-        return {"events": [dict(e, cover_v=versions.get(e["cover"])) for e in found]}
+        return {"events": [event_json(e, versions) for e in found]}
 
     # ------------------------------------------------------------ screenshots, documents, receipts
 

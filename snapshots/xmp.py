@@ -313,7 +313,8 @@ def write(path: Path, meta: dict) -> None:
 def meta_for(conn, asset_id: int) -> dict | None:
     """What Snapshots knows about an item that belongs in its sidecar."""
     a = conn.execute("SELECT id, path, kind, taken_at, taken_at_file, lat, lon, position_edited, description,"
-                     " locked_by, trashed_at, rating, label, flag FROM assets WHERE id = ?", (asset_id,)).fetchone()
+                     " locked_by, trashed_at, rating, label, flag, place_guess FROM assets WHERE id = ?",
+                     (asset_id,)).fetchone()
     if a is None:
         return None
     tags = [r[0] for r in conn.execute(
@@ -333,7 +334,8 @@ def meta_for(conn, asset_id: int) -> dict | None:
         "label": a["label"],
         "flag": a["flag"],
         "taken": a["taken_at"],
-        "lat": a["lat"], "lon": a["lon"],
+        # A guessed place (placeguess.py) is Snapshots' guess, not a fact about the photo: kept out.
+        "lat": None if a["place_guess"] else a["lat"], "lon": None if a["place_guess"] else a["lon"],
         "extra": bool(a["description"] or tags or people or favorite or a["taken_at_file"] or a["position_edited"]
                       or a["rating"] or a["label"]),
     }

@@ -257,8 +257,11 @@ def router(ctx) -> APIRouter:
                 pass
             new = conn.execute("SELECT lat FROM assets WHERE id = ?", (new_id,)).fetchone()
             if src["lat"] is not None and new["lat"] is None:
-                conn.execute("UPDATE assets SET lat = ?, lon = ?, position_edited = 1, geo_done = 0 WHERE id = ?",
-                             (src["lat"], src["lon"], new_id))
+                if src["place_guess"]:      # a guess stays a guess (placeguess.py): the new file is looked at itself
+                    conn.execute("UPDATE assets SET place_checked = 0 WHERE id = ?", (new_id,))
+                else:
+                    conn.execute("UPDATE assets SET lat = ?, lon = ?, position_edited = 1, geo_done = 0 WHERE id = ?",
+                                 (src["lat"], src["lon"], new_id))
             conn.execute("UPDATE assets SET description = ?, locked_by = ? WHERE id = ?",
                          (src["description"], src["locked_by"], new_id))
             conn.execute("INSERT OR IGNORE INTO asset_tags (asset_id, tag_id) SELECT ?, tag_id FROM asset_tags"

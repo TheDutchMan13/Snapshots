@@ -249,7 +249,7 @@ def router(ctx) -> APIRouter:
         strength = {}
         for r in rows:
             d = {"description": r["description"], "city": r["city"], "state": r["state"],
-                 "country": r["country"], **extra[r["id"]]}
+                 "country": r["country"], "landmark": r["landmark"], "caption": r["caption"], **extra[r["id"]]}
             strength[r["id"]] = ranking.word_strength(d, tokens, {t: speller.rarity(t) for t in tokens})
         return sorted(rows, key=lambda r: -strength[r["id"]])   # stable: newest first within each level
 
@@ -352,8 +352,11 @@ def router(ctx) -> APIRouter:
         out["date_guess"] = row["date_guess"] if row["taken_at_file"] is None else None
         out["position_edited"] = bool(row["position_edited"])
         out["position"] = [row["lat"], row["lon"]] if row["lat"] is not None else None
+        out["place_guess"] = row["place_guess"]
+        out["caption"] = row["caption"]
+        out["landmark"] = row["landmark"]
         out["quality"] = None if row["keep_quality"] else analysis.quality_label(
-            cfg, row["sharpness"], row["brightness"], row["highlights"])
+            cfg, row["sharpness"], row["brightness"], row["highlights"], row["eyes_closed"], row["category"])
         with db.session(cfg.db_path) as conn:
             out["people"] = [
                 {"face_id": p["id"], "person_id": p["person_id"], "name": p["name"]}
@@ -516,7 +519,8 @@ def router(ctx) -> APIRouter:
         with db.session(cfg.db_path) as conn:
             # The thumbnail is what Clean up and search by content look at: measure it again.
             conn.execute("UPDATE assets SET edits = ?, edit_v = ?, quality_done = 0, clip_done = 0, colors_done = 0,"
-                         " turn = NULL, turn_done = 1 WHERE id = ?", (text, edit_v, asset_id))
+                         " turn = NULL, turn_done = 1, caption_done = 0, landmark = NULL WHERE id = ?",
+                         (text, edit_v, asset_id))
             conn.execute("DELETE FROM pet_sightings WHERE asset_id = ?", (asset_id,))
             conn.execute("DELETE FROM clip_vectors WHERE asset_id = ?", (asset_id,))
             _make_thumb(cfg, conn, asset_id, "photo", full, text)
@@ -558,6 +562,13 @@ def router(ctx) -> APIRouter:
                     kept = None if new == original and body.reset_date else original
                     conn.execute("UPDATE assets SET taken_at = ?, taken_at_file = ?, date_guess = NULL WHERE id = ?",
                                  (new, kept, i))
+                    # A place guessed from the photos taken around the old date goes, and a photo without
+                    # a place is looked at again for the new date (placeguess.py).
+                    conn.execute("UPDATE assets SET lat = NULL, lon = NULL, place_guess = NULL, geo_done = 1,"
+                                 " city = NULL, state = NULL, country = NULL"
+                                 " WHERE id = ? AND place_guess = 'nearby'", (i,))
+                    conn.execute("UPDATE assets SET place_checked = 0 WHERE id = ? AND lat IS NULL"
+                                 " AND position_edited = 0", (i,))
             if body.reset_position:
                 # Read the position from the file again on the next look.
                 for i in ids:
@@ -570,16 +581,17 @@ def router(ctx) -> APIRouter:
                     has = info["lat"] is not None
                     conn.execute(
                         "UPDATE assets SET lat = ?, lon = ?, position_edited = 0, city = NULL, state = NULL,"
-                        " country = NULL, geo_done = ? WHERE id = ?", (info["lat"], info["lon"], 0 if has else 1, i))
+                        " country = NULL, geo_done = ?, place_guess = NULL, place_checked = 0 WHERE id = ?",
+                        (info["lat"], info["lon"], 0 if has else 1, i))
             elif body.clear_position:
                 conn.executemany(
                     "UPDATE assets SET lat = NULL, lon = NULL, position_edited = 1, city = NULL, state = NULL,"
-                    " country = NULL, geo_done = 1 WHERE id = ?", [(i,) for i in ids])
+                    " country = NULL, geo_done = 1, place_guess = NULL WHERE id = ?", [(i,) for i in ids])
             elif body.position is not None:
                 lat, lon = round(body.position[0], 6), round(body.position[1], 6)
                 conn.executemany(
                     "UPDATE assets SET lat = ?, lon = ?, position_edited = 1, city = NULL, state = NULL,"
-                    " country = NULL, geo_done = 0 WHERE id = ?", [(lat, lon, i) for i in ids])
+                    " country = NULL, geo_done = 0, place_guess = NULL WHERE id = ?", [(lat, lon, i) for i in ids])
             if body.description is not None:
                 text = body.description.strip() or None
                 conn.executemany("UPDATE assets SET description = ? WHERE id = ?", [(text, i) for i in ids])

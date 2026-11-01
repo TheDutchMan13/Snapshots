@@ -555,7 +555,8 @@ async function renderEventHead(ev) {
     info = events.find((e) => e.start === ev.start && e.end === ev.end);
   } catch (_) { /* the photos still show */ }
   const title = info ? eventTitle(info) : "Event";
-  headRow(title, info ? `${eventDates(info)} · ${plural(info.count, "item")}` : null, [
+  const place = info && info.title && info.place && !info.title.includes(info.place) ? `${info.place} · ` : "";
+  headRow(title, info ? `${place}${eventDates(info)} · ${plural(info.count, "item")}` : null, [
     button("Save as album", "btn small", async () => {
       const name = await askText("Save as album", "Album name", title, "Create album");
       if (!name) return;
@@ -567,6 +568,7 @@ async function renderEventHead(ev) {
     }),
     link("All events", "#/events", "btn small"),
   ]);
+  if (info && info.people && info.people.length) $("page-head").append(peopleLinks(info.people));
 }
 
 function renderQualityHead() {
@@ -584,7 +586,7 @@ function renderQualityHead() {
       if (ok) await moveToTrash(ids);
     }),
     link("Clean up", "#/cleanup", "btn small"),
-  ], "Photos that look blurry or too dark. Select the ones to keep and press Looks fine, or move them to the trash.");
+  ], "Photos that look blurry, too dark or too bright, or where someone's eyes are shut. Select the ones to keep and press Looks fine, or move them to the trash.");
 }
 
 /** How search results are ranked: by content (look), words and content together (mix), or by date. */
@@ -647,6 +649,9 @@ async function renderPersonHead(id) {
   headRow(wrap, plural(person.photos, "photo"), [
     button("Same person as…", "btn small", () => mergePerson(person)),
     button("Check faces", "btn small", () => checkFaces(person)),
+    button(person.birthday ? `Birthday: ${fmtBirthday(person.birthday)}` : "Add birthday", "btn small", async () => {
+      if (await birthdayDialog(person, `/api/people/${person.id}`)) renderHead();
+    }),
     button("Smart album", "btn small", () => smartAlbumDialog(null, { people: [person.id] }, person.name || "")),
     button(person.hidden ? "Show in People" : "Hide", "btn small", async () => {
       try {
@@ -660,6 +665,85 @@ async function renderPersonHead(id) {
       if (strip && S.route.person === id) $("page-head").append(strip);
     });
   }
+  const head = $("page-head").firstChild;      // this render's header: a newer one replaces it
+  togetherStrip(person).then((strip) => {
+    if (strip && S.route.person === id && $("page-head").firstChild === head) $("page-head").append(strip);
+  });
+}
+
+/** "Often with" and the events this person was at. Null when there is neither. */
+async function togetherStrip(person) {
+  let data;
+  try { data = await api(`/api/people/${person.id}/together`); } catch (_) { return null; }
+  if (!data.people.length && !data.events.length) return null;
+  const box = el("section", "together");
+  if (data.people.length) {
+    box.append(el("h2", "section-title small", "Often with"));
+    const row = el("div", "together-people");
+    for (const p of data.people) {
+      const a = link("", `#/people/${p.id}`, "together-person");
+      a.append(p.face_id ? img(faceUrl(p.face_id), "", "avatar small") : el("span", "pick-ph"));
+      const t = el("span", null, p.name);
+      t.append(el("small", null, plural(p.together, "photo")));
+      a.append(t);
+      row.append(a);
+    }
+    box.append(row);
+  }
+  if (data.events.length) {
+    box.append(el("h2", "section-title small", "Events"));
+    const row = el("div", "memory-row");
+    for (const e of data.events.slice(0, 20)) {
+      const c = link("", eventHash(e), "memory");
+      c.append(img(thumbUrl(e.cover, e.cover_v)));
+      const label = el("span", "memory-label");
+      label.append(el("strong", null, eventTitle(e)), el("span", null, eventDates(e)));
+      c.append(label);
+      row.append(c);
+    }
+    box.append(row);
+  }
+  return box;
+}
+
+/** "12 March 1990", or "12 March" when the year isn't known. */
+function fmtBirthday(b) {
+  const noYear = b.startsWith("--");
+  const d = new Date(`${noYear ? "2000" : b.slice(0, 4)}-${b.slice(-5)}T12:00:00`);
+  return d.toLocaleDateString(undefined, noYear ? { day: "numeric", month: "long" } : { day: "numeric", month: "long", year: "numeric" });
+}
+
+/** Set or remove a person's (or pet's) birthday. True when it changed. */
+async function birthdayDialog(who, url) {
+  const b = who.birthday || "";
+  const noYear = b.startsWith("--");
+  return modal({
+    title: who.name ? `${who.name}'s birthday` : "Birthday", ok: "Save",
+    build: (body) => {
+      body.append(el("p", "muted", "Birthdays show up in On this day, and a birthday party on that day is named after them."));
+      const [w1, when] = field("Date", { type: "date", value: b && !noYear ? b : b ? `2000-${b.slice(-5)}` : "" });
+      const wrap = el("label", "field inline");
+      const skip = el("input");
+      skip.type = "checkbox";
+      skip.checked = noYear;
+      wrap.append(skip, el("span", null, "I don't know the year"));
+      body.append(w1, wrap);
+      if (b) body.append(button("Remove the birthday", "linklike", async () => {
+        when.value = "";
+        try { await patch(url, { birthday: "" }); flashNote("Birthday removed"); $("modal").close(); renderHead(); }
+        catch (err) { flashNote(err.message); }
+      }));
+      return {
+        submit: async () => {
+          if (!when.value) throw new Error("Choose a date.");
+          const birthday = skip.checked ? `--${when.value.slice(5)}` : when.value;
+          await patch(url, { birthday });
+          flashNote("Birthday saved");
+          return true;
+        },
+      };
+    },
+  });
 }
 
 // The faces least like the rest of this person first: where a face of someone else is most likely to be.
@@ -898,7 +982,7 @@ function updateEmpty() {
     ? "Search by what's in the photo is not ready yet." : "Try other words, like “dog”, “snow” or “birthday cake”.");
   else if (S.q) showEmpty("No matches", S.search && S.search.content
     ? "No names, places or dates match. Try “What's in the photo” above." : "Try a different word, or clear the search.");
-  else if (r.quality) showEmpty("Nothing to tidy up", "No blurry or dark photos were found.");
+  else if (r.quality) showEmpty("Nothing to tidy up", "No blurry, dark or washed-out photos were found.");
   else if (r.sorted) showEmpty(`No ${SORTED[r.sorted].title.toLowerCase()}`, "None were found, or they are still being sorted.");
   else if (r.highlights) showEmpty("No highlights yet", "Highlights are picked once search by what's in the photo has looked at your photos.");
   else if (r.locked) showEmpty("Your locked folder is empty", "Select photos anywhere in the library and press Move to Locked.");
@@ -1813,6 +1897,9 @@ async function renderPetHead(id) {
       try { await post(`/api/pets/${pet.id}/merge`, { into: target.id }); location.hash = `#/pets/${target.id}`; }
       catch (err) { flashNote(err.message); }
     }),
+    button(pet.birthday ? `Birthday: ${fmtBirthday(pet.birthday)}` : "Add birthday", "btn small", async () => {
+      if (await birthdayDialog(pet, `/api/pets/${pet.id}`)) renderHead();
+    }),
     button(pet.hidden ? "Show in Pets" : "Hide", "btn small", async () => {
       try { await patch(`/api/pets/${pet.id}`, { hidden: !pet.hidden }); if (!pet.hidden) location.hash = "#/pets"; else renderHead(); }
       catch (err) { flashNote(err.message); }
@@ -1925,6 +2012,7 @@ function fmtDay(iso, opts) {
   return isNaN(d) ? iso.slice(0, 10) : d.toLocaleDateString(undefined, opts);
 }
 function eventTitle(e) {
+  if (e.title) return e.title;      // worked out from what the photos show (eventnames.py)
   if (e.kind === "trip") return e.place ? `Trip to ${e.place}` : "A trip";
   const day = fmtDay(e.start, { weekday: "long", day: "numeric", month: "long" });
   return e.place ? `${e.place}, ${day}` : day;
@@ -1936,6 +2024,26 @@ function eventDates(e) {
   return `${a} – ${b} · ${e.days} days`;
 }
 const eventHash = (e) => `#/events/${encodeURIComponent(e.start)}/${encodeURIComponent(e.end)}`;
+
+/** "With Anna, Ben and 2 more", or null. */
+function withPeople(people, most = 3) {
+  if (!people || !people.length) return null;
+  const names = people.slice(0, most).map((p) => p.name);
+  const rest = people.length - names.length;
+  if (rest > 0) return `With ${names.join(", ")} and ${rest} more`;
+  return names.length === 1 ? `With ${names[0]}` : `With ${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+}
+
+/** Links to the people at an event. */
+function peopleLinks(people) {
+  const box = el("p", "event-people");
+  box.append(document.createTextNode("Who was there: "));
+  people.forEach((p, i) => {
+    if (i) box.append(document.createTextNode(", "));
+    box.append(link(p.name, `#/people/${p.id}`));
+  });
+  return box;
+}
 
 let eventKind = "all";      // Events page: all, trips (away from home) or days out
 
@@ -1976,6 +2084,8 @@ async function renderEvents() {
     if (e.kind === "trip") box.append(el("span", "card-badge", e.days > 1 ? `Trip · ${e.days} days` : "Trip"));
     card.append(box, el("div", "card-title", eventTitle(e)));
     card.append(el("div", "card-meta", `${eventDates(e)} · ${plural(e.count, "item")}`));
+    const who = withPeople(e.people);
+    if (who) card.append(el("div", "card-meta", who));
     cards.append(card);
   }
   $("collection").replaceChildren(frag);
@@ -1993,21 +2103,28 @@ const yearsAgo = (n) => (n === 1 ? "1 year ago" : `${n} years ago`);
 async function renderMemoriesStrip() {
   let data;
   try { data = await api(`/api/memories?today=${localDate()}`); } catch (_) { return; }
-  if (S.q || S.route.name !== "all" || S.route.memory || !data.memories.length) return;
+  const birthdays = data.birthdays || [], trips = data.trips || [];
+  if (S.q || S.route.name !== "all" || S.route.memory || !(data.memories.length || birthdays.length || trips.length)) return;
   const head = $("page-head");
   head.replaceChildren();
   const box = el("section", "memories");
   box.setAttribute("aria-label", "On this day");
   box.append(el("h2", "memories-title", "On this day"));
   const row = el("div", "memory-row");
-  for (const m of data.memories) {
-    const card = link("", `#/memories/${m.date}`, "memory");
-    card.append(img(thumbUrl(m.cover, m.cover_v)));
+  const card = (href, cover, v, title, meta) => {
+    const c = link("", href, "memory");
+    c.append(img(thumbUrl(cover, v)));
     const label = el("span", "memory-label");
-    label.append(el("strong", null, yearsAgo(m.years_ago)), el("span", null, plural(m.count, "item")));
-    card.append(label);
-    row.append(card);
+    label.append(el("strong", null, title), el("span", null, meta));
+    c.append(label);
+    row.append(c);
+  };
+  for (const b of birthdays) {
+    card(b.kind === "pet" ? `#/pets/${b.id}` : `#/people/${b.id}`, b.cover, b.cover_v,
+      b.age ? `${b.name} turns ${b.age}` : `${b.name}'s birthday`, plural(b.count, "photo"));
   }
+  for (const t of trips) card(eventHash(t), t.cover, t.cover_v, t.title, `${yearsAgo(t.years_ago)} · ${plural(t.count, "item")}`);
+  for (const m of data.memories) card(`#/memories/${m.date}`, m.cover, m.cover_v, yearsAgo(m.years_ago), plural(m.count, "item"));
   box.append(row);
   head.append(box);
   head.hidden = false;
@@ -2285,7 +2402,7 @@ async function renderCleanup() {
 
   const q = el("a", "cleanup-link");
   q.href = "#/cleanup/quality";
-  q.append(el("strong", null, "Blurry or dark photos"), el("span", "muted", sum.low_quality ? plural(sum.low_quality, "photo") : "None found"));
+  q.append(el("strong", null, "Blurry, dark or bright photos, and shut eyes"), el("span", "muted", sum.low_quality ? plural(sum.low_quality, "photo") : "None found"));
   frag.append(q);
   try {
     const so = await api("/api/sorting");
@@ -2870,6 +2987,13 @@ $("new-items").addEventListener("click", () => { $("scroller").scrollTop = 0; re
 // ------------------------------------------------------------------ search
 
 let searchTimer = null;
+/** Close the viewer and search for these words (a landmark, say). */
+function searchFor(words) {
+  viewer.close();
+  $("search").value = words;
+  $("search").dispatchEvent(new Event("input"));
+}
+
 $("search").addEventListener("input", (e) => {
   clearTimeout(searchTimer);
   searchTimer = setTimeout(() => {
@@ -3072,16 +3196,29 @@ function renderDetails(item) {
   };
   row("File", item.filename);
   if (item.description !== undefined && !item.locked) row("Description", descriptionBox(item));
+  if (item.caption) row("Shows", el("span", "caption-text", item.caption));
+  if (item.landmark) row("Landmark", button(item.landmark, "linklike", () => searchFor(item.landmark)));
   const when = el("span", "with-action");
   const GUESS = { gps: " (from the GPS time)", nearby: " (guessed from the photos beside it)", file: " (when the file was last changed)" };
   when.append(document.createTextNode(fmtDateTime(item.taken_at) + (item.date_edited ? " (changed)" : GUESS[item.date_guess] || "")));
   if (!item.locked && item.id !== undefined && item.description !== undefined) when.append(button("Change", "linklike", () => editDetails([item.id], item)));
   row("Taken", when);
+  const where = el("span", "with-action");
   if (item.place) {
-    row("Place", link(placeName(item.place), placeHash(item.place.country, item.place.state, item.place.city)));
+    where.append(link(placeName(item.place), placeHash(item.place.country, item.place.state, item.place.city)));
   } else if (item.position) {
-    row("Place", `${item.position[0].toFixed(4)}, ${item.position[1].toFixed(4)}`);
+    where.append(document.createTextNode(`${item.position[0].toFixed(4)}, ${item.position[1].toFixed(4)}`));
   }
+  if (item.position && item.place_guess) {
+    // A guessed place (placeguess.py, landmarks.py): say so, and let it go.
+    where.append(document.createTextNode(item.place_guess === "landmark"
+      ? " (guessed from the landmark)" : " (guessed from photos taken around then)"));
+    if (!item.locked) where.append(button("Not here", "linklike", async () => {
+      try { await post("/api/assets/details", { ids: [item.id], clear_position: true }); flashNote("Place removed"); loadDetail(item.id); }
+      catch (err) { flashNote(err.message); }
+    }));
+  }
+  if (item.place || item.position) row("Place", where);
   if (item.edited && !item.locked) {
     const box = el("span", "with-action");
     box.append(document.createTextNode("Edited in Snapshots "));
@@ -3150,7 +3287,7 @@ function renderDetails(item) {
     row("Text in photo", t);
   }
   if (item.quality) {
-    const box = el("span", "quality-note", item.quality === "dark" ? "Looks too dark " : "Looks blurry ");
+    const box = el("span", "quality-note", { dark: "Looks too dark ", bright: "Looks too bright ", eyes: "Someone's eyes look shut " }[item.quality] || "Looks blurry ");
     box.append(button("It's fine", "btn small", async () => {
       try { await post("/api/cleanup/fine", { ids: [item.id] }); item.quality = null; renderDetails(item); } catch (err) { flashNote(err.message); }
     }));
@@ -4992,9 +5129,26 @@ function sortingSection(ctl) {
         (on) => on ? "Screenshots and documents are left out of All and Photos" : "Screenshots and documents show in All and Photos again"),
       check("Guess dates for files that have none", "guess_dates",
         (on) => on ? "Dates are guessed from GPS time and the files beside them" : "Dates are no longer guessed"),
-      el("p", "muted small", "A file with no date in it gets one from the GPS time saved with it, or from the photos taken just before and after it in the same folder (by file name), instead of the time the file was last changed. Guessed dates say so in the photo's details, and you can always change them."));
+      el("p", "muted small", "A file with no date in it gets one from the GPS time saved with it, or from the photos taken just before and after it in the same folder (by file name), instead of the time the file was last changed. Guessed dates say so in the photo's details, and you can always change them."),
+      check("Guess places for photos that have none", "guess_places",
+        (on) => on ? "Places are guessed from the photos taken around the same time" : "Places are no longer guessed"),
+      el("p", "muted small", "A photo without a GPS position (from a camera, a scan, or a phone with location off) gets the place of a photo taken within 15 minutes of it, or a place between two photos taken before and after it, if those are close together. A photo recognised as a famous landmark gets that landmark's place. Guessed places say so in the photo's details, are never written into .xmp files, and you can always change or remove them."),
+      ...(o.content ? [check("Recognise famous landmarks", "landmarks",
+        (on) => on ? "Famous landmarks are recognised" : "Landmarks are no longer recognised"),
+      el("p", "muted small", "Photos of about 160 well-known places (the Eiffel Tower, the Grand Canyon, Sydney Opera House…) get the landmark's name, so you can search for it. A photo with a GPS position is only compared with the places near it.")] : []),
+      check("Describe each photo in a sentence", "captions",
+        (on) => on ? "Photos will be described in the background" : "Photos are no longer described"),
+      el("p", "muted small", o.captions
+        ? captionsLine(o.captions_status)
+        : "Writes a short description of each photo, like “A red motorcycle parked in a garage”, which you can search for and see in the photo's details. It runs on this computer: the first time, a 275 MB model (Florence-2) is downloaded, and then each photo takes a second or more, so a big library takes a while (newest first)."));
   };
   return { box, draw };
+}
+
+function captionsLine(st) {
+  if (st.message) return st.message;
+  if (st.pending) return `Describing photos, newest first: ${plural(st.pending, "photo")} to go. Searches find the ones already described.`;
+  return "Every photo is described. New photos are described as they arrive.";
 }
 
 function startupSection(ctl) {

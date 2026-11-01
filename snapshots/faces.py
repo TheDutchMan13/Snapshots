@@ -152,9 +152,15 @@ def face_quality(grey, landmarks: list[float], box: tuple[float, float, float, f
 
     rx, ry, lx, ly, nx, ny = landmarks[:6]
     d = float(np.hypot(lx - rx, ly - ry))
-    out = {"eyes": None, "sharp": None, "frontal": None}
+    out = {"eyes": None, "sharp": None, "frontal": None, "shut": None}
     if d < 6:
         return out
+    try:
+        from .eyes import face_shut
+
+        out["shut"] = face_shut(grey, landmarks)
+    except Exception as exc:  # never let the eye check stop faces being found
+        log.info("could not check the eyes: %s", exc)
     ratios = []
     for ex, ey in ((rx, ry), (lx, ly)):
         eye = _patch(grey, ex, ey, EYE_PATCH * d)
@@ -897,9 +903,9 @@ class FacesJob:
                 found = []
             for f, q in zip(faces, found):
                 if q:
-                    conn.execute("UPDATE faces SET landmarks = ?, eyes = ?, sharp = ?, frontal = ?, quality = ?"
-                                 " WHERE id = ?", (json.dumps(q["landmarks"]), q["eyes"], q["sharp"], q["frontal"],
-                                                   q.get("quality"), f["id"]))
+                    conn.execute("UPDATE faces SET landmarks = ?, eyes = ?, sharp = ?, frontal = ?, quality = ?,"
+                                 " shut = ? WHERE id = ?", (json.dumps(q["landmarks"]), q["eyes"], q["sharp"],
+                                                            q["frontal"], q.get("quality"), q.get("shut"), f["id"]))
             conn.execute("UPDATE assets SET faceq_done = 1 WHERE id = ?", (row["id"],))
             conn.commit()
         return True
@@ -913,10 +919,10 @@ class FacesJob:
                 person_id = conn.execute("INSERT INTO people (created_at) VALUES (?)", (stamp,)).lastrowid
             face_id = conn.execute(
                 "INSERT INTO faces (asset_id, person_id, x, y, w, h, score, embedding, created_at,"
-                " landmarks, eyes, sharp, frontal, quality) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " landmarks, eyes, sharp, frontal, quality, shut) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (asset_id, person_id, face["x"], face["y"], face["w"], face["h"], face["score"],
                  emb.tobytes(), stamp, json.dumps(face["landmarks"]) if face.get("landmarks") else None,
-                 face.get("eyes"), face.get("sharp"), face.get("frontal"), face.get("quality")),
+                 face.get("eyes"), face.get("sharp"), face.get("frontal"), face.get("quality"), face.get("shut")),
             ).lastrowid
             self.clusterer.add(person_id, emb, face.get("quality"))
             self.needs_regroup = True

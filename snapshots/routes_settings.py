@@ -50,6 +50,9 @@ class XmpBody(BaseModel):
 class SortingBody(BaseModel):
     hide_clutter: bool | None = None
     guess_dates: bool | None = None
+    guess_places: bool | None = None
+    landmarks: bool | None = None
+    captions: bool | None = None
 
 
 class StorageBody(BaseModel):
@@ -100,18 +103,25 @@ def router(ctx) -> APIRouter:
         }
 
     def sorting_json() -> dict:
-        return {"hide_clutter": cfg.hide_clutter, "guess_dates": cfg.guess_dates,
+        cap = worker.captions.state
+        return {"hide_clutter": cfg.hide_clutter, "guess_dates": cfg.guess_dates, "guess_places": cfg.guess_places,
+                "landmarks": cfg.landmarks, "captions": cfg.captions,
+                "captions_status": {"pending": cap.get("pending", 0), "done": cap.get("done", 0),
+                                    "message": cap.get("message"), "running": cap.get("running", False)},
                 "content": cfg.smart_search, "lookalike": cfg.lookalike_similarity}
 
     @r.put("/api/settings/sorting")
     def save_sorting(body: SortingBody, request: Request):
         require_admin(request)
-        values = {k: v for k, v in (("hide_clutter", body.hide_clutter), ("guess_dates", body.guess_dates))
-                  if v is not None}
+        values = {k: v for k, v in (("hide_clutter", body.hide_clutter), ("guess_dates", body.guess_dates),
+                                    ("guess_places", body.guess_places), ("landmarks", body.landmarks),
+                                    ("captions", body.captions)) if v is not None}
         if values:
             save_settings(values, cfg.config_file)
             for k, v in values.items():
                 setattr(cfg, k, v)
+            if values.get("captions") is False:
+                worker.captions.unload()
             worker.poke()
         return sorting_json()
 

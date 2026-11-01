@@ -121,10 +121,10 @@ def library_words(conn) -> Counter:
     Words read in only one photo are left out: text recognition makes up a few."""
     df: Counter = Counter()
     ocr: Counter = Counter()
-    for row in conn.execute("SELECT path, city, state, country, description, ocr_text, colors, camera FROM assets"
-                            " WHERE trashed_at IS NULL AND locked_by IS NULL"):
+    for row in conn.execute("SELECT path, city, state, country, description, ocr_text, colors, camera, caption,"
+                            " landmark FROM assets WHERE trashed_at IS NULL AND locked_by IS NULL"):
         words = set()
-        for text in (row[0].replace("\\", "/"), row[1], row[2], row[3], row[4], row[6], row[7]):
+        for text in (row[0].replace("\\", "/"), row[1], row[2], row[3], row[4], row[6], row[7], row[8], row[9]):
             if text:
                 words.update(w for w in WORD.findall(text.lower()) if len(w) <= MAX_WORD)
         df.update(words)
@@ -179,7 +179,8 @@ class Speller:
         """Gather the words again if anything changed (slow on a big library: run in the background)."""
         now = time.monotonic() if now is None else now
         key = conn.execute("SELECT COUNT(*), COALESCE(MAX(id), 0), COALESCE(SUM(length(coalesce(description, ''))"
-                           " + length(coalesce(ocr_text, '')) + length(coalesce(city, ''))), 0),"
+                           " + length(coalesce(ocr_text, '')) + length(coalesce(city, ''))"
+                           " + length(coalesce(caption, '')) + length(coalesce(landmark, ''))), 0),"
                            " COUNT(locked_by), COUNT(colors) FROM assets WHERE trashed_at IS NULL").fetchone()
         key = tuple(key) + tuple(conn.execute(
             "SELECT (SELECT COUNT(*) FROM asset_tags), (SELECT COUNT(*) FROM people WHERE name IS NOT NULL),"

@@ -127,19 +127,31 @@ class QualityJob:
 # ---------------------------------------------------------------- blurry and dark
 
 def low_quality_sql(cfg) -> str:
-    """SQL condition (on alias a) for photos that look blurry or too dark, and weren't marked as fine."""
+    """SQL condition (on alias a) for photos that look blurry, too dark or too bright, or where someone's eyes
+    are shut (eyes.py), and weren't marked as fine."""
     return (
         f"(a.kind = 'photo' AND a.keep_quality = 0 AND a.quality_done = 1 AND"
         f" (a.sharpness < {float(cfg.blur_threshold)!r}"
-        f"  OR (a.brightness < {float(cfg.dark_threshold)!r} AND a.highlights < {float(DARK_HIGHLIGHTS)!r})))"
+        f"  OR (a.brightness < {float(cfg.dark_threshold)!r} AND a.highlights < {float(DARK_HIGHLIGHTS)!r})"
+        f"  OR (a.brightness > {float(cfg.bright_threshold)!r} AND {BRIGHT_OK})"
+        f"  OR a.eyes_closed = 1))"
     )
 
 
-def quality_label(cfg, sharpness, brightness, highlights) -> str | None:
+# Screenshots, documents and receipts are white on purpose.
+BRIGHT_OK = "coalesce(a.category, '') NOT IN ('screenshot', 'document', 'receipt')"
+
+
+def quality_label(cfg, sharpness, brightness, highlights, eyes_closed=0, category=None) -> str | None:
     if brightness is not None and brightness < cfg.dark_threshold and (highlights or 0) < DARK_HIGHLIGHTS:
         return "dark"
     if sharpness is not None and sharpness < cfg.blur_threshold:
         return "blurry"
+    if brightness is not None and brightness > cfg.bright_threshold \
+            and category not in ("screenshot", "document", "receipt"):
+        return "bright"
+    if eyes_closed:
+        return "eyes"
     return None
 
 
@@ -576,6 +588,7 @@ def find_events(rows: list[dict], gap_hours: float = 4, jump_km: float = 30, tri
             "start": start, "end": end, "days": days,
             "count": len(items),
             "cover": _cover(items),
+            "ids": [r["id"] for r in items],
         })
     out.reverse()
     return out
@@ -647,8 +660,11 @@ def _cover(items: list[dict]) -> int:
 
 
 class EventFinder:
-    def __init__(self, cfg):
+    def __init__(self, cfg, clip=None):
+        from .eventnames import Namer
+
         self.cfg = cfg
+        self.namer = Namer(clip) if clip is not None else None
         self._lock = threading.Lock()
         self._key = None
         self._events: list[dict] = []
@@ -660,7 +676,14 @@ class EventFinder:
             # dates and positions people changed by hand
             " COALESCE(SUM(CAST(replace(replace(replace(taken_at, '-', ''), 'T', ''), ':', '') AS INTEGER) % 1000003), 0),"
             " COALESCE(SUM(CAST(coalesce(lat, 0) * 10000 + coalesce(lon, 0) * 100 AS INTEGER) % 1000003), 0),"
-            " COUNT(beauty), COUNT(category)"
+            " COUNT(beauty), COUNT(category),"
+            # titles and who was there (eventnames.py)
+            # a photo whose picture changed loses its vector (clip_done = 0) and gets a new one
+            " COALESCE(SUM(CASE WHEN clip_done = 1 THEN id END), 0), (SELECT COUNT(*) FROM clip_vectors),"
+            " (SELECT COUNT(*) || ':' || COALESCE(SUM(person_id), 0) || ':' || COALESCE(MAX(id), 0) FROM faces),"
+            " (SELECT COUNT(*) || ':' || COALESCE(SUM(hidden), 0) || ':' || COALESCE(SUM(length(name) * id), 0)"
+            "  || ':' || COALESCE(SUM(CAST(replace(coalesce(birthday, ''), '-', '') AS INTEGER) % 1000003 * id), 0)"
+            "  FROM people)"
             " FROM assets WHERE trashed_at IS NULL"
         ).fetchone())
 
@@ -675,7 +698,17 @@ class EventFinder:
                     " WHERE a.trashed_at IS NULL AND a.archived_at IS NULL AND a.locked_by IS NULL"
                     " AND NOT EXISTS (SELECT 1 FROM assets lp WHERE lp.live_video = a.id) ORDER BY a.taken_at, a.id"
                 )]
-                self._events = find_events(rows, self.cfg.event_gap_hours, min_items=self.cfg.event_min_items)
+                found = find_events(rows, self.cfg.event_gap_hours, min_items=self.cfg.event_min_items)
+                from .eventnames import name_events
+
+                try:
+                    name_events(conn, found, self.namer)
+                except Exception:          # never let titles stop events being listed
+                    log.exception("could not name events")
+                    for e in found:
+                        e.setdefault("title", None)
+                        e.setdefault("people", [])
+                self._events = found
                 self._key = key
             return self._events
 

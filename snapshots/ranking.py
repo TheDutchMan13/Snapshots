@@ -7,7 +7,8 @@ the best of each list come next, taking turns. K = 60 is the usual value (Cormac
 Büttcher, 2009); it keeps one list's first few places from outweighing everything else.
 
 Words results have no order of their own besides date, so they are ranked by how many of the words
-were found in strong places (a person's name, a tag, the description, the place) before weak ones
+were found in strong places (a person's name, a tag, the description, the place, a landmark, the
+caption) before weak ones
 (the file name, the camera, text read in the photo), then newest first.
 """
 
@@ -29,7 +30,7 @@ def fuse(*lists: list[int], k: int = K, weights: tuple[float, ...] | None = None
     return sorted(score.items(), key=lambda x: (-x[1], first_seen[x[0]]))
 
 
-STRONG_FIELDS = ("people", "tags", "description", "city", "state", "country")
+STRONG_FIELDS = ("people", "tags", "description", "city", "state", "country", "landmark", "caption")
 
 
 def word_strength(row: dict, tokens: list[str], weights: dict[str, float] | None = None) -> float:

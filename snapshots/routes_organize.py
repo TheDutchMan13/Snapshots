@@ -1,6 +1,6 @@
 """Archive, tags, stacks, folders, memories ("on this day"), the map and the locked folder."""
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
@@ -59,6 +59,10 @@ _versions = db.versions
 
 # Shown in memories and the map: everything in the library that isn't hidden.
 VISIBLE = f"a.trashed_at IS NULL AND a.archived_at IS NULL AND {db.LIVE_PART_HIDDEN} AND {db.NOT_LOCKED}"
+
+
+def _leap(year: int) -> bool:
+    return year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
 
 
 def router(ctx) -> APIRouter:
@@ -341,7 +345,72 @@ def router(ctx) -> APIRouter:
                 "date": f"{year:04d}{month_day}", "year": year, "years_ago": day.year - year,
                 "count": row["count"], "cover": row["cover"], "cover_v": versions.get(row["cover"]),
             })
-        return {"memories": out}
+        with db.session(cfg.db_path) as conn:
+            birthdays = birthdays_on(conn, day)
+            trips = trips_around(conn, day)
+        return {"memories": out, "birthdays": birthdays, "trips": trips}
+
+    def birthdays_on(conn, day: date) -> list[dict]:
+        """Named people and pets whose birthday is today (29 February counts on 28 February in other years)."""
+        days = [day.strftime("%m-%d")]
+        if day.strftime("%m-%d") == "02-28" and not _leap(day.year):
+            days.append("02-29")
+        marks = ",".join("?" * len(days))
+        out = []
+        for kind, sql in (
+                ("person", "SELECT p.id, p.name, p.birthday, COUNT(DISTINCT f.asset_id),"
+                           " (SELECT f2.asset_id FROM faces f2 JOIN assets a ON a.id = f2.asset_id"
+                           f"  WHERE f2.person_id = p.id AND {VISIBLE} AND a.kind = 'photo'"
+                           "  ORDER BY f2.w * coalesce(f2.quality, 0.5) DESC, a.beauty DESC LIMIT 1)"
+                           " FROM people p JOIN faces f ON f.person_id = p.id JOIN assets a ON a.id = f.asset_id"
+                           f" WHERE p.name IS NOT NULL AND p.hidden = 0 AND substr(p.birthday, -5) IN ({marks})"
+                           f" AND {VISIBLE} GROUP BY p.id"),
+                ("pet", "SELECT p.id, p.name, p.birthday, COUNT(DISTINCT s.asset_id),"
+                        " (SELECT s2.asset_id FROM pet_sightings s2 JOIN assets a ON a.id = s2.asset_id"
+                        f"  WHERE s2.pet_id = p.id AND {VISIBLE} ORDER BY s2.score DESC LIMIT 1)"
+                        " FROM pets p JOIN pet_sightings s ON s.pet_id = p.id JOIN assets a ON a.id = s.asset_id"
+                        f" WHERE p.name IS NOT NULL AND p.hidden = 0 AND substr(p.birthday, -5) IN ({marks})"
+                        f" AND {VISIBLE} GROUP BY p.id")):
+            for pid, name, birthday, count, cover in conn.execute(sql, days):
+                if cover is None:
+                    continue
+                age = day.year - int(birthday[:4]) if birthday[:4].isdigit() else None
+                out.append({"kind": kind, "id": pid, "name": name, "age": age if age and age > 0 else None,
+                            "count": count, "cover": cover})
+        versions = _versions(conn, [b["cover"] for b in out])
+        for b in out:
+            b["cover_v"] = versions.get(b["cover"])
+        return out
+
+    def trips_around(conn, day: date) -> list[dict]:
+        """Trips (and named days out) from earlier years that were happening on this day, or began within
+        three days of it."""
+        events = getattr(ctx, "events", None)
+        if events is None:
+            return []
+        out = []
+        for e in events.events(conn):
+            if e["kind"] != "trip" and not e.get("title"):
+                continue
+            start, end = date.fromisoformat(e["start"][:10]), date.fromisoformat(e["end"][:10])
+            if start.year >= day.year:
+                continue
+            hit = False
+            for year in {start.year, end.year}:     # a trip over New Year: either year's date
+                try:
+                    same = day.replace(year=year)
+                except ValueError:                  # 29 February
+                    same = date(year, 3, 1)
+                hit = hit or start - timedelta(days=3) <= same <= end
+            if not hit:
+                continue
+            out.append({"title": e.get("title") or (f"Trip to {e['place']}" if e.get("place") else "A trip"),
+                        "start": e["start"], "end": e["end"], "days": e["days"], "count": e["count"],
+                        "year": start.year, "years_ago": day.year - start.year, "cover": e["cover"]})
+        versions = _versions(conn, [t["cover"] for t in out])
+        for t in out:
+            t["cover_v"] = versions.get(t["cover"])
+        return out[:6]
 
     # ------------------------------------------------------------ map
 

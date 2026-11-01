@@ -264,6 +264,20 @@ a.btn { display: inline-flex; align-items: center; color: inherit; text-decorati
 }
 .memory-label strong { font-size: 15px; }
 
+/* ---- who was there (people pages and events) */
+.together { flex-basis: 100%; }
+.together .memory { flex-basis: 140px; }
+.together-people { display: flex; flex-wrap: wrap; gap: 8px; }
+.together-person {
+  display: flex; align-items: center; gap: 8px; padding: 4px 12px 4px 4px; border-radius: 999px;
+  background: var(--tile); color: inherit; text-decoration: none;
+}
+.together-person:hover { filter: brightness(1.06); }
+.together-person small { display: block; color: var(--muted); font-size: 12px; }
+.together-person .avatar.small, .together-person .pick-ph { width: 32px; height: 32px; border-radius: 50%; }
+.event-people { flex-basis: 100%; margin: 4px 0 0; }
+.caption-text { font-style: italic; }
+
 /* ---- folders */
 .crumbs { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; min-width: 0; }
 .crumbs a { font-size: 18px; text-decoration: none; }

@@ -6,7 +6,8 @@ In order of priority it:
 3. measures photos for the Clean up page (copies, bursts, blur, darkness);
 4. finds faces in new photos and groups them into people;
 5. prepares search by content;
-6. reads text in photos.
+6. reads text in photos;
+7. sorts, names colours, finds pets, sideways photos and landmarks, and (if switched on) describes photos.
 It also copies the database every `backup_hours`, and the photos to the offsite copy every `offsite_hours`.
 Steps 2-6 work in small batches, so a rescan never waits long.
 """
@@ -34,6 +35,10 @@ from .ocr import OcrJob
 from .places import PlacesJob
 from .scanner import Scanner
 from .sorting import SortJob
+from .placeguess import PlaceGuessJob
+from .landmarks import LandmarkJob
+from .captions import CaptionJob
+from .eyes import EyesJob
 
 log = logging.getLogger("snapshots.worker")
 
@@ -55,6 +60,10 @@ class Worker:
         self.colors = ColorJob(cfg)
         self.turns = TurnJob(cfg, self.clip)
         self.pets = PetsJob(cfg, self.clip)
+        self.place_guess = PlaceGuessJob(cfg)
+        self.landmarks = LandmarkJob(cfg, self.clip)
+        self.captions = CaptionJob(cfg)
+        self.eyes = EyesJob(cfg)
         self.backup = BackupJob(cfg)
         self.offsite = OffsiteJob(cfg)
         self._wake = threading.Event()
@@ -117,6 +126,9 @@ class Worker:
             "text": dict(self.ocr.state, enabled=self.cfg.text_search),
             "sorting": dict(self.sort.state, enabled=True),
             "pets": dict(self.pets.state, enabled=self.cfg.find_pets and self.cfg.smart_search),
+            "captions": dict(self.captions.state, enabled=self.cfg.captions),
+            "landmarks": dict(self.landmarks.state, enabled=self.cfg.landmarks and self.cfg.smart_search),
+            "place_guess": dict(self.place_guess.state, enabled=self.cfg.guess_places),
             "backup": dict(self.backup.state, enabled=bool(self.cfg.backup_hours and self.cfg.backup_hours > 0)),
             "offsite": dict(self.offsite.state, enabled=self.offsite.enabled()),
             "xmp": dict(self.xmp.state, enabled=self.cfg.xmp_sidecars),
@@ -132,15 +144,19 @@ class Worker:
             (self.motion, True),
             (self.dates, self.cfg.guess_dates),
             (self.xmp, self.cfg.xmp_sidecars),
+            (self.place_guess, self.cfg.guess_places),
             (self.places, self.cfg.places),
             (self.quality, self.cfg.photo_checks),
             (self.faces, self.cfg.faces),
+            (self.eyes, self.cfg.faces and self.cfg.photo_checks),
             (self.clip, self.cfg.smart_search),
             (self.ocr, self.cfg.text_search),
             (self.sort, True),
             (self.colors, True),
             (self.pets, self.cfg.find_pets and self.cfg.smart_search),
             (self.turns, self.cfg.find_sideways and self.cfg.smart_search),
+            (self.landmarks, self.cfg.landmarks and self.cfg.smart_search),
+            (self.captions, self.cfg.captions),
         ]
 
     # ------------------------------------------------------------ internals

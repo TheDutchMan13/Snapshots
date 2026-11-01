@@ -87,7 +87,7 @@ def test_small_photos_are_not_called_blurry_for_being_small():
 
 
 def test_dark_needs_dim_highlights_too():
-    cfg = type("C", (), {"dark_threshold": 30, "blur_threshold": 50})()
+    cfg = type("C", (), {"dark_threshold": 30, "blur_threshold": 50, "bright_threshold": 235})()
     under = ImageEnhance.Brightness(scene(5)).enhance(0.12)
     m = measure(thumb(under))
     assert analysis.quality_label(cfg, m["sharpness"], m["brightness"], m["highlights"]) == "dark"

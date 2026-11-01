@@ -13,7 +13,7 @@ import logging
 import os
 import threading
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from . import db, libraries, linking, media, webhooks, xmp
@@ -199,6 +199,12 @@ def index_file(cfg: Config, conn, rel: str, full: Path, digest: str | None = Non
             values + (rel, now()),
         )
         asset_id = cur.lastrowid
+        if has_position:
+            # Photos without a place taken around then may now get one (placeguess.py).
+            conn.execute("UPDATE assets SET place_checked = 0 WHERE place_checked = 1 AND lat IS NULL"
+                         " AND position_edited = 0 AND taken_at BETWEEN ? AND ?",
+                         ((datetime.fromisoformat(taken) - timedelta(hours=2)).isoformat(timespec="seconds"),
+                          (datetime.fromisoformat(taken) + timedelta(hours=2)).isoformat(timespec="seconds")))
     else:
         # The content changed: everything worked out from the old picture is stale. What people
         # added by hand (date, position, description, edits, albums, tags) stays.
@@ -223,6 +229,8 @@ def index_file(cfg: Config, conn, rel: str, full: Path, digest: str | None = Non
                 dhash = NULL, sharpness = NULL, brightness = NULL, highlights = NULL, quality_done = 0, keep_quality = 0,
                 clip_done = 0, ocr_done = 0, ocr_text = NULL, sort_done = 0, beauty = NULL, faceq_done = 0,
                 colors = NULL, colors_done = 0, turn = NULL, turn_done = 0, pets_done = 0,
+                place_guess = NULL, place_checked = 0, caption = NULL, caption_done = 0,
+                landmark = NULL, landmark_done = 0, eyes_closed = 0,
                 trashed_at = NULL   -- a different picture now: never inherit the old one's trash state
             WHERE id = ?
             """,

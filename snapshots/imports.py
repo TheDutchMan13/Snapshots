@@ -120,7 +120,8 @@ class Applier:
                 and -90 <= lat <= 90 and -180 <= lon <= 180 and not (abs(lat) < 1e-6 and abs(lon) < 1e-6):
             if row["lat"] is None or abs(row["lat"] - lat) > NEAR or abs(row["lon"] - lon) > NEAR:
                 conn.execute("UPDATE assets SET lat = ?, lon = ?, position_edited = 1, city = NULL, state = NULL,"
-                             " country = NULL, geo_done = 0 WHERE id = ?", (round(lat, 6), round(lon, 6), asset_id))
+                             " country = NULL, geo_done = 0, place_guess = NULL WHERE id = ?",
+                             (round(lat, 6), round(lon, 6), asset_id))
                 c["locations"] += 1
         text = (meta.get("description") or "").strip()
         if text and not (row["description"] or "").strip():
