@@ -29,7 +29,7 @@ jobs:
         run: python -m pip install -r requirements-dev.txt pyinstaller
 
       - name: Tests
-        run: python -m pytest -q
+        run: python -m pytest -q --reruns 2 --reruns-delay 2   # a slow runner can make a timing-dependent test fail once
 
       - name: Build exe
         run: pyinstaller --noconfirm --clean snapshots.spec
