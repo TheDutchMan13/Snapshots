@@ -28,7 +28,7 @@ Snapshots is a self-hosted photo and video library for Windows. Your originals s
 - **360° photos and panoramas:** drag to look around a 360° photo, or scroll along a wide panorama
 - **Locked folder:** move private photos behind a PIN. They are hidden from everyone everywhere else in Snapshots (the files stay in your folder)
 - **Comments** on photos and albums, and an **Activity** page with what others commented and added to albums
-- **Videos that don't play** in the app (HEVC from phones, AVI, MKV) are converted once when you open them, with the graphics card (NVIDIA, AMD or Intel) when ffmpeg can use it
+- **Videos that don't play** in the app (AVI, MKV, and HEVC or AV1 when Windows lacks the codec) are converted once when you open them. The app asks its window what it can play, so HEVC and AV1 play as they are where the codec is installed, with the graphics card (NVIDIA, AMD or Intel) when ffmpeg can use it
 - **Database backups** every day, kept in the data folder or on another drive
 - **API keys** for scripts and other apps
 - **Stars, colour labels, pick and reject**, as in Lightroom: in the viewer press 0 to 5 for stars, 6 to 9 for a colour label, P to pick, X to reject (the same keys work on selected photos). **Filter** in the top bar shows only photos with some stars, a label, or the picks. Smart albums can use them too ("4 stars and up")

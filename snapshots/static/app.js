@@ -3510,12 +3510,32 @@ async function manageUsers() {
 
 // ------------------------------------------------------------------ videos
 
-/** Play a video in the viewer. Videos the app can't play (HEVC, AVI, MKV...) are converted once first. */
-async function playVideo(item, stage) {
+let videoCodecs;
+/** The video formats this window can play, as the "?can=..." the server wants ("" when unknown).
+ *  HEVC and AV1 need a codec from Windows, so each window is asked rather than assumed. */
+function canPlayQuery(safe) {
+  if (safe) return "?can=h264";
+  if (videoCodecs === undefined) {
+    try {
+      const v = document.createElement("video");
+      const tests = {
+        h264: 'video/mp4; codecs="avc1.42E01E"', hevc: 'video/mp4; codecs="hvc1.1.6.L93.B0"',
+        av1: 'video/mp4; codecs="av01.0.05M.08"', vp9: 'video/webm; codecs="vp9"', vp8: 'video/webm; codecs="vp8"',
+      };
+      videoCodecs = Object.keys(tests).filter((k) => v.canPlayType(tests[k])).join(",");
+    } catch (_) { videoCodecs = ""; }
+  }
+  return videoCodecs ? `?can=${videoCodecs}` : "";
+}
+
+/** Play a video in the viewer. Videos this window can't play (HEVC or AV1 without a codec, AVI, MKV...) are converted once first.
+ *  `safe`: after a video that was said to be playable failed, ask for one that plays everywhere (H.264). */
+async function playVideo(item, stage, safe = false) {
   const msg = el("p", "msg", "Loading…");
   stage.replaceChildren(msg);
+  const playUrl = `/api/assets/${item.id}/play${canPlayQuery(safe)}`;
   let info;
-  try { info = await api(`/api/assets/${item.id}/play`); } catch (_) { info = { url: `/api/assets/${item.id}/view?v=${item.v}` }; }
+  try { info = await api(playUrl); } catch (_) { info = { url: `/api/assets/${item.id}/view?v=${item.v}` }; }
   const current = () => S.detail && S.detail.id === item.id && viewer.open;
   while (info.preparing && current()) {
     if (info.error) {
@@ -3525,7 +3545,7 @@ async function playVideo(item, stage) {
     msg.textContent = `Preparing this video so it can play here… ${Math.round((info.progress || 0) * 100)}%`;
     await new Promise((ok) => setTimeout(ok, 1500));
     if (!current()) return;
-    try { info = await api(`/api/assets/${item.id}/play`); } catch (err) { msg.textContent = err.message; return; }
+    try { info = await api(playUrl); } catch (err) { msg.textContent = err.message; return; }
   }
   if (!current()) return;
   const v = document.createElement("video");
@@ -3533,6 +3553,8 @@ async function playVideo(item, stage) {
   v.preload = "metadata";
   v.src = info.url;
   v.addEventListener("error", () => {
+    // Said to be playable but wasn't (a codec that is there but can't do this file): once more, as H.264.
+    if (!safe && !info.converted && info.can_convert !== false && current()) { playVideo(item, stage, true); return; }
     const text = info.can_convert === false
       ? "This video can't be played here. Installing ffmpeg lets Snapshots convert it. Use Download meanwhile."
       : "This video cannot be played here. Use Download.";
@@ -4803,7 +4825,7 @@ async function trimDialog(item) {
       const load = async () => {
         for (;;) {
           let info;
-          try { info = await api(`/api/assets/${item.id}/play`); } catch (err) { ctl.error(err.message); return; }
+          try { info = await api(`/api/assets/${item.id}/play${canPlayQuery(false)}`); } catch (err) { ctl.error(err.message); return; }
           if (info.url) { video.src = info.url; return; }
           ctl.error(`Preparing the video so it can play here… ${Math.round((info.progress || 0) * 100)}%`);
           await new Promise((r) => setTimeout(r, 1000));

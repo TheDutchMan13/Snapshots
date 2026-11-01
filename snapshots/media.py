@@ -531,6 +531,19 @@ NEEDS_CONVERTING = {"hevc", "h265"}
 # (or, when only the file type is the problem, copied into an MP4 without converting the picture).
 PLAYABLE_CODECS = {"h264", "vp8", "vp9", "av1"}
 PLAYABLE_CONTAINERS = {".mp4", ".m4v", ".mov", ".webm"}
+KNOWN_CODECS = {"h264", "hevc", "vp8", "vp9", "av1"}
+
+
+def playable_here(info: dict, path, can: str | None = None) -> bool:
+    """Can the window asking play this video as it is? `can` is the codecs it says it can play (H.264 always
+    counts); without it, the usual ones. The container must be one browsers open."""
+    if can is None:
+        return bool(info.get("playable", True))
+    codec = info.get("codec")
+    if codec is None:
+        return True
+    supported = {c.strip().lower() for c in can.split(",")} & KNOWN_CODECS | {"h264"}
+    return codec in supported and os.path.splitext(str(path))[1].lower() in PLAYABLE_CONTAINERS
 
 # Hardware encoders, tried in this order when video_encoder = "auto". Each is tested once with a tiny
 # clip, because ffmpeg lists encoders its build knows even when this computer's graphics card lacks them.

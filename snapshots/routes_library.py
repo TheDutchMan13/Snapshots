@@ -462,8 +462,9 @@ def router(ctx) -> APIRouter:
     # ------------------------------------------------------------ playing videos
 
     @r.get("/api/assets/{asset_id}/play")
-    def play(asset_id: int, request: Request, convert: bool = True):
-        """How to play a video: straight from the file, from a converted copy, or after converting it."""
+    def play(asset_id: int, request: Request, convert: bool = True, can: str | None = None):
+        """How to play a video: straight from the file, from a converted copy, or after converting it.
+        `can`: the codecs the asking window can play ("h264,hevc,av1"); without it, the usual ones."""
         row = get_row(asset_id, current_user(request))
         if row["kind"] != "video":
             raise HTTPException(404, "Not a video")
@@ -479,7 +480,7 @@ def router(ctx) -> APIRouter:
             with db.session(cfg.db_path) as conn:
                 conn.execute("UPDATE assets SET vcodec = ? WHERE id = ?", (json.dumps(info), asset_id))
         native = {"url": f"/api/assets/{asset_id}/view?v={db.version(row)}", "converted": False}
-        if info.get("playable", True) or not media.has_ffmpeg():
+        if media.playable_here(info, full, can) or not media.has_ffmpeg():
             return dict(native, codec=info.get("codec"), can_convert=media.has_ffmpeg())
         if not convert:
             return dict(native, codec=info.get("codec"), can_convert=True)
