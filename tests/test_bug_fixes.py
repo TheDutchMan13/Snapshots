@@ -152,3 +152,19 @@ def test_the_home_page_does_not_wait_for_events(tmp_path):
         setup_admin(c)
         wait_scan(c)
         assert c.get("/api/memories", params={"today": "2024-07-01"}).status_code == 200
+
+
+def test_landmark_places_come_back_after_guessing_is_switched_on_again(tmp_path):
+    root = tmp_path / "Photos"
+    make_jpeg(root / "tower.jpg", "2024:01:01 10:00:00")
+    c, cfg = new_client(tmp_path, root)
+    with c:
+        setup_admin(c)
+        wait_scan(c)
+        with db.session(cfg.db_path) as conn:
+            conn.execute("UPDATE assets SET lat = 48.8, lon = 2.3, place_guess = 'landmark', landmark = 'Eiffel Tower',"
+                         " landmark_done = 1")
+        c.put("/api/settings/sorting", json={"guess_places": False})
+        with db.session(cfg.db_path) as conn:
+            # The place goes; the photo is looked at for landmarks again, so it returns when switched back on.
+            assert tuple(conn.execute("SELECT lat, landmark_done FROM assets").fetchone()) == (None, 0)

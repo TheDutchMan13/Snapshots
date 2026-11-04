@@ -25,6 +25,7 @@ import struct
 import urllib.parse
 
 import hashlib
+import logging
 import os
 import hmac
 import secrets
@@ -32,6 +33,8 @@ import threading
 import time
 from collections import defaultdict, deque
 from datetime import datetime, timedelta
+
+log = logging.getLogger("snapshots.auth")
 
 COOKIE = "snapshots_session"
 DEVICE_COOKIE = "snapshots_device"
@@ -341,17 +344,50 @@ def _key(conn) -> bytes | None:
     path = os.path.join(os.path.dirname(row[2]), SECRET_FILE)
     with _keys_lock:
         if path not in _keys:
-            try:
-                with open(path, "rb") as fh:
-                    key = fh.read()
-            except FileNotFoundError:
-                key = secrets.token_bytes(32)
-                with open(path, "xb") as fh:
-                    fh.write(key)
-            if len(key) < 32:
-                raise ValueError(f"{path} is damaged")
+            key = _read_key(path)
+            if key is None:
+                key = _new_key(path)
             _keys[path] = key
         return _keys[path]
+
+
+def _read_key(path: str) -> bytes | None:
+    try:
+        with open(path, "rb") as fh:
+            key = fh.read()
+    except FileNotFoundError:
+        return None
+    # A file cut short (a crash while it was first written, by an older version) can't open anything:
+    # it is replaced, and people with two-step login use a recovery code once.
+    return key if len(key) >= 32 else None
+
+
+def _new_key(path: str) -> bytes:
+    """Write a new key in one go: written to a file of its own first, then put in place only if no other
+    process has put one there meanwhile (then that one is used)."""
+    key = secrets.token_bytes(32)
+    tmp = f"{path}.{secrets.token_hex(6)}.tmp"
+    with open(tmp, "wb") as fh:
+        fh.write(key)
+        fh.flush()
+        os.fsync(fh.fileno())
+    try:
+        if os.path.exists(path) and _read_key(path) is None:
+            os.replace(tmp, path)            # the damaged one goes
+            return key
+        try:
+            os.link(tmp, path)               # fails if another process made one first
+            return key
+        except FileExistsError:
+            return _read_key(path) or key
+        except OSError:                      # a drive without links (FAT32): last writer wins
+            os.replace(tmp, path)
+            return key
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
 
 
 def _stream(key: bytes, nonce: bytes, n: int) -> bytes:
@@ -397,7 +433,11 @@ def check_second_step(conn, user_id: int, code: str) -> str | None:
     row = conn.execute("SELECT totp_secret, totp_last FROM users WHERE id = ?", (user_id,)).fetchone()
     if row is None or not row["totp_secret"]:
         return None
-    secret = unseal(conn, row["totp_secret"])
+    try:
+        secret = unseal(conn, row["totp_secret"])
+    except Exception:                        # the key file can't be read: recovery codes still work
+        log.exception("two-step secret can't be opened")
+        secret = None
     step = check_totp(secret, code, row["totp_last"]) if secret else None
     if step is not None:
         # Only one request can claim a step: the condition makes a replayed code fail.

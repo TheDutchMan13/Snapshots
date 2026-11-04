@@ -57,7 +57,8 @@ def safe_filename(name: str | None) -> str:
     return stem + ext.lower()
 
 
-UPLOAD_RESERVE = 1024 ** 3   # an upload must leave at least this much free on the drives it is written to
+UPLOAD_RESERVE = 1024 ** 3        # an upload must leave at least this much free on the library's drive ...
+TEMP_RESERVE = 100 * 1024 ** 2    # ... and this much in the temporary folder (where it waits until it is read)
 
 
 def upload_problem(cfg, length: str | None) -> tuple[int, str] | None:
@@ -72,12 +73,12 @@ def upload_problem(cfg, length: str | None) -> tuple[int, str] | None:
         return 411, "Uploads need their size (Content-Length)."
     if size > cfg.max_upload_gb * 1024 ** 3:
         return 413, f"Upload failed: this is more than {cfg.max_upload_gb:g} GB at once. Send fewer files at a time."
-    for folder in {str(cfg.library_path), tempfile.gettempdir()}:
+    for folder, reserve in ((str(cfg.library_path), UPLOAD_RESERVE), (tempfile.gettempdir(), TEMP_RESERVE)):
         try:
             free = shutil.disk_usage(folder).free
         except OSError:
             continue
-        if free < size + UPLOAD_RESERVE:
+        if free < size + reserve:
             return 507, "Upload failed: the PC's drive is almost full."
     return None
 

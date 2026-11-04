@@ -177,3 +177,18 @@ def test_two_step_secrets_are_sealed_in_the_database(tmp_path):
             # Tampered with: refused, not crashed.
             conn.execute("UPDATE users SET totp_secret = 'v1:AAAA', totp_last = NULL")
             assert auth.check_second_step(conn, 1, "123456") is None
+
+
+def test_a_damaged_key_file_still_lets_recovery_codes_in(tmp_path):
+    c, cfg = new_client(tmp_path, _library(tmp_path))
+    with c:
+        setup_admin(c)
+        secret = c.post("/api/auth/two-step/start").json()["secret"]
+        code = auth.totp_at(secret, int(time.time()) // 30)
+        codes = c.post("/api/auth/two-step/confirm", json={"code": code}).json()["recovery_codes"]
+        key_file = cfg.db_path.parent / auth.SECRET_FILE
+        key_file.write_bytes(b"")               # cut short, as by a crash
+        auth._keys.clear()
+        with db.session(cfg.db_path) as conn:
+            assert auth.check_second_step(conn, 1, codes[0]) == "recovery"
+            assert len(key_file.read_bytes()) == 32      # replaced by a whole new key

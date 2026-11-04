@@ -454,7 +454,7 @@ async function renderHead() {
           const all = [];
           let cursor = "";
           for (;;) {
-            const page = await pageApi(`/api/assets?turned=true&limit=500${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
+            const page = await api(`/api/assets?turned=true&limit=500${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
             all.push(...page.items);
             if (!page.next) break;
             cursor = page.next;
@@ -521,7 +521,7 @@ async function renderHead() {
 async function renderSearchHead() {
   const q = S.q;
   let sum;
-  try { sum = await pageApi(`/api/search?${filterParams()}`); } catch (_) { sum = null; }
+  try { sum = await pageApi(`/api/search?${filterParams()}`); } catch (err) { if (err instanceof Stale) throw err; sum = null; }
   if (q !== S.q) return;
   S.search = sum;
   if (!sum) { $("page-head").hidden = true; S.look = false; return; }
@@ -570,7 +570,7 @@ async function renderEventHead(ev) {
   try {
     const { events } = await pageApi("/api/events");
     info = events.find((e) => e.start === ev.start && e.end === ev.end);
-  } catch (_) { /* the photos still show */ }
+  } catch (err) { if (err instanceof Stale) throw err; /* the photos still show */ }
   const title = info ? eventTitle(info) : "Event";
   const place = info && info.title && info.place && !info.title.includes(info.place) ? `${info.place} · ` : "";
   headRow(title, info ? `${place}${eventDates(info)} · ${plural(info.count, "item")}` : null, [
@@ -643,7 +643,7 @@ async function renderPersonHead(id) {
     try {
       // Same name as someone already listed? They are probably the same person.
       if (name) {
-        const all = (await pageApi("/api/people")).people;
+        const all = (await api("/api/people")).people;
         const twin = all.find((p) => p.id !== person.id && (p.name || "").toLowerCase() === name.toLowerCase());
         if (twin) {
           const merge = await confirmBox(`Is this ${twin.name}?`,
@@ -1893,7 +1893,7 @@ async function renderPetHead(id) {
   wrap.append(input);
   headRow(wrap, plural(pet.photos, "photo"), [
     button("Same pet as…", "btn small", async () => {
-      const others = (await pageApi("/api/pets")).pets.filter((p) => p.id !== pet.id);
+      const others = (await api("/api/pets")).pets.filter((p) => p.id !== pet.id);
       if (!others.length) { flashNote("There is no other pet to join yet."); return; }
       const target = await modal({
         title: "Which pet is this the same as?", ok: null, cancel: "Cancel",
@@ -2437,7 +2437,7 @@ async function renderCleanup() {
       a.append(el("strong", null, k.title), el("span", "muted", plural(c.count, k.one)));
       frag.append(a);
     }
-  } catch (_) { /* the rest of the page still shows */ }
+  } catch (err) { if (err instanceof Stale) throw err; /* the rest of the page still shows */ }
 
   const h = el("h2", "section-title", "Duplicates");
   if (sum.groups) h.append(el("span", "muted", `${plural(sum.extra, "extra item")} · ${fmtSize(sum.space)} could be freed`));
@@ -2480,7 +2480,7 @@ async function renderCleanup() {
     try {
       let moved = 0;
       for (;;) {
-        const page = await pageApi(`/api/cleanup/groups?limit=100&${params}`);
+        const page = await api(`/api/cleanup/groups?limit=100&${params}`);
         if (!page.groups.length) break;
         for (const g of page.groups) {
           const res = await post("/api/cleanup/resolve", { keep: [g.keep], trash: g.items.map((i) => i.id).filter((i) => i !== g.keep) });
@@ -2508,7 +2508,7 @@ async function renderCleanup() {
       page.groups.forEach((g) => list.append(groupCard(g)));
       offset = page.next || offset + page.groups.length;
       more.hidden = !page.next;
-    } catch (err) { flashNote(err.message); }
+    } catch (err) { if (!(err instanceof Stale)) flashNote(err.message); }
     more.disabled = false;
   }
   await loadGroups();
@@ -2593,10 +2593,10 @@ async function renderStorage() {
   headRow("Storage", null, []);
   $("collection").replaceChildren(el("p", "muted", "Adding it all up…"));
   let s;
-  try { s = await pageApi("/api/storage"); } catch (err) { showEmpty("Something went wrong", err.message); return; }
+  try { s = await pageApi("/api/storage"); } catch (err) { if (err instanceof Stale) throw err; showEmpty("Something went wrong", err.message); return; }
   const refresh = button("Count again", "btn small", async () => {
     refresh.disabled = true;
-    try { await pageApi("/api/storage?fresh=true"); renderStorage(); } catch (err) { flashNote(err.message); refresh.disabled = false; }
+    try { await api("/api/storage?fresh=true"); renderStorage(); } catch (err) { flashNote(err.message); refresh.disabled = false; }
   });
   headRow("Storage", `${fmtSize(s.total)} of photos and videos`, [refresh],
     `Counted ${fmtDateTime(s.made_at)}. Locked folders are not included.`);
@@ -2713,7 +2713,7 @@ let healthTimer = null;
 async function renderHealth() {
   clearTimeout(healthTimer);
   let st;
-  try { st = await pageApi("/api/library-health"); } catch (err) { showEmpty("Library health", err.message); return; }
+  try { st = await pageApi("/api/library-health"); } catch (err) { if (err instanceof Stale) throw err; showEmpty("Library health", err.message); return; }
   if (S.route.view !== "health") return;
   const last = st.last;
   const actions = [];
@@ -2757,7 +2757,7 @@ async function renderHealth() {
       const q = new URLSearchParams({ offset, limit: 50 });
       if (S.healthStatus) q.set("status", S.healthStatus);
       let page;
-      try { page = await pageApi(`/api/library-health/issues?${q}`); } catch (err) { flashNote(err.message); return; }
+      try { page = await pageApi(`/api/library-health/issues?${q}`); } catch (err) { if (!(err instanceof Stale)) flashNote(err.message); return; }
       for (const i of page.issues) list.append(healthRow(i));
       offset = page.next || offset;
       more.hidden = !page.next;
@@ -2769,7 +2769,7 @@ async function renderHealth() {
   const sched = el("div", "health-sched");
   const [w, days] = field("Check by itself every (days, 0 for only when you ask)", { type: "number", min: "0", max: "365", step: "1", value: String(st.days || 0) });
   sched.append(w, button("Save", "btn small", async () => {
-    try { await pageApi("/api/library-health/settings", { method: "PUT", json: { days: Number(days.value || 0) } }); flashNote("Saved"); }
+    try { await api("/api/library-health/settings", { method: "PUT", json: { days: Number(days.value || 0) } }); flashNote("Saved"); }
     catch (err) { flashNote(err.message); }
   }));
   frag.append(el("h2", "section-title", "Schedule"), sched);

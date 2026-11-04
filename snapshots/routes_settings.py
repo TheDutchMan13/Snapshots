@@ -130,7 +130,9 @@ def router(ctx) -> APIRouter:
             with db.session(cfg.db_path) as conn:
                 if forget:
                     # Switched off means not shown any more. Looked at again if switched back on.
-                    conn.execute("UPDATE assets SET lat = NULL, lon = NULL, place_guess = NULL, geo_done = 1,"
+                    # (landmark_done = 0 for landmark places, so they come back when switched on again)
+                    conn.execute("UPDATE assets SET landmark_done = CASE WHEN place_guess = 'landmark' THEN 0"
+                                 " ELSE landmark_done END, lat = NULL, lon = NULL, place_guess = NULL, geo_done = 1,"
                                  " city = NULL, state = NULL, country = NULL, place_checked = 0"
                                  f" WHERE position_edited = 0 AND ({' OR '.join(forget)})")
                 if values.get("landmarks") is False:
