@@ -389,24 +389,30 @@ def router(ctx) -> APIRouter:
         if events is None:
             return []
         out = []
-        for e in events.events(conn):
+        # Without waiting: working out events can take a while after the library changed, and the home page
+        # shouldn't. Trips show up on a later visit then.
+        for e in events.events_soon():
             if e["kind"] != "trip" and not e.get("title"):
                 continue
             start, end = date.fromisoformat(e["start"][:10]), date.fromisoformat(e["end"][:10])
-            if start.year >= day.year:
-                continue
-            hit = False
-            for year in {start.year, end.year}:     # a trip over New Year: either year's date
+            # This day's date in the years around the trip (one over New Year has two; one that begins in
+            # early January may begin "within three days" of a late-December day the year before). Only
+            # earlier years count: a trip still going on (or this year's) is not a memory yet.
+            hit = None
+            for year in range(start.year - 1, end.year + 1):
+                if year >= day.year:
+                    break
                 try:
                     same = day.replace(year=year)
                 except ValueError:                  # 29 February
                     same = date(year, 3, 1)
-                hit = hit or start - timedelta(days=3) <= same <= end
-            if not hit:
+                if start - timedelta(days=3) <= same <= end:
+                    hit = year
+            if hit is None:
                 continue
             out.append({"title": e.get("title") or (f"Trip to {e['place']}" if e.get("place") else "A trip"),
                         "start": e["start"], "end": e["end"], "days": e["days"], "count": e["count"],
-                        "year": start.year, "years_ago": day.year - start.year, "cover": e["cover"]})
+                        "year": start.year, "years_ago": day.year - hit, "cover": e["cover"]})
         versions = _versions(conn, [t["cover"] for t in out])
         for t in out:
             t["cover_v"] = versions.get(t["cover"])

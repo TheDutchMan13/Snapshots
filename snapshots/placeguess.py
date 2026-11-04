@@ -103,12 +103,12 @@ class PlaceGuessJob:
             taken = _parse(r["taken_at"])
             pos = guess(taken, *neighbours(conn, r["taken_at"])) if taken else None
             if pos:
-                # Unless a place was set meanwhile.
+                # Unless a place was set meanwhile, or the date changed (then it is looked at again).
                 n = conn.execute("UPDATE assets SET lat = ?, lon = ?, place_guess = 'nearby', geo_done = 0,"
                                  " city = NULL, state = NULL, country = NULL"
-                                 " WHERE id = ? AND lat IS NULL AND position_edited = 0",
-                                 (pos[0], pos[1], r["id"])).rowcount
+                                 " WHERE id = ? AND lat IS NULL AND position_edited = 0 AND taken_at IS ?",
+                                 (pos[0], pos[1], r["id"], r["taken_at"])).rowcount
                 self.state["guessed"] += n
-            conn.execute("UPDATE assets SET place_checked = 1 WHERE id = ?", (r["id"],))
+            conn.execute("UPDATE assets SET place_checked = 1 WHERE id = ? AND taken_at IS ?", (r["id"], r["taken_at"]))
         conn.commit()
         return True

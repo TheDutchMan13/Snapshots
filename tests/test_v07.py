@@ -107,8 +107,8 @@ def test_smart_albums_fill_themselves(tmp_path):
         assert c.patch(f"/api/albums/{plain['id']}", json={"rule": {"words": "x"}}).status_code == 400
 
         # locked items never show in a smart album
-        c.post("/api/locked/pin", json={"pin": "2468", "password": ADMIN[1]})
-        c.post("/api/locked/open", json={"pin": "2468"})
+        c.post("/api/locked/pin", json={"pin": "246813", "password": ADMIN[1]})
+        c.post("/api/locked/open", json={"pin": "246813"})
         assert c.post("/api/locked", json={"ids": [ids["party.jpg"]], "value": True}).status_code == 200
         assert "party.jpg" not in names(c, album=words["id"])
         assert c.get(f"/api/albums/{words['id']}").json()["count"] == 2
@@ -348,8 +348,8 @@ def test_webhooks_never_mention_locked_items(tmp_path):
         ids = ids_by_name(c)
         c.app.state.ctx.webhooks.stop()
         c.post("/api/webhooks", json={"url": "http://x.local/", "events": ["*"]})
-        c.post("/api/locked/pin", json={"pin": "2468", "password": ADMIN[1]})
-        c.post("/api/locked/open", json={"pin": "2468"})
+        c.post("/api/locked/pin", json={"pin": "246813", "password": ADMIN[1]})
+        c.post("/api/locked/open", json={"pin": "246813"})
         c.post("/api/locked", json={"ids": [ids["dog.jpg"]], "value": True})
         with db.session(cfg.db_path) as conn:
             webhooks.emit_added(conn, [ids["dog.jpg"]], "scan")
@@ -771,8 +771,8 @@ def test_imports_never_bring_back_locked_photos(tmp_path):
         setup_admin(c)
         wait_scan(c)
         ids = ids_by_name(c)
-        c.post("/api/locked/pin", json={"pin": "2468", "password": ADMIN[1]})
-        c.post("/api/locked/open", json={"pin": "2468"})
+        c.post("/api/locked/pin", json={"pin": "246813", "password": ADMIN[1]})
+        c.post("/api/locked/open", json={"pin": "246813"})
         c.post("/api/locked", json={"ids": [ids["dog.jpg"]], "value": True})
         c.post("/api/locked/close")
         c.post("/api/imports/takeout", json={"path": str(tmp_path / "Takeout")})

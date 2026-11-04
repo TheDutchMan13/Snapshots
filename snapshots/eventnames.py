@@ -77,7 +77,7 @@ def near_birthday(birthday: str | None, start: str, end: str, days: int = 3) -> 
         month, day = int(birthday[-5:-3]), int(birthday[-2:])
     except ValueError:
         return False
-    for year in {a.year, b.year}:
+    for year in range(a.year - 1, b.year + 2):     # a birthday just over New Year from the event, too
         try:
             when = date(year, month, day)
         except ValueError:          # 29 February in a year without one

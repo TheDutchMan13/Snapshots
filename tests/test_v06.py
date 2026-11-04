@@ -188,9 +188,9 @@ def test_locked_folder(tmp_path):
         tag = c.post("/api/tags", json={"name": "private", "ids": [secret]}).json()
 
         assert c.post("/api/locked", json={"ids": [secret]}).status_code == 400          # no PIN yet
-        assert c.post("/api/locked/pin", json={"pin": "2468", "password": "wrong"}).status_code == 400
+        assert c.post("/api/locked/pin", json={"pin": "246813", "password": "wrong"}).status_code == 400
         assert c.post("/api/locked/pin", json={"pin": "12", "password": ADMIN[1]}).status_code == 400
-        assert c.post("/api/locked/pin", json={"pin": "2468", "password": ADMIN[1]}).json() == {"ok": True}
+        assert c.post("/api/locked/pin", json={"pin": "246813", "password": ADMIN[1]}).json() == {"ok": True}
         assert c.post("/api/locked", json={"ids": [secret]}).json() == {"count": 1}
 
         # Gone from everywhere, for everyone (its owner too, while the folder is closed).
@@ -210,7 +210,7 @@ def test_locked_folder(tmp_path):
 
         # Opening it with the PIN shows the owner's locked items, only there.
         assert c.post("/api/locked/open", json={"pin": "0000"}).status_code == 400
-        assert c.post("/api/locked/open", json={"pin": "2468"}).json()["open"] is True
+        assert c.post("/api/locked/open", json={"pin": "246813"}).json()["open"] is True
         assert names(c, locked="true") == ["secret.jpg"]
         assert names(c) == ["open.jpg"]
         assert c.get(f"/api/assets/{secret}/thumb").status_code == 200
@@ -228,7 +228,7 @@ def test_locked_folder(tmp_path):
 
         # Taking it out again puts it back where it was.
         assert c.post("/api/locked", json={"ids": [secret], "value": False}).status_code == 403   # closed
-        c.post("/api/locked/open", json={"pin": "2468"})
+        c.post("/api/locked/open", json={"pin": "246813"})
         assert c.post("/api/locked", json={"ids": [secret], "value": False}).json() == {"count": 1}
         assert names(c) == ["open.jpg", "secret.jpg"]
         assert c.get(f"/api/albums/{album['id']}").json()["count"] == 2
@@ -240,10 +240,10 @@ def test_pin_guessing_is_slowed_down(tmp_path):
     c, cfg = new_client(tmp_path, root)
     with c:
         setup_admin(c)
-        c.post("/api/locked/pin", json={"pin": "2468", "password": ADMIN[1]})
+        c.post("/api/locked/pin", json={"pin": "246813", "password": ADMIN[1]})
         for _ in range(5):
             assert c.post("/api/locked/open", json={"pin": "1111"}).status_code == 400
-        assert c.post("/api/locked/open", json={"pin": "2468"}).status_code == 429
+        assert c.post("/api/locked/open", json={"pin": "246813"}).status_code == 429
 
 
 # ------------------------------------------------------------------ several library folders

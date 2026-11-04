@@ -12,6 +12,7 @@ and locations changed in Immich, descriptions, and the names of people with wher
 import base64
 import json
 import logging
+import re
 import shutil
 import urllib.error
 import urllib.parse
@@ -275,9 +276,17 @@ def run(manager, cfg, url: str, key: str, user_id: int, copy_missing: bool, dry_
     return summary
 
 
+def _year_month(text) -> str:
+    """'2024/03' from the server's date, or 'Unknown'. Only digits of a real date become folder names:
+    the text comes from another server and must never lead outside the library."""
+    m = re.match(r"(\d{4})-(\d{2})", str(text))
+    if not m or not (1 <= int(m.group(2)) <= 12):
+        return "Unknown"
+    return f"{m.group(1)}/{m.group(2)}"
+
+
 def _download(cfg, conn, client: Client, asset: dict, sha1: str, into) -> int | None:
-    local = asset.get("localDateTime") or asset.get("fileCreatedAt") or ""
-    folder = into / (local[:4] or "Unknown") / (local[5:7] or "")
+    folder = into / _year_month(asset.get("localDateTime") or asset.get("fileCreatedAt") or "")
     name = asset.get("originalFileName") or f"{asset['id']}.jpg"
     try:
         new_id = imports.add_file(cfg, conn, folder, name, lambda fh: client.download(asset["id"], fh), sha1)

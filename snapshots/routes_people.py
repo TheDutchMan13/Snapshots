@@ -71,10 +71,9 @@ class Suggester:
     def _version(self, conn):
         return tuple(conn.execute(
             "SELECT (SELECT COUNT(*) || ':' || COALESCE(SUM(person_id), 0) || ':' || COALESCE(MAX(id), 0) FROM faces),"
-            " (SELECT COUNT(*) || ':' || SUM(hidden) || ':' || COALESCE(SUM(length(name) * id), 0) FROM people),"
             " (SELECT COUNT(*) FROM people_not_same),"
             " (SELECT COALESCE(SUM(trashed_at IS NOT NULL), 0) || ':' || COALESCE(SUM(locked_by IS NOT NULL), 0) FROM assets)"
-        ).fetchone()) + (self.cfg.min_faces_per_person, self.cfg.face_suggest_threshold)
+        ).fetchone()) + (db.people_version(conn), self.cfg.min_faces_per_person, self.cfg.face_suggest_threshold)
 
     def items(self, conn) -> list[dict]:
         if self.cfg.face_suggest_threshold <= 0:
@@ -271,6 +270,8 @@ def router(ctx) -> APIRouter:
             faces.move_apart(conn, person_id, body.into)
             if not dst["name"] and src["name"]:
                 conn.execute("UPDATE people SET name = ? WHERE id = ?", (src["name"], body.into))
+            if not dst["birthday"] and src["birthday"]:       # the birthday isn't lost either
+                conn.execute("UPDATE people SET birthday = ? WHERE id = ?", (src["birthday"], body.into))
             conn.execute("DELETE FROM people WHERE id = ?", (person_id,))
             result = get_person(conn, body.into)
         worker.faces.invalidate()
@@ -387,6 +388,8 @@ def router(ctx) -> APIRouter:
                          (body.into, dst["species"], pet_id))
             if not dst["name"] and src["name"]:
                 conn.execute("UPDATE pets SET name = ? WHERE id = ?", (src["name"], body.into))
+            if not dst["birthday"] and src["birthday"]:       # the birthday isn't lost either
+                conn.execute("UPDATE pets SET birthday = ? WHERE id = ?", (src["birthday"], body.into))
             conn.execute("DELETE FROM pets WHERE id = ?", (pet_id,))
             return get_pet(conn, body.into)
 

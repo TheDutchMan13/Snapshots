@@ -52,11 +52,16 @@ class Tasks:
         self.jobs: dict[str, dict] = {}
         self.lock = threading.Lock()
 
+    PER_USER = 2   # unfinished jobs (videos, books) one person can have at once
+
     def start(self, user_id: int, kind: str, fn) -> dict:
         task_id = secrets.token_urlsafe(12)
         job = {"id": task_id, "kind": kind, "user_id": user_id, "progress": 0.0, "done": False, "error": None,
                "result": None, "created": time.time()}
         with self.lock:
+            # Each job keeps the processor busy (ffmpeg): one person can't start dozens at once.
+            if sum(1 for j in self.jobs.values() if j["user_id"] == user_id and not j["done"]) >= self.PER_USER:
+                raise HTTPException(429, "Wait for your other videos or books to be ready first.")
             self.jobs[task_id] = job
 
         def progress(fraction):

@@ -217,7 +217,9 @@ function flashNote(text) {
 function parseRoute() {
   const raw = location.hash.replace(/^#/, "") || "/";
   const [path, query] = raw.split("?");
-  const parts = path.split("/").filter(Boolean).map((p) => decodeURIComponent(p));
+  // A hand-typed address with a broken % code is read as it is, rather than stopping the page.
+  const decode = (p) => { try { return decodeURIComponent(p); } catch (_) { return p; } };
+  const parts = path.split("/").filter(Boolean).map(decode);
   const params = new URLSearchParams(query || "");
   const un = (x) => (x === "~" ? "" : x);
   // The timelines hide archived items and show each stack as one photo.
@@ -306,7 +308,21 @@ const ROUTE_TITLES = {
   settings: "Settings",
 };
 
+/** Thrown by pageApi when the page changed while waiting: the old page's answer is dropped. */
+class Stale extends Error { constructor() { super(""); } }
+window.addEventListener("unhandledrejection", (e) => { if (e.reason instanceof Stale) e.preventDefault(); });
+
+/** api() for drawing a page: a slow answer that arrives after you moved to another page is ignored
+ *  instead of being drawn over the new one. */
+async function pageApi(path, opts) {
+  const page = S.page;
+  const out = await api(path, opts);
+  if (page !== S.page) throw new Stale();
+  return out;
+}
+
 async function render() {
+  S.page = (S.page || 0) + 1;
   S.route = parseRoute();
   document.querySelectorAll(".side .nav[data-route]").forEach((a) => {
     if (a.dataset.route === S.route.name) a.setAttribute("aria-current", "page");
@@ -381,6 +397,7 @@ async function render() {
       await renderSettings();
     }
   } catch (err) {
+    if (err instanceof Stale) return;      // another page is being drawn now
     showEmpty("Something went wrong", err.message);
   }
 }
@@ -412,7 +429,7 @@ async function renderHead() {
   } else if (r.memory) {
     renderMemoryHead(r.memory);
   } else if (r.name === "all" && !r.memory) {
-    await renderMemoriesStrip();
+    renderMemoriesStrip().catch(() => {});      // the photos below don't wait for memories
   } else if (r.tag) {
     await renderTagHead(r.tag);
   } else if (r.folder !== undefined) {
@@ -437,7 +454,7 @@ async function renderHead() {
           const all = [];
           let cursor = "";
           for (;;) {
-            const page = await api(`/api/assets?turned=true&limit=500${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
+            const page = await pageApi(`/api/assets?turned=true&limit=500${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
             all.push(...page.items);
             if (!page.next) break;
             cursor = page.next;
@@ -460,7 +477,7 @@ async function renderHead() {
     headRow(k.title, null, [link("Back to Clean up", "#/cleanup", "btn small")],
       `${k.note} Found by their name, shape, the text in them and what they show. Wrongly sorted? Select it and press Not a ${k.one}. Archive them to keep them out of your timeline.`);
   } else if (r.album) {
-    const album = await api(`/api/albums/${r.album}`);
+    const album = await pageApi(`/api/albums/${r.album}`);
     S.album = album;
     const range = album.first ? `${fmtMonth(album.first)}${fmtMonth(album.last) !== fmtMonth(album.first) ? " – " + fmtMonth(album.last) : ""}` : "";
     let note = null;
@@ -504,7 +521,7 @@ async function renderHead() {
 async function renderSearchHead() {
   const q = S.q;
   let sum;
-  try { sum = await api(`/api/search?${filterParams()}`); } catch (_) { sum = null; }
+  try { sum = await pageApi(`/api/search?${filterParams()}`); } catch (_) { sum = null; }
   if (q !== S.q) return;
   S.search = sum;
   if (!sum) { $("page-head").hidden = true; S.look = false; return; }
@@ -551,7 +568,7 @@ async function renderSearchHead() {
 async function renderEventHead(ev) {
   let info = null;
   try {
-    const { events } = await api("/api/events");
+    const { events } = await pageApi("/api/events");
     info = events.find((e) => e.start === ev.start && e.end === ev.end);
   } catch (_) { /* the photos still show */ }
   const title = info ? eventTitle(info) : "Event";
@@ -612,7 +629,7 @@ async function allIds() {
 }
 
 async function renderPersonHead(id) {
-  const person = await api(`/api/people/${id}`);
+  const person = await pageApi(`/api/people/${id}`);
   const wrap = el("div", "person-title");
   if (person.face_id) wrap.append(img(faceUrl(person.face_id), "", "avatar small"));
   const input = el("input", "name-input");
@@ -626,7 +643,7 @@ async function renderPersonHead(id) {
     try {
       // Same name as someone already listed? They are probably the same person.
       if (name) {
-        const all = (await api("/api/people")).people;
+        const all = (await pageApi("/api/people")).people;
         const twin = all.find((p) => p.id !== person.id && (p.name || "").toLowerCase() === name.toLowerCase());
         if (twin) {
           const merge = await confirmBox(`Is this ${twin.name}?`,
@@ -660,12 +677,12 @@ async function renderPersonHead(id) {
       } catch (err) { flashNote(err.message); }
     }),
   ]);
+  const head = $("page-head").firstChild;      // this render's header: a newer one replaces it
   if (!person.hidden) {
     suggestionStrip(person.id).then((strip) => {
-      if (strip && S.route.person === id) $("page-head").append(strip);
+      if (strip && S.route.person === id && $("page-head").firstChild === head) $("page-head").append(strip);
     });
   }
-  const head = $("page-head").firstChild;      // this render's header: a newer one replaces it
   togetherStrip(person).then((strip) => {
     if (strip && S.route.person === id && $("page-head").firstChild === head) $("page-head").append(strip);
   });
@@ -674,7 +691,7 @@ async function renderPersonHead(id) {
 /** "Often with" and the events this person was at. Null when there is neither. */
 async function togetherStrip(person) {
   let data;
-  try { data = await api(`/api/people/${person.id}/together`); } catch (_) { return null; }
+  try { data = await pageApi(`/api/people/${person.id}/together`); } catch (_) { return null; }
   if (!data.people.length && !data.events.length) return null;
   const box = el("section", "together");
   if (data.people.length) {
@@ -1688,7 +1705,7 @@ async function unstackPhotos(ids) {
 // ------------------------------------------------------------------ albums page
 
 async function renderAlbums() {
-  const { albums } = await api("/api/albums");
+  const { albums } = await pageApi("/api/albums");
   headRow("Albums", albums.length ? plural(albums.length, "album") : null, [
     button("New smart album", "btn small", () => smartAlbumDialog(null, {})),
     button("New album", "btn small primary", async () => {
@@ -1756,7 +1773,7 @@ function workLine(job, what) {
 
 async function renderPeople() {
   const hidden = S.route.hidden;
-  const data = await api(`/api/people${hidden ? "?hidden=true" : ""}`);
+  const data = await pageApi(`/api/people${hidden ? "?hidden=true" : ""}`);
   const actions = [];
   if (hidden) actions.push(link("Back to people", "#/people", "btn small"));
   else if (data.hidden_count) actions.push(link(`Hidden (${data.hidden_count})`, "#/people?hidden=1", "btn small"));
@@ -1831,7 +1848,7 @@ const petName = (p) => p.name || (p.species === "cat" ? "A cat" : "A dog");
 
 async function renderPets() {
   const hidden = S.route.hidden;
-  const data = await api(`/api/pets${hidden ? "?hidden=true" : ""}`);
+  const data = await pageApi(`/api/pets${hidden ? "?hidden=true" : ""}`);
   headRow(hidden ? "Hidden pets" : "Pets", null, hidden ? [link("Back to pets", "#/pets", "btn small")] : [link("Hidden", "#/pets?hidden=1", "btn small")],
     "Dogs and cats, found by what's in your photos, with the same animal grouped together. Name them, join two groups of the same pet, or hide ones you don't want here.");
   if (!data.pets.length) {
@@ -1859,7 +1876,7 @@ async function renderPets() {
 }
 
 async function renderPetHead(id) {
-  const pet = await api(`/api/pets/${id}`);
+  const pet = await pageApi(`/api/pets/${id}`);
   const wrap = el("div", "person-title");
   if (pet.cover) wrap.append(img(petUrl(pet), "", "avatar small"));
   const input = el("input", "name-input");
@@ -1876,7 +1893,7 @@ async function renderPetHead(id) {
   wrap.append(input);
   headRow(wrap, plural(pet.photos, "photo"), [
     button("Same pet as…", "btn small", async () => {
-      const others = (await api("/api/pets")).pets.filter((p) => p.id !== pet.id);
+      const others = (await pageApi("/api/pets")).pets.filter((p) => p.id !== pet.id);
       if (!others.length) { flashNote("There is no other pet to join yet."); return; }
       const target = await modal({
         title: "Which pet is this the same as?", ok: null, cancel: "Cancel",
@@ -1910,7 +1927,7 @@ async function renderPetHead(id) {
 /** "Same person?" questions: for everyone (person = null) or for one person. Null when there are none. */
 async function suggestionStrip(person) {
   let data;
-  try { data = await api(`/api/people/suggestions?limit=${person ? 6 : 12}${person ? `&person=${person}` : ""}`); }
+  try { data = await pageApi(`/api/people/suggestions?limit=${person ? 6 : 12}${person ? `&person=${person}` : ""}`); }
   catch (_) { return null; }
   if (!data.suggestions.length) return null;
   const box = el("section", "suggest");
@@ -1966,7 +1983,7 @@ async function suggestionStrip(person) {
 // ------------------------------------------------------------------ places page
 
 async function renderPlaces() {
-  const data = await api("/api/places");
+  const data = await pageApi("/api/places");
   headRow("Places", data.located ? `${plural(data.located, "photo")} with a location` : null, [],
     workLine(data.status, "Place lookup") || null);
   const coll = $("collection");
@@ -2048,7 +2065,7 @@ function peopleLinks(people) {
 let eventKind = "all";      // Events page: all, trips (away from home) or days out
 
 async function renderEvents() {
-  const { events: all } = await api("/api/events");
+  const { events: all } = await pageApi("/api/events");
   const trips = all.filter((e) => e.kind === "trip").length;
   const tabs = el("div", "tabs");
   tabs.setAttribute("role", "group");
@@ -2102,7 +2119,7 @@ const yearsAgo = (n) => (n === 1 ? "1 year ago" : `${n} years ago`);
 /** "On this day" above the timeline: photos taken on today's date in earlier years. */
 async function renderMemoriesStrip() {
   let data;
-  try { data = await api(`/api/memories?today=${localDate()}`); } catch (_) { return; }
+  try { data = await pageApi(`/api/memories?today=${localDate()}`); } catch (_) { return; }
   const birthdays = data.birthdays || [], trips = data.trips || [];
   if (S.q || S.route.name !== "all" || S.route.memory || !(data.memories.length || birthdays.length || trips.length)) return;
   const head = $("page-head");
@@ -2151,7 +2168,7 @@ function renderMemoryHead(day) {
 // ------------------------------------------------------------------ tags
 
 async function renderTags() {
-  const { tags } = await api("/api/tags");
+  const { tags } = await pageApi("/api/tags");
   headRow("Tags", tags.length ? plural(tags.length, "tag") : null, [], tags.length
     ? "Tags are shared by everyone. Keywords that other programs (Lightroom, digiKam, Windows Photo Gallery) saved in your photos appear here too."
     : null);
@@ -2171,7 +2188,7 @@ async function renderTags() {
 }
 
 async function renderTagHead(id) {
-  const tag = await api(`/api/tags/${id}`);
+  const tag = await pageApi(`/api/tags/${id}`);
   headRow(tag.name, plural(tag.count, "item"), [
     button("Rename", "btn small", async () => {
       const name = await askText("Rename tag", "Tag", tag.name);
@@ -2196,7 +2213,7 @@ async function renderTagHead(id) {
 const folderHash = (path) => "#/folders" + (path ? "/" + encodeURIComponent(path) : "");
 
 async function renderFolderHead(path) {
-  const info = await api(`/api/folders?path=${encodeURIComponent(path)}`);
+  const info = await pageApi(`/api/folders?path=${encodeURIComponent(path)}`);
   if (S.route.folder !== path) return;
   S.folderInfo = info;
   const crumbs = el("nav", "crumbs");
@@ -2283,7 +2300,7 @@ function savedMapView() {
 }
 
 async function renderMap() {
-  const [data] = await Promise.all([api("/api/map"), loadMapLibs()]);
+  const [data] = await Promise.all([pageApi("/api/map"), loadMapLibs()]);
   if (S.route.view !== "map") return;
   headRow("Map", data.points.length ? plural(data.points.length, "item") + " with a location" : null, [],
     data.tiles ? null : "Showing country outlines only. Set map_tiles in config.toml for detailed maps.");
@@ -2393,7 +2410,7 @@ async function turnUpright(items) {
 async function renderCleanup() {
   const kind = S.cleanupKind || "";
   const strictness = S.cleanupStrictness || "normal";
-  const sum = await api(`/api/cleanup?strictness=${strictness}`);
+  const sum = await pageApi(`/api/cleanup?strictness=${strictness}`);
   const st = sum.status || {};
   headRow("Clean up", null, [], !sum.enabled ? "Photo checks are turned off in the settings."
     : st.pending ? `Still checking photos: ${plural(st.pending, "photo")} to go.` : null);
@@ -2405,7 +2422,7 @@ async function renderCleanup() {
   q.append(el("strong", null, "Blurry, dark or bright photos, and shut eyes"), el("span", "muted", sum.low_quality ? plural(sum.low_quality, "photo") : "None found"));
   frag.append(q);
   try {
-    const so = await api("/api/sorting");
+    const so = await pageApi("/api/sorting");
     if (so.sideways) {
       const a = el("a", "cleanup-link");
       a.href = "#/cleanup/sideways";
@@ -2463,7 +2480,7 @@ async function renderCleanup() {
     try {
       let moved = 0;
       for (;;) {
-        const page = await api(`/api/cleanup/groups?limit=100&${params}`);
+        const page = await pageApi(`/api/cleanup/groups?limit=100&${params}`);
         if (!page.groups.length) break;
         for (const g of page.groups) {
           const res = await post("/api/cleanup/resolve", { keep: [g.keep], trash: g.items.map((i) => i.id).filter((i) => i !== g.keep) });
@@ -2487,7 +2504,7 @@ async function renderCleanup() {
   async function loadGroups() {
     more.disabled = true;
     try {
-      const page = await api(`/api/cleanup/groups?offset=${offset}&limit=20&${params}`);
+      const page = await pageApi(`/api/cleanup/groups?offset=${offset}&limit=20&${params}`);
       page.groups.forEach((g) => list.append(groupCard(g)));
       offset = page.next || offset + page.groups.length;
       more.hidden = !page.next;
@@ -2576,10 +2593,10 @@ async function renderStorage() {
   headRow("Storage", null, []);
   $("collection").replaceChildren(el("p", "muted", "Adding it all up…"));
   let s;
-  try { s = await api("/api/storage"); } catch (err) { showEmpty("Something went wrong", err.message); return; }
+  try { s = await pageApi("/api/storage"); } catch (err) { showEmpty("Something went wrong", err.message); return; }
   const refresh = button("Count again", "btn small", async () => {
     refresh.disabled = true;
-    try { await api("/api/storage?fresh=true"); renderStorage(); } catch (err) { flashNote(err.message); refresh.disabled = false; }
+    try { await pageApi("/api/storage?fresh=true"); renderStorage(); } catch (err) { flashNote(err.message); refresh.disabled = false; }
   });
   headRow("Storage", `${fmtSize(s.total)} of photos and videos`, [refresh],
     `Counted ${fmtDateTime(s.made_at)}. Locked folders are not included.`);
@@ -2696,7 +2713,7 @@ let healthTimer = null;
 async function renderHealth() {
   clearTimeout(healthTimer);
   let st;
-  try { st = await api("/api/library-health"); } catch (err) { showEmpty("Library health", err.message); return; }
+  try { st = await pageApi("/api/library-health"); } catch (err) { showEmpty("Library health", err.message); return; }
   if (S.route.view !== "health") return;
   const last = st.last;
   const actions = [];
@@ -2740,7 +2757,7 @@ async function renderHealth() {
       const q = new URLSearchParams({ offset, limit: 50 });
       if (S.healthStatus) q.set("status", S.healthStatus);
       let page;
-      try { page = await api(`/api/library-health/issues?${q}`); } catch (err) { flashNote(err.message); return; }
+      try { page = await pageApi(`/api/library-health/issues?${q}`); } catch (err) { flashNote(err.message); return; }
       for (const i of page.issues) list.append(healthRow(i));
       offset = page.next || offset;
       more.hidden = !page.next;
@@ -2752,7 +2769,7 @@ async function renderHealth() {
   const sched = el("div", "health-sched");
   const [w, days] = field("Check by itself every (days, 0 for only when you ask)", { type: "number", min: "0", max: "365", step: "1", value: String(st.days || 0) });
   sched.append(w, button("Save", "btn small", async () => {
-    try { await api("/api/library-health/settings", { method: "PUT", json: { days: Number(days.value || 0) } }); flashNote("Saved"); }
+    try { await pageApi("/api/library-health/settings", { method: "PUT", json: { days: Number(days.value || 0) } }); flashNote("Saved"); }
     catch (err) { flashNote(err.message); }
   }));
   frag.append(el("h2", "section-title", "Schedule"), sched);
@@ -2781,7 +2798,7 @@ function healthRow(i) {
 // ------------------------------------------------------------------ year in review
 
 async function renderReview() {
-  const info = await api("/api/review");
+  const info = await pageApi("/api/review");
   if (!info.years.length) { headRow("Year in review"); showEmpty("No photos yet", "Your best photos of each year will show up here."); return; }
   const year = S.route.year || (info.years.find((y) => y.year < new Date().getFullYear()) || info.years[0]).year;
   const count = S.reviewCount || 60;
@@ -3461,7 +3478,7 @@ async function manageUsers() {
             rowEl.append(button("Reset password", "btn small", async () => {
               const pw = window.prompt(`New password for ${u.username} (8 characters or more):`);
               if (pw == null) return;
-              try { await patch(`/api/users/${u.id}`, { password: pw }); ctl.error(""); flashNote(`Password changed for ${u.username}`); }
+              try { await patch(`/api/users/${u.id}`, { password: pw }); ctl.error(""); flashNote(`Password changed for ${u.username}. Their devices and API keys are signed out.`); }
               catch (err) { ctl.error(err.message); }
             }));
             if (u.two_step) {
@@ -3475,9 +3492,16 @@ async function manageUsers() {
               try { await patch(`/api/users/${u.id}`, { is_admin: !u.is_admin }); ctl.error(""); draw(); }
               catch (err) { ctl.error(err.message); }
             }));
+            if (u.locked && (!S.me || u.id !== S.me.id)) {
+              rowEl.append(button(`Take ${plural(u.locked, "locked item")}`, "btn small", async () => {
+                if (!window.confirm(`Move the ${plural(u.locked, "item")} ${u.username} locked into your own locked folder? They stay hidden from everyone else. Use this when locked items are missing from the library.`)) return;
+                try { await patch(`/api/users/${u.id}`, { take_locked: true }); ctl.error(""); flashNote("Moved to your locked folder"); draw(); }
+                catch (err) { ctl.error(err.message); }
+              }));
+            }
             if (!S.me || u.id !== S.me.id) {
               rowEl.append(button("Delete", "btn small", async () => {
-                const extra = u.locked ? ` Their locked folder holds ${plural(u.locked, "item")}: those will be visible to everyone again.` : "";
+                const extra = u.locked ? ` Their locked folder holds ${plural(u.locked, "item")}: those move to your own locked folder.` : "";
                 if (!window.confirm(`Delete the account ${u.username}? Their photos stay in the library.${extra}`)) return;
                 try { await del(`/api/users/${u.id}`); ctl.error(""); draw(); } catch (err) { ctl.error(err.message); }
               }));
@@ -4209,7 +4233,7 @@ async function albumComments(album) {
 // ------------------------------------------------------------------ activity
 
 async function renderActivity() {
-  const data = await api("/api/activity");
+  const data = await pageApi("/api/activity");
   headRow("Activity", null, [], "Comments, and photos people added to albums.");
   if (!data.items.length) {
     showEmpty("Nothing yet", "When someone comments on a photo or adds photos to an album, it shows up here.");
@@ -4329,7 +4353,7 @@ async function setPin() {
   const done = await modal({
     title: st.has_pin ? "Change your locked folder PIN" : "Set a PIN for your locked folder", ok: "Save PIN",
     build: (body) => {
-      body.append(el("p", "muted", "4 to 32 characters. Numbers are easiest to type on a phone."));
+      body.append(el("p", "muted", "6 to 32 characters. Numbers are easiest to type on a phone."));
       const [a, pw] = field("Your account password", { type: "password", autocomplete: "current-password" });
       const [b, pin] = field("PIN", { type: "password", inputMode: "numeric", autocomplete: "off", maxLength: 32 });
       const [c, again] = field("PIN again", { type: "password", inputMode: "numeric", autocomplete: "off", maxLength: 32 });

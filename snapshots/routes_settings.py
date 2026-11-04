@@ -122,6 +122,20 @@ def router(ctx) -> APIRouter:
                 setattr(cfg, k, v)
             if values.get("captions") is False:
                 worker.captions.unload()
+            forget = []
+            if values.get("guess_places") is False:
+                forget.append("place_guess IS NOT NULL")         # every guessed place goes
+            if values.get("landmarks") is False:
+                forget.append("place_guess = 'landmark'")        # and places that came from a landmark
+            with db.session(cfg.db_path) as conn:
+                if forget:
+                    # Switched off means not shown any more. Looked at again if switched back on.
+                    conn.execute("UPDATE assets SET lat = NULL, lon = NULL, place_guess = NULL, geo_done = 1,"
+                                 " city = NULL, state = NULL, country = NULL, place_checked = 0"
+                                 f" WHERE position_edited = 0 AND ({' OR '.join(forget)})")
+                if values.get("landmarks") is False:
+                    conn.execute("UPDATE assets SET landmark = NULL, landmark_done = 0"
+                                 " WHERE landmark IS NOT NULL OR landmark_done = 1")
             worker.poke()
         return sorting_json()
 

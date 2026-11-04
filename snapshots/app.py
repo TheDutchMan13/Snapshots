@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__, db, webhooks
-from .auth import COOKIE, CSRF_HEADER, LoginThrottle, Tickets, user_for_token
+from .auth import COOKIE, CSRF_HEADER, USER_LIMIT, LoginThrottle, Tickets, user_for_token
 from .config import Config
 from .worker import Worker
 
@@ -57,6 +57,31 @@ def safe_filename(name: str | None) -> str:
     return stem + ext.lower()
 
 
+UPLOAD_RESERVE = 1024 ** 3   # an upload must leave at least this much free on the drives it is written to
+
+
+def upload_problem(cfg, length: str | None) -> tuple[int, str] | None:
+    """Why an upload of `length` bytes is refused before it is read (HTTP status, message), or None.
+    Files are first stored in the temporary folder, then in the library, so both need the room."""
+    import shutil
+    import tempfile
+
+    try:
+        size = int(length)
+    except (TypeError, ValueError):
+        return 411, "Uploads need their size (Content-Length)."
+    if size > cfg.max_upload_gb * 1024 ** 3:
+        return 413, f"Upload failed: this is more than {cfg.max_upload_gb:g} GB at once. Send fewer files at a time."
+    for folder in {str(cfg.library_path), tempfile.gettempdir()}:
+        try:
+            free = shutil.disk_usage(folder).free
+        except OSError:
+            continue
+        if free < size + UPLOAD_RESERVE:
+            return 507, "Upload failed: the PC's drive is almost full."
+    return None
+
+
 def current_user(request: Request) -> dict:
     user = getattr(request.state, "user", None)
     if user is None:
@@ -84,7 +109,7 @@ def create_app(cfg: Config, start_worker: bool = True) -> FastAPI:
     db.init(cfg.db_path)
     worker = Worker(cfg)
     sender = webhooks.Sender(cfg)
-    ctx = SimpleNamespace(cfg=cfg, worker=worker, throttle=LoginThrottle(), pin_throttle=LoginThrottle(limit=5), tickets=Tickets(), pending_totp={},
+    ctx = SimpleNamespace(cfg=cfg, worker=worker, throttle=LoginThrottle(limits={"user:": USER_LIMIT}), pin_throttle=LoginThrottle(limit=5), tickets=Tickets(), pending_totp={},
                           webhooks=sender, quit=None)
 
     @asynccontextmanager
@@ -123,6 +148,10 @@ def create_app(cfg: Config, start_worker: bool = True) -> FastAPI:
             request.state.token = token
             if user is None and path not in PUBLIC_API:
                 return JSONResponse({"detail": "Please log in."}, status_code=401)
+            if path == "/api/upload" and request.method == "POST":
+                problem = upload_problem(cfg, request.headers.get("content-length"))
+                if problem:
+                    return JSONResponse({"detail": problem[1]}, status_code=problem[0])
         response = await call_next(request)
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Content-Security-Policy"] = csp

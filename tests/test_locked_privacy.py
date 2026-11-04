@@ -18,7 +18,7 @@ def other_client(c):
 
 
 def lock(c, ids):
-    c.post("/api/locked/pin", json={"pin": "2468", "password": ADMIN[1]})
+    c.post("/api/locked/pin", json={"pin": "246813", "password": ADMIN[1]})
     r = c.post("/api/locked", json={"ids": ids})
     assert r.status_code == 200, r.text
 
@@ -149,7 +149,7 @@ def test_events_notice_a_swap_of_locked_items(tmp_path):
         lock(c, [a])
         o = other_client(c)
         o.get("/api/events")
-        c.post("/api/locked/open", json={"pin": "2468"})
+        c.post("/api/locked/open", json={"pin": "246813"})
         c.post("/api/locked", json={"ids": [b]})
         c.post("/api/locked", json={"ids": [a], "value": False})
         assert all(e["cover"] != b for e in o.get("/api/events").json()["events"])

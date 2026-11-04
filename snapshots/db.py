@@ -591,6 +591,17 @@ CLUTTER = "a.category IN ('screenshot', 'document', 'receipt')"
 NOT_LOCKED = "a.locked_by IS NULL"
 
 
+def people_version(conn) -> str:
+    """Changes whenever a person is added, renamed, hidden or given a birthday (for caches; a sum of name
+    lengths would miss "Anna" becoming "Emma")."""
+    import hashlib
+
+    h = hashlib.sha1(usedforsecurity=False)
+    for row in conn.execute("SELECT id, coalesce(name, ''), hidden, coalesce(birthday, '') FROM people ORDER BY id"):
+        h.update(repr(tuple(row)).encode("utf-8"))
+    return h.hexdigest()
+
+
 def open_ids(conn, ids) -> list[int]:
     """The ids that exist and are not in anyone's locked folder (others are ignored by changes)."""
     ids = list(dict.fromkeys(i for i in ids if isinstance(i, int)))

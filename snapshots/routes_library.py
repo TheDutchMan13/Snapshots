@@ -475,10 +475,13 @@ def router(ctx) -> APIRouter:
         with db.session(cfg.db_path) as conn:
             known = conn.execute("SELECT vcodec FROM assets WHERE id = ?", (asset_id,)).fetchone()["vcodec"]
         info = json.loads(known) if known else None
+        if info is not None and info.get("codec") is None and info.get("probed") is not True:
+            info = None      # remembered from a probe that failed (before "probed" was recorded): try again
         if info is None:
             info = media.probe_video(full)
-            with db.session(cfg.db_path) as conn:
-                conn.execute("UPDATE assets SET vcodec = ? WHERE id = ?", (json.dumps(info), asset_id))
+            if info.get("probed"):
+                with db.session(cfg.db_path) as conn:
+                    conn.execute("UPDATE assets SET vcodec = ? WHERE id = ?", (json.dumps(info), asset_id))
         native = {"url": f"/api/assets/{asset_id}/view?v={db.version(row)}", "converted": False}
         if media.playable_here(info, full, can) or not media.has_ffmpeg():
             return dict(native, codec=info.get("codec"), can_convert=media.has_ffmpeg())

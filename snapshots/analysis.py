@@ -21,6 +21,12 @@ from datetime import datetime, timedelta
 
 log = logging.getLogger("snapshots.analysis")
 
+
+def _people_version(conn) -> str:
+    from . import db       # here, not at the top: db imports this module's neighbours
+
+    return db.people_version(conn)
+
 # ---------------------------------------------------------------- measuring one photo
 
 HASH_W, HASH_H = 9, 8          # 9x8 grey pixels -> 8x8 = 64 left/right comparisons
@@ -401,7 +407,9 @@ class DuplicateFinder:
             # New content vectors (for edited copies): while photos are still being learned, only every
             # thousand counts, so indexing doesn't make this start over after each small batch
             " COALESCE(SUM(id % 1000003), 0), (SELECT COUNT(*) FROM clip_vectors)"
-            " / CASE WHEN EXISTS (SELECT 1 FROM assets WHERE clip_done = 0 AND trashed_at IS NULL) THEN 1000 ELSE 1 END"
+            " / CASE WHEN EXISTS (SELECT 1 FROM assets WHERE clip_done = 0 AND trashed_at IS NULL) THEN 1000 ELSE 1 END,"
+            # dates: bursts and look-alikes depend on when photos were taken (and dates can be changed)
+            " COALESCE(SUM((CAST(strftime('%s', taken_at) AS INTEGER) % 1000003) * (id % 997 + 1)), 0)"
             " FROM assets"
         ).fetchone())
 
@@ -417,7 +425,8 @@ class DuplicateFinder:
         return base if s is None else s
 
     def groups(self, conn, strictness: str | None = None) -> list[dict]:
-        key = self._version(conn)
+        # The burst settings can change while Snapshots runs: part of what the answer depends on.
+        key = (self._version(conn), self.cfg.burst_seconds, self.cfg.burst_distance)
         distance = self.distance(strictness)
         similarity = self.similarity(strictness)
         with self._lock:
@@ -668,6 +677,7 @@ class EventFinder:
         self._lock = threading.Lock()
         self._key = None
         self._events: list[dict] = []
+        self._refreshing = False
 
     def _version(self, conn):
         return tuple(conn.execute(
@@ -680,12 +690,9 @@ class EventFinder:
             # titles and who was there (eventnames.py)
             # a photo whose picture changed loses its vector (clip_done = 0) and gets a new one
             " COALESCE(SUM(CASE WHEN clip_done = 1 THEN id END), 0), (SELECT COUNT(*) FROM clip_vectors),"
-            " (SELECT COUNT(*) || ':' || COALESCE(SUM(person_id), 0) || ':' || COALESCE(MAX(id), 0) FROM faces),"
-            " (SELECT COUNT(*) || ':' || COALESCE(SUM(hidden), 0) || ':' || COALESCE(SUM(length(name) * id), 0)"
-            "  || ':' || COALESCE(SUM(CAST(replace(coalesce(birthday, ''), '-', '') AS INTEGER) % 1000003 * id), 0)"
-            "  FROM people)"
+            " (SELECT COUNT(*) || ':' || COALESCE(SUM(person_id), 0) || ':' || COALESCE(MAX(id), 0) FROM faces)"
             " FROM assets WHERE trashed_at IS NULL"
-        ).fetchone())
+        ).fetchone()) + (_people_version(conn),)
 
     def events(self, conn) -> list[dict]:
         key = self._version(conn)
@@ -711,6 +718,28 @@ class EventFinder:
                 self._events = found
                 self._key = key
             return self._events
+
+    def events_soon(self) -> list[dict]:
+        """The events as last worked out, without waiting (for the home page's memories). They are worked
+        out again in the background, which costs little when nothing changed."""
+        with self._lock:
+            if self._refreshing:
+                return self._events
+            self._refreshing = True
+
+        def refresh():
+            from . import db
+
+            try:
+                with db.session(self.cfg.db_path) as conn:
+                    self.events(conn)
+            except Exception:
+                log.exception("could not work out events")
+            finally:
+                self._refreshing = False
+
+        threading.Thread(target=refresh, name="snapshots-events", daemon=True).start()
+        return self._events
 
 
 def record_not_duplicates(conn, ids: list[int]) -> None:

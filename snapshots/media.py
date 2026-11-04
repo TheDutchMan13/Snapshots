@@ -591,8 +591,10 @@ def pick_encoder(preferred: str = "auto") -> str:
 
 
 def probe_video(path: Path) -> dict:
-    """codec (of the picture), duration in seconds and whether it plays as it is. Needs ffprobe."""
-    out = {"codec": None, "duration": None, "playable": True}
+    """codec (of the picture), duration in seconds and whether it plays as it is. Needs ffprobe.
+    "probed" is False when ffprobe is missing or failed (a slow drive, say): then nothing is known, and the
+    answer must not be remembered."""
+    out = {"codec": None, "duration": None, "playable": True, "probed": False}
     ffprobe = shutil.which("ffprobe")
     if not ffprobe:
         return out
@@ -600,10 +602,11 @@ def probe_video(path: Path) -> dict:
         raw = subprocess.run(
             [ffprobe, "-v", "error", "-print_format", "json", "-show_entries",
              "format=duration:stream=codec_type,codec_name", str(path)],
-            capture_output=True, timeout=30, stdin=subprocess.DEVNULL, check=True).stdout
+            capture_output=True, timeout=120, stdin=subprocess.DEVNULL, check=True).stdout
         data = json.loads(raw or b"{}")
     except (subprocess.SubprocessError, OSError, ValueError):
         return out
+    out["probed"] = True
     for stream in data.get("streams") or []:
         if stream.get("codec_type") == "video":
             out["codec"] = stream.get("codec_name")

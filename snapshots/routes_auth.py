@@ -43,6 +43,7 @@ class UserUpdate(BaseModel):
     password: str | None = None
     is_admin: bool | None = None
     two_step_off: bool = False
+    take_locked: bool = False      # move their locked items into the asking administrator's locked folder
 
 
 def _is_https(request: Request) -> bool:
@@ -53,8 +54,9 @@ def _start_session(request: Request, response: Response, conn, user_row) -> dict
     token = auth.create_session(conn, user_row["id"], request.headers.get("user-agent"))
     secure = _is_https(request)
     response.set_cookie(
+        # strict: a link on another website never comes with the session (no one-click requests from elsewhere)
         auth.COOKIE, token, max_age=auth.SESSION_DAYS * 86400, httponly=True,
-        samesite="lax", secure=secure, path="/",
+        samesite="strict", secure=secure, path="/",
     )
     # This browser is now a known device for this user: it gets its own allowance of wrong passwords.
     device = auth.remember_device(conn, user_row["id"], request.cookies.get(auth.DEVICE_COOKIE),
@@ -62,7 +64,10 @@ def _start_session(request: Request, response: Response, conn, user_row) -> dict
     response.set_cookie(auth.DEVICE_COOKIE, device, max_age=auth.DEVICE_DAYS * 86400, httponly=True,
                         samesite="lax", secure=secure, path="/")
     user = {"id": user_row["id"], "username": user_row["username"], "is_admin": bool(user_row["is_admin"])}
-    # The token is also returned so that apps that are not browsers can use it.
+    # The token is also returned so that apps that are not browsers (the phone app) can use it. Browsers send
+    # an Origin header and use the cookie: they don't get it, so a script in a page could never read it.
+    if request.headers.get("origin"):
+        return {"user": user}
     return {"user": user, "token": token}
 
 
@@ -190,7 +195,8 @@ def router(ctx) -> APIRouter:
             raise HTTPException(400, "That code isn't right. Check the phone's clock, and type the code the app shows now.")
         del ctx.pending_totp[request.state.token]
         with db.session(cfg.db_path) as conn:
-            conn.execute("UPDATE users SET totp_secret = ?, totp_last = ? WHERE id = ?", (pending[1], step, user["id"]))
+            conn.execute("UPDATE users SET totp_secret = ?, totp_last = ? WHERE id = ?",
+                         (auth.seal(conn, pending[1]), step, user["id"]))
             codes = auth.new_recovery_codes(conn, user["id"])
             auth.end_all_sessions(conn, user["id"], keep_token=request.state.token)  # other devices log in again
         return {"enabled": True, "recovery_codes": codes}
@@ -258,6 +264,8 @@ def router(ctx) -> APIRouter:
                 raise HTTPException(400, "Your current password is not right.")
             conn.execute("UPDATE users SET pw_hash = ? WHERE id = ?", (auth.hash_password(body.new), user["id"]))
             auth.end_all_sessions(conn, user["id"], keep_token=request.state.token)  # log out other devices
+            # A new password is often a reaction to someone else getting in: their API keys go too.
+            conn.execute("DELETE FROM api_keys WHERE user_id = ?", (user["id"],))
         return {"ok": True}
 
     # ------------------------------------------------------------ accounts (administrators)
@@ -292,7 +300,7 @@ def router(ctx) -> APIRouter:
 
     @r.patch("/api/users/{user_id}")
     def update_user(user_id: int, body: UserUpdate, request: Request):
-        require_admin(request)
+        me = require_admin(request)
         with db.session(cfg.db_path) as conn:
             row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
             if row is None:
@@ -303,6 +311,7 @@ def router(ctx) -> APIRouter:
                     raise HTTPException(400, problem)
                 conn.execute("UPDATE users SET pw_hash = ? WHERE id = ?", (auth.hash_password(body.password), user_id))
                 auth.end_all_sessions(conn, user_id)
+                conn.execute("DELETE FROM api_keys WHERE user_id = ?", (user_id,))
             if body.two_step_off:
                 conn.execute("UPDATE users SET totp_secret = NULL, totp_last = NULL WHERE id = ?", (user_id,))
                 conn.execute("DELETE FROM recovery_codes WHERE user_id = ?", (user_id,))
@@ -310,7 +319,15 @@ def router(ctx) -> APIRouter:
                 if not body.is_admin and _admins(conn) <= 1:
                     raise HTTPException(400, "Snapshots needs at least one administrator.")
                 conn.execute("UPDATE users SET is_admin = ? WHERE id = ?", (int(body.is_admin), user_id))
+            if body.take_locked and user_id != me["id"]:
+                _take_locked(conn, user_id, me["id"])
             return _user_json(conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone())
+
+    def _take_locked(conn, from_user: int, to_admin: int) -> int:
+        """Someone's locked items go to an administrator's locked folder, still hidden from everyone else
+        (so locking can't be used to hide the shared library for good, and a deleted account's private
+        items don't become visible to all)."""
+        return conn.execute("UPDATE assets SET locked_by = ? WHERE locked_by = ?", (to_admin, from_user)).rowcount
 
     @r.delete("/api/users/{user_id}")
     def delete_user(user_id: int, request: Request):
@@ -323,7 +340,8 @@ def router(ctx) -> APIRouter:
                 raise HTTPException(404, "No such account.")
             if row["is_admin"] and _admins(conn) <= 1:
                 raise HTTPException(400, "Snapshots needs at least one administrator.")
+            moved = _take_locked(conn, user_id, me["id"])
             conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
-        return {"ok": True}
+        return {"ok": True, "locked_moved": moved}
 
     return r

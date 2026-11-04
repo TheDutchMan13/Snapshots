@@ -16,8 +16,8 @@
   turned on, for a lost phone; an administrator can also turn it off for someone.
 * Lockouts: wrong passwords are counted per device. A browser that has logged in before carries a
   "known device" cookie and has its own allowance, so someone guessing at your user name from elsewhere
-  can't lock you out of your own browser. Unknown devices share one allowance per user name, and each
-  network address has one too.
+  can't lock you out of your own browser. Unknown devices have one allowance per user name and address,
+  each network address has one, and each user name a much larger one.
 """
 
 import base64
@@ -25,6 +25,7 @@ import struct
 import urllib.parse
 
 import hashlib
+import os
 import hmac
 import secrets
 import threading
@@ -154,8 +155,9 @@ def create_api_key(conn, user_id: int, name: str) -> tuple[int, str]:
 
 
 def validate_pin(pin: str) -> str | None:
-    if not (4 <= len(pin) <= 32):
-        return "The PIN needs 4 to 32 characters."
+    # 6 or more: with 5 tries per 15 minutes, a 4-digit PIN could be guessed in days by someone signed in.
+    if not (6 <= len(pin) <= 32):
+        return "The PIN needs 6 to 32 characters."
     return None
 
 
@@ -184,9 +186,10 @@ class LoginThrottle:
     """Slows down password guessing: at most `limit` failures per name and per address
     in `window` seconds."""
 
-    def __init__(self, limit: int = 10, window: float = 15 * 60):
+    def __init__(self, limit: int = 10, window: float = 15 * 60, limits: dict[str, int] | None = None):
         self.limit = limit
         self.window = window
+        self.limits = limits or {}      # key prefix -> its own limit
         self._failures: dict[str, deque] = defaultdict(deque)
         self._lock = threading.Lock()
 
@@ -203,7 +206,8 @@ class LoginThrottle:
             waits = []
             for key in keys:
                 q = self._trim(key, now)
-                if len(q) >= self.limit:
+                limit = next((n for prefix, n in self.limits.items() if key.startswith(prefix)), self.limit)
+                if len(q) >= limit:
                     waits.append(int(self.window - (now - q[0])) + 1)
             return max(waits, default=0)
 
@@ -248,7 +252,13 @@ def throttle_keys(known: bool, username: str, device_token: str | None, address:
     name = username.strip().lower()
     if known:
         return (f"device:{_token_hash(device_token or '')}:{name}",)
-    return (f"user:{name}", f"addr:{address}")
+    # A new device is counted per user name *from its address*, so someone guessing from elsewhere can't
+    # stop you signing in on a new phone; the per-name count (with a much higher limit, see USER_LIMIT)
+    # still stops guessing spread over many addresses.
+    return (f"name:{name}@{address}", f"addr:{address}", f"user:{name}")
+
+
+USER_LIMIT = 100   # failures per user name in a window, from all new devices together
 
 
 # ---------------------------------------------------------------- two-step login (TOTP)
@@ -311,16 +321,91 @@ def use_recovery_code(conn, user_id: int, code: str) -> bool:
     return cur.rowcount == 1
 
 
+# ---------------------------------------------------------------- two-step secrets at rest
+# The two-step secret is stored sealed with a key kept in a file beside the database (secret.key), not in
+# it: a copy of the database alone (a backup, the offsite copy) doesn't give away anyone's codes. The
+# sealing is HMAC-SHA256 used as a stream cipher, then HMAC-SHA256 over the result (encrypt, then sign).
+# A database moved to another PC without secret.key: two-step codes stop working there, and people sign
+# in with a recovery code (or an administrator turns two-step login off for them) and set it up again.
+
+SECRET_FILE = "secret.key"
+_SEALED = "v1:"
+_keys: dict[str, bytes] = {}
+_keys_lock = threading.Lock()
+
+
+def _key(conn) -> bytes | None:
+    row = next((r for r in conn.execute("PRAGMA database_list") if r[1] == "main"), None)
+    if row is None or not row[2]:
+        return None           # a database in memory (tests): kept as is
+    path = os.path.join(os.path.dirname(row[2]), SECRET_FILE)
+    with _keys_lock:
+        if path not in _keys:
+            try:
+                with open(path, "rb") as fh:
+                    key = fh.read()
+            except FileNotFoundError:
+                key = secrets.token_bytes(32)
+                with open(path, "xb") as fh:
+                    fh.write(key)
+            if len(key) < 32:
+                raise ValueError(f"{path} is damaged")
+            _keys[path] = key
+        return _keys[path]
+
+
+def _stream(key: bytes, nonce: bytes, n: int) -> bytes:
+    out = b""
+    counter = 0
+    while len(out) < n:
+        out += hmac.new(key, b"enc" + nonce + struct.pack(">I", counter), hashlib.sha256).digest()
+        counter += 1
+    return out[:n]
+
+
+def seal(conn, text: str) -> str:
+    key = _key(conn)
+    if key is None:
+        return text
+    nonce = secrets.token_bytes(16)
+    data = text.encode("utf-8")
+    body = nonce + bytes(a ^ b for a, b in zip(data, _stream(key, nonce, len(data))))
+    tag = hmac.new(key, b"tag" + body, hashlib.sha256).digest()[:16]
+    return _SEALED + base64.urlsafe_b64encode(body + tag).decode("ascii")
+
+
+def unseal(conn, stored: str | None) -> str | None:
+    """The secret, or None if it can't be opened (no key, a different key, damaged)."""
+    if not stored or not stored.startswith(_SEALED):
+        return stored         # stored before sealing was added
+    key = _key(conn)
+    try:
+        raw = base64.urlsafe_b64decode(stored[len(_SEALED):])
+    except ValueError:
+        return None
+    if key is None or len(raw) < 32:
+        return None
+    body, tag = raw[:-16], raw[-16:]
+    if not hmac.compare_digest(tag, hmac.new(key, b"tag" + body, hashlib.sha256).digest()[:16]):
+        return None
+    nonce, data = body[:16], body[16:]
+    return bytes(a ^ b for a, b in zip(data, _stream(key, nonce, len(data)))).decode("utf-8")
+
+
 def check_second_step(conn, user_id: int, code: str) -> str | None:
     """'totp' or 'recovery' if the code is right (and records that it was used), else None."""
     row = conn.execute("SELECT totp_secret, totp_last FROM users WHERE id = ?", (user_id,)).fetchone()
     if row is None or not row["totp_secret"]:
         return None
-    step = check_totp(row["totp_secret"], code, row["totp_last"])
+    secret = unseal(conn, row["totp_secret"])
+    step = check_totp(secret, code, row["totp_last"]) if secret else None
     if step is not None:
         # Only one request can claim a step: the condition makes a replayed code fail.
         cur = conn.execute("UPDATE users SET totp_last = ? WHERE id = ? AND (totp_last IS NULL OR totp_last < ?)",
                            (step, user_id, step))
+        if cur.rowcount == 1 and not row["totp_secret"].startswith(_SEALED):
+            # A secret from before sealing: sealed now.
+            conn.execute("UPDATE users SET totp_secret = ? WHERE id = ?", (seal(conn, secret), user_id))
         return "totp" if cur.rowcount == 1 else None
     if any(c.isalpha() for c in code or "") and use_recovery_code(conn, user_id, code):
         return "recovery"

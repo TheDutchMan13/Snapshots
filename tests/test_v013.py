@@ -378,10 +378,10 @@ def test_trips_from_earlier_years_show_around_their_dates(tmp_path):
         with db.session(cfg.db_path) as conn:
             conn.execute("UPDATE assets SET city = 'Phoenix', country = 'United States' WHERE path LIKE 'Home/%'")
             conn.execute("UPDATE assets SET city = 'Rosarito', country = 'Mexico' WHERE path LIKE 'Trip/%'")
-        trips = c.get("/api/memories", params={"today": "2025-07-11"}).json()["trips"]
+        trips = _trips(c, "2025-07-11")
         assert [(t["title"], t["years_ago"]) for t in trips] == [("Trip to Rosarito", 3)]
-        assert c.get("/api/memories", params={"today": "2025-08-20"}).json()["trips"] == []
-        assert c.get("/api/memories", params={"today": "2022-07-11"}).json()["trips"] == []   # not this year's
+        assert _trips(c, "2025-08-20") == []
+        assert _trips(c, "2022-07-11") == []   # not this year's
 
 
 def test_locked_photos_lend_no_place_and_a_new_date_drops_a_guess(tmp_path):
@@ -416,6 +416,12 @@ def test_locked_photos_lend_no_place_and_a_new_date_drops_a_guess(tmp_path):
         wait_for(lambda: c.get(f"/api/assets/{ids['shot.jpg']}").json()["position"] is None)
 
 
+def _trips(c, today):
+    """On this day's trips. The home page doesn't wait for events to be worked out; the events page does."""
+    c.get("/api/events")
+    return c.get("/api/memories", params={"today": today}).json()["trips"]
+
+
 def test_a_trip_over_new_year_is_remembered(tmp_path):
     root = tmp_path / "Photos"
     start = datetime(2023, 12, 30, 9)
@@ -432,5 +438,7 @@ def test_a_trip_over_new_year_is_remembered(tmp_path):
         with db.session(cfg.db_path) as conn:
             conn.execute("UPDATE assets SET city = 'Phoenix', country = 'United States' WHERE path LIKE 'Home/%'")
             conn.execute("UPDATE assets SET city = 'Flagstaff', country = 'United States' WHERE path LIKE 'Trip/%'")
-        trips = c.get("/api/memories", params={"today": "2026-01-01"}).json()["trips"]
-        assert [t["title"] for t in trips] == ["Trip to Flagstaff"]
+        trips = _trips(c, "2026-01-01")
+        assert [(t["title"], t["years_ago"]) for t in trips] == [("Trip to Flagstaff", 2)]   # 1 Jan 2024
+        assert _trips(c, "2024-01-01") == []        # still going on: not a memory yet
+        assert [t["years_ago"] for t in _trips(c, "2024-12-31")] == [1]     # 31 Dec 2023
