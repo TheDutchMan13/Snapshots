@@ -1,5 +1,5 @@
 ; Installer for Snapshots (Inno Setup 6). The workflow builds it after the exe:
-;     iscc /DAppVersion=0.14.2 installer\snapshots.iss      ->  dist\Snapshots-Setup.exe
+;     iscc /DAppVersion=0.14.3 installer\snapshots.iss      ->  dist\Snapshots-Setup.exe
 ; It installs for the current user only (no administrator rights, no UAC prompt), and Windows lists it
 ; under Settings > Apps. Your photos and Snapshots' data (%LOCALAPPDATA%\Snapshots) are never touched
 ; by installing, upgrading or uninstalling, unless you say so when uninstalling.
