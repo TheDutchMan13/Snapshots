@@ -1187,3 +1187,15 @@ a.bar-row:hover .bar-name { color: var(--accent-ink); text-decoration: underline
 
 /* More like this: the photo it started from */
 .avatar.square { border-radius: 8px; }
+
+
+/* ---- sidebar: the everyday pages, with the rest tucked under "More" (always open in the phone sheet) */
+.nav-toggle { width: 100%; font: inherit; }
+.nav-toggle::after { content: "\25B8"; float: right; transition: transform .15s ease; }
+.nav-toggle[aria-expanded="true"]::after { transform: rotate(90deg); }
+.nav-more { display: flex; flex-direction: column; gap: inherit; }
+.nav-more:not(.open) { display: none; }
+@media (max-width: 720px) {
+  .nav-toggle { display: none; }
+  .nav-more:not(.open), .nav-more { display: contents; }
+}

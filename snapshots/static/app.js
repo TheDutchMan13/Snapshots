@@ -321,6 +321,18 @@ async function pageApi(path, opts) {
   return out;
 }
 
+function setMore(open, remember) {
+  $("nav-more").classList.toggle("open", open);
+  $("nav-toggle").setAttribute("aria-expanded", String(open));
+  if (remember) { try { localStorage.setItem("snapshots.more", open ? "1" : "0"); } catch (e) { /* not kept */ } }
+}
+{
+  let was = false;
+  try { was = localStorage.getItem("snapshots.more") === "1"; } catch (e) { /* not kept */ }
+  setMore(was);
+  $("nav-toggle").addEventListener("click", () => setMore(!$("nav-more").classList.contains("open"), true));
+}
+
 async function render() {
   S.page = (S.page || 0) + 1;
   S.route = parseRoute();
@@ -329,6 +341,7 @@ async function render() {
     else a.removeAttribute("aria-current");
   });
   $("top-title").textContent = ROUTE_TITLES[S.route.name] || "Snapshots";
+  if (document.querySelector('#nav-more .nav[aria-current="page"]')) setMore(true);   // open on a page kept in "More"
   if (S.route.name === "settings") $("settings-gear").setAttribute("aria-current", "page");
   else $("settings-gear").removeAttribute("aria-current");
   closeSheet();
@@ -2979,6 +2992,8 @@ function renderStatus() {
   const unread = st.activity_unread || 0;
   $("activity-count").hidden = !unread;
   $("activity-count").textContent = unread > 99 ? "99+" : String(unread);
+  $("nav-toggle-count").hidden = !unread;           // shown on "More" too while it is folded away
+  $("nav-toggle-count").textContent = unread > 99 ? "99+" : String(unread);
   $("more-dot").hidden = !unread;
   if (st.backup && st.backup.enabled && st.backup.message) $("st-note").textContent = st.backup.message;
 }
