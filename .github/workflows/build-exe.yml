@@ -1,6 +1,6 @@
 name: Build Windows exe
 
-# Builds Snapshots.exe on a Windows machine at GitHub.
+# Builds Snapshots.exe and its installer (Snapshots-Setup.exe) on a Windows machine at GitHub.
 #   - Push a tag like v0.7.0 to publish the exe on the repository's Releases page.
 #   - Or open the Actions tab, pick this workflow and press "Run workflow";
 #     the exe is then attached to the run as a download.
@@ -295,14 +295,87 @@ jobs:
           if (-not $clean.enabled)          { throw 'The photo checks are not running.' }
           Write-Host "Search smoke test passed: read '$($photo.text)', content search ready."
 
+      - name: Build the installer
+        shell: pwsh
+        run: |
+          # Inno Setup comes with GitHub's Windows machines; install it if this one doesn't have it.
+          $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) {
+            $iscc = @('C:\Program Files (x86)\Inno Setup 6\ISCC.exe', 'C:\Program Files\Inno Setup 6\ISCC.exe') |
+                      Where-Object { Test-Path $_ } | Select-Object -First 1
+          }
+          if (-not $iscc) {
+            choco install innosetup -y --no-progress
+            $iscc = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
+          }
+          $version = python -c "import snapshots; print(snapshots.__version__)"
+          & $iscc "/DAppVersion=$version" installer\snapshots.iss
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path dist\Snapshots-Setup.exe)) { throw 'The installer was not built.' }
+
+      - name: Smoke test the installer
+        shell: pwsh
+        run: |
+          # Install it quietly for this user, check what it made, then uninstall it and check nothing is left.
+          $dir = Join-Path $env:RUNNER_TEMP 'installed-snapshots'
+          $start = Join-Path ([Environment]::GetFolderPath('Programs')) 'Snapshots.lnk'
+          $desk  = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Snapshots.lnk'
+
+          $run = Start-Process -FilePath 'dist\Snapshots-Setup.exe' -Wait -PassThru `
+                   -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=$dir", '/TASKS=desktopicon', "/LOG=$env:RUNNER_TEMP\setup.log")
+          $installed = Test-Path (Join-Path $dir 'Snapshots.exe')
+          $unins     = Get-ChildItem $dir -Filter 'unins*.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+          $shell     = New-Object -ComObject WScript.Shell
+          $target    = if (Test-Path $start) { $shell.CreateShortcut($start).TargetPath } else { '' }
+          $hasDesk   = Test-Path $desk
+          $listed    = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue |
+                         Where-Object { $_.DisplayName -eq 'Snapshots' }
+
+          # The installed copy starts and serves (the same check as the plain exe).
+          $up = $false
+          if ($installed) {
+            $lib = Join-Path $env:RUNNER_TEMP 'inst-lib'; $data = Join-Path $env:RUNNER_TEMP 'inst-data'
+            New-Item -ItemType Directory -Force $lib | Out-Null
+            [IO.File]::WriteAllText((Join-Path $env:RUNNER_TEMP 'inst.toml'), "faces = false`nplaces = false`nsmart_search = false`ntext_search = false`nscan_interval_minutes = 0`n")
+            Start-Process -FilePath (Join-Path $dir 'Snapshots.exe') -ArgumentList @('--library', $lib, '--data', $data, '--config', (Join-Path $env:RUNNER_TEMP 'inst.toml'), '--port', '8796', '--no-browser')
+            for ($i = 0; $i -lt 60 -and -not $up; $i++) {
+              Start-Sleep -Seconds 1
+              try { Invoke-RestMethod 'http://127.0.0.1:8796/api/health' | Out-Null; $up = $true } catch { }
+            }
+          }
+
+          # Uninstall while it is running (the uninstaller stops it).
+          $gone = $false
+          if ($unins) {
+            Start-Process -FilePath $unins.FullName -Wait -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART')
+            Start-Sleep -Seconds 3
+            $gone = -not (Test-Path (Join-Path $dir 'Snapshots.exe')) -and -not (Test-Path $start) -and -not (Test-Path $desk)
+          }
+          Get-Process -Name Snapshots -ErrorAction SilentlyContinue | Stop-Process -Force
+          Write-Host '--- setup log ---'
+          Get-Content "$env:RUNNER_TEMP\setup.log" -ErrorAction SilentlyContinue | Select-Object -Last 25
+
+          if ($run.ExitCode -ne 0)       { throw "The installer exited with code $($run.ExitCode)." }
+          if (-not $installed)           { throw 'The installer did not put Snapshots.exe in place.' }
+          if (-not $unins)               { throw 'The installer made no uninstaller.' }
+          if ($target -ne (Join-Path $dir 'Snapshots.exe')) { throw "The Start menu icon points at '$target'." }
+          if (-not $hasDesk)             { throw 'The desktop icon was asked for but not made.' }
+          if (-not $listed)              { throw 'Snapshots is not listed in Windows installed apps.' }
+          if (-not $up)                  { throw 'The installed Snapshots.exe did not start.' }
+          if (-not $gone)                { throw 'Uninstalling left Snapshots.exe or its icons behind.' }
+          Write-Host 'Installer smoke test passed: installed for this user, icons made, listed in apps, starts, uninstalls cleanly.'
+
       - uses: actions/upload-artifact@v4
         with:
           name: Snapshots-windows
-          path: dist/Snapshots.exe
+          path: |
+            dist/Snapshots.exe
+            dist/Snapshots-Setup.exe
           if-no-files-found: error
 
       - name: Attach to the release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/Snapshots.exe
+          files: |
+            dist/Snapshots-Setup.exe
+            dist/Snapshots.exe

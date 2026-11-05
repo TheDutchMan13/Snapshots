@@ -89,9 +89,17 @@ Snapshots is a self-hosted photo and video library for Windows. Your originals s
 - To run from source or build the exe yourself: [Python 3.11 or newer](https://www.python.org/downloads/)
 - Optional: [ffmpeg](https://ffmpeg.org/download.html) on your `PATH`, for video thumbnails, dates and positions
 
+## Install
+
+Download **`Snapshots-Setup.exe`** from the [Releases](https://github.com/TheDutchMan13/Snapshots/releases) page and run it. It installs Snapshots for you alone (no administrator rights, no prompt from Windows asking for permission) into `%LOCALAPPDATA%\Programs\Snapshots`, puts **Snapshots** in your Start menu, offers an icon on the desktop, and offers to open it when it is done. To remove it, use **Settings > Apps > Installed apps**. Installing a newer version on top upgrades it, and installing or uninstalling never touches your photos or Snapshots' own data (`%LOCALAPPDATA%\Snapshots`); when you uninstall it asks whether to delete that data too, and the answer starts as **No**.
+
+Windows may warn "Windows protected your PC" the first time, because the installer isn't code-signed. Choose **More info**, then **Run anyway**.
+
+Prefer no installer? `Snapshots.exe` is also on the Releases page and runs from anywhere, see below.
+
 ## Quick start with the exe
 
-1. Get `Snapshots.exe` (see [Building the exe](#building-the-exe)) and put it anywhere, for example `C:\Snapshots`.
+1. Get `Snapshots.exe` (from the Releases page, or see [Building the exe](#building-the-exe)) and put it anywhere, for example `C:\Snapshots`. (If you used the installer above, skip to step 2: open Snapshots from the Start menu.)
 2. Double-click it. The first time, it asks which folder holds your photos.
 3. Snapshots opens in its own window. Create the first account: it becomes the administrator.
 4. **Closing the window stops Snapshots.** You stay logged in next time you open it. What Snapshots has been doing is written to `snapshots.log` in the data folder (`%LOCALAPPDATA%\Snapshots`), which helps if something goes wrong.
@@ -250,9 +258,9 @@ The safe way to reach Snapshots from your phone is [Tailscale](https://tailscale
 
 ## Building the exe
 
-`Snapshots.exe` has to be built on Windows. There are two ways.
+`Snapshots.exe` has to be built on Windows. There are two ways. The GitHub build also makes the installer, `Snapshots-Setup.exe` (with [Inno Setup](https://jrsoftware.org/isinfo.php); its script is `installer\snapshots.iss`). To make the installer on your own PC after `build.bat`, install Inno Setup and run `iscc /DAppVersion=0.14.0 installer\snapshots.iss`; it is written to `dist\Snapshots-Setup.exe`.
 
-**Let GitHub build it (no setup on your PC).** Push the project to GitHub, open the repository's **Actions** tab, choose **Build Windows exe**, and press **Run workflow**. When it finishes, download `Snapshots-windows` from the run's page. To publish it on the **Releases** page instead, push a tag such as `v0.2.0`. The workflow runs the tests and then starts the finished exe to check it works before handing it over.
+**Let GitHub build it (no setup on your PC).** Push the project to GitHub, open the repository's **Actions** tab, choose **Build Windows exe**, and press **Run workflow**. When it finishes, download `Snapshots-windows` from the run's page. To publish it on the **Releases** page instead, push a tag such as `v0.2.0` (it has to start with `v`). The workflow runs the tests, starts the finished exe to check it works, then installs and uninstalls the installer on the build machine to check that too, before attaching both files to the release.
 
 **Build it on your own PC.** Install Python 3.11 or newer, then double-click `build.bat`. When it finishes, the exe is at `dist\Snapshots.exe`. The script keeps its tools in `%LOCALAPPDATA%\Snapshots-build`, repairs them if an earlier run was interrupted, and is safe to run again.
 
@@ -260,7 +268,7 @@ If Windows Security removes the exe after a build (programs made with PyInstalle
 
 ## Upgrading
 
-Replace the exe (or pull the new code) and start it again. Your database is upgraded automatically the first time. Version 0.2 added accounts, so after upgrading from 0.1 you'll be asked to create the administrator account. Version 0.3 only changes how Snapshots opens (its own window instead of a browser tab); your accounts, albums and photos are untouched. You will need to log in once more, because the app window keeps its own login separate from your browser. Version 0.4 then checks every photo once in the background (copies, blur, content and text), which takes a while for a big library; everything keeps working meanwhile. Version 0.5 looks once through your JPEG and HEIC photos for motion photos and keywords (quick: it reads only the start of each file), pairs Live Photos, stacks RAW + JPEG pairs, and picks up RAW files that earlier versions skipped. Version 0.6 looks once through your JPEG and HEIC photos for 360° panoramas (again reading only the start of each file) and makes its first database backup when it starts. Version 0.7 changes nothing on its own: imports, the offsite copy and webhooks only start once you set them up. Version 0.8 changes nothing in your files unless you turn on XMP files; new uploads are filed by the date taken. Version 0.10 changes how the app looks, not your library: Settings is now a page (the gear by your name), Storage and Library health have their own places in the sidebar, and a short welcome walks a new install through its first choices. Version 0.9.1 adds the optional Start with Windows switch; it stays off until you turn it on. Version 0.9 adds stars, labels and pick/reject (all empty to begin with); the library health check only runs when you ask, or on the schedule you set.
+Run the new `Snapshots-Setup.exe` (it closes a running Snapshots first), or replace the exe (or pull the new code) and start it again. The Start menu icon the installer makes is the same one Settings > Start menu and desktop manages; if Settings says it doesn't open this copy, press **Use this copy**. Your database is upgraded automatically the first time. Version 0.2 added accounts, so after upgrading from 0.1 you'll be asked to create the administrator account. Version 0.3 only changes how Snapshots opens (its own window instead of a browser tab); your accounts, albums and photos are untouched. You will need to log in once more, because the app window keeps its own login separate from your browser. Version 0.4 then checks every photo once in the background (copies, blur, content and text), which takes a while for a big library; everything keeps working meanwhile. Version 0.5 looks once through your JPEG and HEIC photos for motion photos and keywords (quick: it reads only the start of each file), pairs Live Photos, stacks RAW + JPEG pairs, and picks up RAW files that earlier versions skipped. Version 0.6 looks once through your JPEG and HEIC photos for 360° panoramas (again reading only the start of each file) and makes its first database backup when it starts. Version 0.7 changes nothing on its own: imports, the offsite copy and webhooks only start once you set them up. Version 0.8 changes nothing in your files unless you turn on XMP files; new uploads are filed by the date taken. Version 0.10 changes how the app looks, not your library: Settings is now a page (the gear by your name), Storage and Library health have their own places in the sidebar, and a short welcome walks a new install through its first choices. Version 0.9.1 adds the optional Start with Windows switch; it stays off until you turn it on. Version 0.9 adds stars, labels and pick/reject (all empty to begin with); the library health check only runs when you ask, or on the schedule you set.
 
 ## Roadmap
 
