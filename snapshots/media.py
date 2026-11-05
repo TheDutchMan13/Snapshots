@@ -1003,11 +1003,65 @@ def _best_frame(ffmpeg: str, src: Path, dst: Path, duration: float) -> bool:
                 pass
 
 
+def _opencv_thumb(src: Path, dst: Path) -> bool:
+    """The video's best frame using the OpenCV built into the app, so no ffmpeg install is needed.
+
+    Reads the same spots as _best_frame and keeps the best-scoring frame. Formats OpenCV can't decode
+    (some HEVC/AV1 files) give False.
+    """
+    try:
+        import cv2
+    except ImportError:
+        return False
+    cap = cv2.VideoCapture(str(src))
+    try:
+        if not cap.isOpened():
+            return False
+        count = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0
+        fps = cap.get(cv2.CAP_PROP_FPS) or 0
+        spots = [0]
+        if count >= 2 and fps > 0:
+            long_enough = count / fps >= 3
+            spots = [int(count * s) for s in FRAME_SPOTS] if long_enough else [min(int(fps), int(count) - 1), 0]
+        best = None
+        for spot in spots:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, spot)
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                continue
+            h, w = frame.shape[:2]
+            if w > THUMB_SIZE:
+                frame = cv2.resize(frame, (THUMB_SIZE, max(1, round(h * THUMB_SIZE / w))), interpolation=cv2.INTER_AREA)
+            img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            score = frame_score(img)
+            if best is None or score > best[0]:
+                best = (score, img)
+            if len(spots) == 2 and best is not None and score >= 0:
+                break          # short clip: the first usable frame will do
+        if best is None:
+            return False
+        tmp = dst.with_name(dst.stem + ".tmp.jpg")
+        try:
+            best[1].save(tmp, "JPEG", quality=85)
+            os.replace(tmp, dst)
+        finally:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+        return True
+    except Exception as exc:
+        log.info("OpenCV could not make a thumbnail of %s: %s", src, exc)
+        return False
+    finally:
+        cap.release()
+
+
 def make_video_thumb(src: Path, dst: Path) -> bool:
-    """The video's best frame (see _best_frame) if ffmpeg is installed, else no thumbnail."""
+    """The video's best frame (see _best_frame): with ffmpeg if installed, else with the built-in OpenCV."""
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
-        return False
+        return _opencv_thumb(src, dst)
     duration = video_duration(src)
     if duration and duration >= 3:
         try:

@@ -23,6 +23,7 @@ log = logging.getLogger("snapshots.scanner")
 
 _SKIP_DIRS = {"$recycle.bin", "system volume information", "@eadir", "#recycle", "lost+found"}
 _COMMIT_EVERY = 25
+_video_retried: set[int] = set()
 MASS_REMOVAL_MIN = 20  # below this many, missing files are always tidied away
 
 
@@ -296,7 +297,7 @@ class Scanner:
             existing = {
                 r["path"]: r
                 for r in conn.execute(
-                    "SELECT a.id, a.path, a.size, a.mtime_ns, a.has_thumb, a.sha1, a.trashed_at, a.edits,"
+                    "SELECT a.id, a.path, a.kind, a.size, a.mtime_ns, a.has_thumb, a.sha1, a.trashed_at, a.edits,"
                     " (SELECT COUNT(*) FROM album_assets WHERE asset_id = a.id)"
                     " + (SELECT COUNT(*) FROM favorites WHERE asset_id = a.id)"
                     " + (SELECT COUNT(*) FROM faces WHERE asset_id = a.id) AS links"
@@ -344,6 +345,14 @@ class Scanner:
                     continue
                 row = existing.get(rel)
                 unchanged = row is not None and row["size"] == size and row["mtime_ns"] == mtime_ns
+                if unchanged and row["kind"] == "video" and not row["has_thumb"] and row["id"] not in _video_retried:
+                    # Videos left without a picture (no ffmpeg then): try once per run, now OpenCV can help.
+                    _video_retried.add(row["id"])
+                    try:
+                        _make_thumb(cfg, conn, row["id"], "video", full)
+                    except Exception as exc:
+                        log.info("no thumbnail for %s: %s", full, exc)
+                    continue
                 if unchanged and (not row["has_thumb"] or cfg.thumb_path(row["id"]).exists()):
                     continue
                 try:

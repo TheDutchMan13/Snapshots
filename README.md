@@ -79,7 +79,7 @@ Snapshots is a self-hosted photo and video library for Windows. Your originals s
 - HEIC, HEIF and AVIF photos from phones are shown as normal images
 - Dates come from EXIF, then from a sidecar, the GPS time, names like `IMG_20241005_142233.jpg`, the numbered photos beside it, and last the file's modified time
 - Upload from the browser by button or drag and drop, with duplicate detection
-- Video playback, plus video thumbnails, dates and positions when ffmpeg is installed
+- Video playback and thumbnails; dates and positions too when ffmpeg is installed
 - Works on a phone-sized screen and follows your light or dark setting
 
 ## Requirements
@@ -87,7 +87,7 @@ Snapshots is a self-hosted photo and video library for Windows. Your originals s
 - Windows 10 or 11
 - To run the exe: nothing else. The app window uses Microsoft Edge WebView2, which comes with Windows 11 and current Windows 10. If a PC doesn't have it, Snapshots opens in your browser instead
 - To run from source or build the exe yourself: [Python 3.11 or newer](https://www.python.org/downloads/)
-- Optional: [ffmpeg](https://ffmpeg.org/download.html) on your `PATH`, for video thumbnails, dates and positions
+- Optional: [ffmpeg](https://ffmpeg.org/download.html) on your `PATH`, for video dates and positions, conversion and trimming (thumbnails work without it; HEVC and AV1 files may need it)
 
 ## Install
 
