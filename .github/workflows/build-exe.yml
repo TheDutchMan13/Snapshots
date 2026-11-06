@@ -164,13 +164,20 @@ jobs:
           Get-Content smoke.out.log, smoke.err.log, (Join-Path $data 'snapshots.log') -ErrorAction SilentlyContinue
 
           if ($up -and -not $status) {
-            # Diagnostic: what the exe saw in the library, so a failure says why.
-            $dstat = Invoke-RestMethod "$base/api/status" -WebSession $web
-            $dnames = ((Invoke-RestMethod "$base/api/assets" -WebSession $web).items | ForEach-Object { $_.filename }) -join ','
+            # Diagnostic: did the exe die, and if so, which module crashed (Windows logs it even without a console).
             Write-Host "DIAG exe alive=$(-not $p.HasExited) exit=$(if ($p.HasExited) { $p.ExitCode })"
-            Write-Host "DIAG photos=$($dstat.photos) jxl=$($dstat.jxl) heif=$($dstat.heif) raw=$($dstat.raw) scanning=$($dstat.scan.running) error=$($dstat.scan.error)"
-            Write-Host "DIAG indexed: $dnames"
+            try {
+              $dstat = Invoke-RestMethod "$base/api/status" -WebSession $web
+              $dnames = ((Invoke-RestMethod "$base/api/assets" -WebSession $web).items | ForEach-Object { $_.filename }) -join ','
+              Write-Host "DIAG photos=$($dstat.photos) jxl=$($dstat.jxl) heif=$($dstat.heif) raw=$($dstat.raw) scanning=$($dstat.scan.running)"
+              Write-Host "DIAG indexed: $dnames"
+            } catch { Write-Host "DIAG the exe no longer answers: $($_.Exception.Message)" }
             Write-Host "DIAG library: $((Get-ChildItem $lib | ForEach-Object { $_.Name + ' ' + $_.Length }) -join ', ')"
+            try {
+              Get-WinEvent -FilterHashtable @{ LogName = 'Application'; StartTime = (Get-Date).AddMinutes(-10) } -MaxEvents 20 -ErrorAction Stop |
+                Where-Object { $_.Message -match 'Snapshots|python|imagecodecs|libjxl|jxl' } | Select-Object -First 3 |
+                ForEach-Object { Write-Host "DIAG event: $($_.ProviderName) $($_.Message -replace '\s+', ' ')" }
+            } catch { Write-Host "DIAG no event log: $($_.Exception.Message)" }
           }
           if (-not $up)                  { throw 'The exe did not start.' }
           if (-not $status)              { throw 'The exe did not index the test photo.' }
