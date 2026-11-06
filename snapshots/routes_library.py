@@ -785,7 +785,6 @@ def router(ctx) -> APIRouter:
             "ffmpeg": media.has_ffmpeg(),
             "heif": media.HEIF,
             "raw": media.RAW,
-            "jxl": media.JXL,
             "scan_interval_minutes": cfg.scan_interval_minutes,
             "libraries": [{"path": str(x.path), "main": x.main, "ok": x.available()} for x in libraries.roots(cfg)],
             "locked": {"count": locked, "has_pin": bool(has_pin), "open": bool(user.get("unlocked"))},

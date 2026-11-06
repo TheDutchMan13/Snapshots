@@ -17,15 +17,6 @@ datas += heif_datas
 binaries += heif_binaries
 hiddenimports += heif_hidden
 
-# JPEG XL: only imagecodecs' JPEG XL module is needed, not its many other codecs (it loads them lazily).
-if importlib.util.find_spec("imagecodecs") is not None:
-    from PyInstaller.utils.hooks import collect_dynamic_libs
-
-    _wanted = {"_jpegxl", "_shared", "_imcd"}
-    hiddenimports += [m for m in collect_submodules("imagecodecs")
-                      if not m.rsplit(".", 1)[-1].startswith("_") or m.rsplit(".", 1)[-1] in _wanted]
-    binaries += collect_dynamic_libs("imagecodecs")
-
 # rawpy (camera RAW files) wraps LibRaw, a native library; collect it the same way.
 if importlib.util.find_spec("rawpy") is not None:
     raw_datas, raw_binaries, raw_hidden = collect_all("rawpy")
