@@ -85,6 +85,10 @@ def make_filter_params(cfg, speller=None):
         turned: bool = False,
         pet: int | None = None,
         exact: bool = False,
+        megapixels: float = Query(0, ge=0, le=1000),
+        camera: str = Query("", max_length=200),
+        shape: str = Query("", pattern="^(landscape|portrait|square)?$"),
+        mono: bool = False,
     ) -> db.Filter:
         if not category and cfg.hide_clutter and archived == "hide" and not q.strip():
             category = "photos"      # the timelines leave screenshots and documents out, if asked to
@@ -104,7 +108,7 @@ def make_filter_params(cfg, speller=None):
                          archived=archived, tag=tag, folder=folder, stacks=stacks, bbox=_bbox(bbox),
                          locked=locked, rating=rating, label=label, flag=flag,
                          category="" if category == "all" else category, highlights=highlights,
-                         turned=turned, pet=pet)
+                         turned=turned, pet=pet, megapixels=megapixels, camera=camera, shape=shape, mono=mono)
 
     return filter_params
 
@@ -271,6 +275,17 @@ def router(ctx) -> APIRouter:
         if f.locked and not user.get("unlocked"):
             raise HTTPException(403, "The locked folder is closed.")
         return user
+
+    @r.get("/api/cameras")
+    def cameras(request: Request):
+        """The cameras the photos were taken with, most used first (for the Filter menu)."""
+        current_user(request)
+        with db.session(cfg.db_path) as conn:
+            rows = conn.execute(
+                "SELECT a.camera, COUNT(*) FROM assets a WHERE a.camera IS NOT NULL AND a.camera != ''"
+                f" AND a.trashed_at IS NULL AND {db.NOT_LOCKED} GROUP BY a.camera ORDER BY COUNT(*) DESC, a.camera"
+                " LIMIT 200").fetchall()
+        return {"cameras": [{"name": r[0], "count": r[1]} for r in rows]}
 
     @r.get("/api/assets")
     def list_assets(request: Request, f: db.Filter = Depends(filter_params), cursor: str = "",

@@ -521,6 +521,10 @@ class Filter:
     turned: bool = False           # only photos that look sideways (see sideways.py)
     pet: int | None = None         # only photos of this pet (see pets.py)
     date_conds: list | None = None  # date conditions already worked out (dates.py), for results found by content
+    megapixels: float = 0          # at least this many megapixels
+    camera: str = ""               # taken with this camera
+    shape: str = ""                # "landscape", "portrait" or "square"
+    mono: bool = False             # black and white (only black, white and grey were found in it: colors.py)
 
 
 
@@ -589,6 +593,10 @@ CLUTTER = "a.category IN ('screenshot', 'document', 'receipt')"
 
 # Items in someone's locked folder are left out everywhere except that folder.
 NOT_LOCKED = "a.locked_by IS NULL"
+# Black and white: its colours (colors.py) are only black, white and grey. Each name is taken out with the
+# space before it, so neighbours ("black white") each keep the space they need.
+MONO = ("a.kind = 'photo' AND a.colors IS NOT NULL AND a.colors != '' AND trim(replace(replace(replace(' ' || a.colors || ' ',"
+        " ' black ', ' '), ' white ', ' '), ' gray ', ' ')) = ''")
 
 
 def people_version(conn) -> str:
@@ -703,6 +711,20 @@ def where_clause(f: Filter, user_id: int | None) -> tuple[str, list]:
         params.append(f.label)
     if f.flag:
         where.append({"pick": "a.flag = 1", "reject": "a.flag = -1"}.get(f.flag, "a.flag = 0"))
+    if f.megapixels:
+        where.append("coalesce(a.width, 0) * coalesce(a.height, 0) >= ?")
+        params.append(int(f.megapixels * 1_000_000))
+    if f.camera:
+        where.append("a.camera = ?")
+        params.append(f.camera)
+    if f.shape == "landscape":
+        where.append("a.width > a.height * 1.02")
+    elif f.shape == "portrait":
+        where.append("a.height > a.width * 1.02")
+    elif f.shape == "square":
+        where.append("a.width > 0 AND abs(a.width - a.height) <= a.width * 0.02")
+    if f.mono:
+        where.append(MONO)
     if f.category == "clutter":
         where.append(CLUTTER)
     elif f.category == "photos":

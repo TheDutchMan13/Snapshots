@@ -69,6 +69,26 @@ def router(ctx) -> APIRouter:
     cfg = ctx.cfg
     r = APIRouter()
 
+    # ------------------------------------------------------------ the calendar
+
+    @r.get("/api/calendar")
+    def calendar(request: Request, year: int | None = Query(None, ge=1800, le=2200)):
+        """How many photos and videos were taken each day of a year (the newest year with any, if not given),
+        and the years there are, as the timeline shows them (no trash, archive or locked items)."""
+        user = current_user(request)
+        where, params = db.where_clause(db.Filter(archived="hide"), user["id"])
+        with db.session(cfg.db_path) as conn:
+            years = [{"year": int(y), "count": n} for y, n in conn.execute(
+                f"SELECT substr(a.taken_at, 1, 4) AS y, COUNT(*) FROM assets a WHERE {where}"
+                " GROUP BY y ORDER BY y DESC", params) if str(y).isdigit()]
+            if year is None:
+                year = years[0]["year"] if years else date.today().year
+            days = {d: n for d, n in conn.execute(
+                f"SELECT substr(a.taken_at, 1, 10) AS d, COUNT(*) FROM assets a WHERE {where}"
+                " AND a.taken_at >= ? AND a.taken_at < ? GROUP BY d",
+                [*params, f"{year:04d}-01-01", f"{year + 1:04d}-01-01"])}
+        return {"year": year, "years": years, "days": days}
+
     # ------------------------------------------------------------ stars, colour labels, pick/reject
 
     @r.post("/api/marks")

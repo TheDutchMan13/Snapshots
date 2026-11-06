@@ -24,6 +24,8 @@ Snapshots is a self-hosted photo and video library for Windows. Your originals s
 - **Several library folders:** add photo folders on other drives (Settings, as an administrator). Each shows up as its own folder, and an unplugged drive loses nothing
 - **Edit photos:** turn, mirror, straighten and crop. Only the recipe is saved: your original file is never changed, and **Download edited** gives you an edited copy
 - **Change details:** fix the date (or move a whole batch by some hours, for a camera with a wrong clock), set or remove the location by town name, coordinates or a click on the map, and add a description. Descriptions are searched too
+- **Filter** any page by stars, colour label, pick or reject, size (megapixels), shape (landscape, portrait or square), black and white, or the camera it was taken with. The filter stays on as you move between pages
+- **Calendar** (under More): each month of a year, with the days you took photos shaded by how many. Click a day or a month to see its photos, and step from day to day
 - **Slideshow** of any page, with crossfades, a choice of speed and shuffle
 - **360° photos and panoramas:** drag to look around a 360° photo, or scroll along a wide panorama
 - **Locked folder:** move private photos behind a PIN. They are hidden from everyone everywhere else in Snapshots (the files stay in your folder)

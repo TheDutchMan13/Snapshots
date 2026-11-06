@@ -15,7 +15,8 @@ const S = {
   lastMonth: null,
   selecting: false,
   selected: new Set(),
-  marks: { rating: 0, label: "", flag: "" },   // the star / label / pick filter, kept from page to page
+  marks: { rating: 0, label: "", flag: "", megapixels: 0, camera: "", shape: "", mono: false },   // the Filter menu, kept from page to page
+  cameras: null,          // the cameras in the library, for the Filter menu (loaded when it is first opened)
   lastClicked: -1,
   viewing: -1,
   detail: null,      // full details of the photo open in the viewer
@@ -245,6 +246,18 @@ function parseRoute() {
     case "events":
       if (parts[1] && parts[2]) return { name: "events", view: "grid", filter: { start: parts[1], end: parts[2], archived: "hide" }, event: { start: parts[1], end: parts[2] } };
       return { name: "events", view: "events" };
+    case "calendar": {
+      const at = parts[1] || "";
+      if (/^\d{4}-\d{2}-\d{2}$/.test(at)) {
+        return { name: "calendar", view: "grid", filter: { start: `${at}T00:00:00`, end: `${at}T23:59:59`, archived: "hide", stacks: "true" }, calendarDay: at };
+      }
+      if (/^\d{4}-\d{2}$/.test(at)) {
+        const [y, m] = at.split("-").map(Number);
+        const last = new Date(y, m, 0).getDate();
+        return { name: "calendar", view: "grid", filter: { start: `${at}-01T00:00:00`, end: `${at}-${String(last).padStart(2, "0")}T23:59:59`, archived: "hide", stacks: "true" }, calendarMonth: at };
+      }
+      return { name: "calendar", view: "calendar", year: /^\d{4}$/.test(at) ? +at : null };
+    }
     case "memories":
       if (parts[1] && /^\d{4}-\d{2}-\d{2}$/.test(parts[1])) {
         return { name: "all", view: "grid", filter: { start: `${parts[1]}T00:00:00`, end: `${parts[1]}T23:59:59`, archived: "hide", stacks: "true" }, memory: parts[1] };
@@ -303,7 +316,7 @@ let keepSearch = false;   // true while the search box itself caused a change of
 
 const ROUTE_TITLES = {
   all: "Snapshots", photos: "Photos", videos: "Videos", favorites: "Favourites", activity: "Activity", people: "People",
-  places: "Places", map: "Map", events: "Events", review: "Year in review", highlights: "Highlights", like: "More like this", pets: "Pets", albums: "Albums", tags: "Tags", folders: "Folders",
+  places: "Places", map: "Map", events: "Events", calendar: "Calendar", review: "Year in review", highlights: "Highlights", like: "More like this", pets: "Pets", albums: "Albums", tags: "Tags", folders: "Folders",
   cleanup: "Clean up", storage: "Storage", health: "Library health", archive: "Archive", locked: "Locked", trash: "Trash",
   settings: "Settings",
 };
@@ -398,6 +411,8 @@ async function render() {
       await renderHealth();
     } else if (S.route.view === "review") {
       await renderReview();
+    } else if (S.route.view === "calendar") {
+      await renderCalendar();
     } else if (S.route.view === "tags") {
       await renderTags();
     } else if (S.route.view === "map") {
@@ -441,6 +456,8 @@ async function renderHead() {
     await renderSearchHead();
   } else if (r.memory) {
     renderMemoryHead(r.memory);
+  } else if (r.calendarDay || r.calendarMonth) {
+    renderCalendarHead(r.calendarDay, r.calendarMonth);
   } else if (r.name === "all" && !r.memory) {
     renderMemoriesStrip().catch(() => {});      // the photos below don't wait for memories
   } else if (r.tag) {
@@ -848,6 +865,10 @@ function filterParams(extra) {
   if (S.marks.rating) p.set("rating", S.marks.rating);
   if (S.marks.label) p.set("label", S.marks.label);
   if (S.marks.flag) p.set("flag", S.marks.flag);
+  if (S.marks.megapixels) p.set("megapixels", S.marks.megapixels);
+  if (S.marks.camera) p.set("camera", S.marks.camera);
+  if (S.marks.shape) p.set("shape", S.marks.shape);
+  if (S.marks.mono) p.set("mono", "true");
   return p;
 }
 
@@ -1298,7 +1319,10 @@ async function marksDialog(ids) {
   });
 }
 
-/** The filter by stars, label and pick/reject, in the header. */
+const NO_MARKS = { rating: 0, label: "", flag: "", megapixels: 0, camera: "", shape: "", mono: false };
+const SHAPES = { landscape: "Landscape", portrait: "Portrait", square: "Square" };
+
+/** The Filter menu in the header: stars, label, pick/reject, size, camera, shape and black and white. */
 function renderMarksFilter() {
   const btn = $("marks-btn");
   const f = S.marks;
@@ -1306,33 +1330,63 @@ function renderMarksFilter() {
   if (f.rating) parts.push(`★${f.rating}+`);
   if (f.label) parts.push(LABEL_NAMES[f.label]);
   if (f.flag) parts.push({ pick: "Picks", reject: "Rejects", unflagged: "Unflagged" }[f.flag]);
+  if (f.megapixels) parts.push(`${f.megapixels} MP+`);
+  if (f.camera) parts.push(f.camera);
+  if (f.shape) parts.push(SHAPES[f.shape]);
+  if (f.mono) parts.push("Black and white");
   btn.textContent = parts.length ? `Filter: ${parts.join(", ")}` : "Filter";
+  btn.title = btn.textContent;
   btn.classList.toggle("active", parts.length > 0);
   btn.setAttribute("aria-expanded", String(!$("marks-pop").hidden));
   const pop = $("marks-pop");
   pop.replaceChildren();
+  const changed = () => {
+    renderMarksFilter();
+    if (S.route.view === "grid") { renderHead(); reload(); }
+  };
   const group = (title, options, key) => {
     const g = el("div", "mk-row");
     g.append(el("span", "mk-name", title));
     for (const [value, text, cls] of options) {
       const b = button(text, cls || "chip", () => {
-        S.marks[key] = S.marks[key] === value ? (key === "rating" ? 0 : "") : value;
-        renderMarksFilter();
-        if (S.route.view === "grid") { renderHead(); reload(); }
+        S.marks[key] = S.marks[key] === value ? NO_MARKS[key] : value;
+        changed();
       });
       b.setAttribute("aria-pressed", String(S.marks[key] === value));
       if (cls) { b.setAttribute("aria-label", `${LABEL_NAMES[value]} label`); b.title = LABEL_NAMES[value]; }
       g.append(b);
     }
     pop.append(g);
+    return g;
   };
   group("Stars", [[1, "★1+"], [2, "★2+"], [3, "★3+"], [4, "★4+"], [5, "★5"]], "rating");
   group("Label", LABELS.map((l) => [l, "", `mk-label label-${l}`]), "label");
   group("Flag", [["pick", "Picks"], ["reject", "Rejects"], ["unflagged", "Neither"]], "flag");
+  group("Size", [[2, "2 MP+"], [8, "8 MP+"], [12, "12 MP+"], [24, "24 MP+"], [48, "48 MP+"]], "megapixels");
+  group("Shape", Object.entries(SHAPES), "shape");
+  group("Colour", [[true, "Black and white"]], "mono");
+  // The cameras in the library: a list to pick from (there can be many).
+  const cam = el("div", "mk-row");
+  cam.append(el("span", "mk-name", "Camera"));
+  const pick = el("select", "mk-camera");
+  pick.setAttribute("aria-label", "Camera");
+  const fill = () => {
+    const list = S.cameras || [];
+    pick.replaceChildren(new Option(S.cameras ? "Any camera" : "Loading…", ""));
+    for (const c of list) pick.append(new Option(`${c.name} (${c.count})`, c.name));
+    if (f.camera && !list.some((c) => c.name === f.camera)) pick.append(new Option(f.camera, f.camera));
+    pick.value = f.camera;
+  };
+  fill();
+  if (!S.cameras && !pop.hidden) {
+    api("/api/cameras").then((r) => { S.cameras = r.cameras; if (pick.isConnected) fill(); }).catch(() => { S.cameras = []; });
+  }
+  pick.addEventListener("change", () => { S.marks.camera = pick.value; changed(); });
+  cam.append(pick);
+  pop.append(cam);
   const clear = button("Show everything", "btn small", () => {
-    S.marks = { rating: 0, label: "", flag: "" };
-    renderMarksFilter();
-    if (S.route.view === "grid") { renderHead(); reload(); }
+    S.marks = { ...NO_MARKS };
+    changed();
   });
   clear.disabled = !parts.length;
   pop.append(clear);
@@ -1344,7 +1398,8 @@ $("marks-btn").addEventListener("click", (e) => {
 });
 document.addEventListener("click", (e) => {
   const pop = $("marks-pop");
-  if (!pop.hidden && !pop.contains(e.target) && e.target !== $("marks-btn")) { pop.hidden = true; renderMarksFilter(); }
+  // (a choice redraws the menu, so the clicked button is gone by now: that is not a click outside)
+  if (!pop.hidden && e.target.isConnected && !pop.contains(e.target) && e.target !== $("marks-btn")) { pop.hidden = true; renderMarksFilter(); }
 });
 
 // With items selected in a grid, the same keys as in the viewer change all of them.
@@ -2809,6 +2864,98 @@ function healthRow(i) {
 }
 
 // ------------------------------------------------------------------ year in review
+
+// ------------------------------------------------------------------ the calendar
+
+function calendarStep(at, by) {
+  // The next or previous day ("YYYY-MM-DD") or month ("YYYY-MM").
+  if (at.length === 7) {
+    const [y, m] = at.split("-").map(Number);
+    const d = new Date(y, m - 1 + by, 1);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+  }
+  const d = new Date(`${at}T12:00:00`);
+  d.setDate(d.getDate() + by);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function renderCalendarHead(day, month) {
+  const at = day || month;
+  const d = new Date(day ? `${day}T12:00:00` : `${month}-01T12:00:00`);
+  const title = day ? d.toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long", year: "numeric" })
+    : d.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+  const prev = link("‹", `#/calendar/${calendarStep(at, -1)}`, "btn small");
+  prev.setAttribute("aria-label", day ? "Day before" : "Month before");
+  const next = link("›", `#/calendar/${calendarStep(at, 1)}`, "btn small");
+  next.setAttribute("aria-label", day ? "Day after" : "Month after");
+  const actions = [prev, next, link("Calendar", `#/calendar/${at.slice(0, 4)}`, "btn small")];
+  if (day) actions.push(link("Whole month", `#/calendar/${day.slice(0, 7)}`, "btn small"));
+  headRow(title, null, actions);
+}
+
+async function renderCalendar() {
+  const data = await pageApi(`/api/calendar${S.route.year ? `?year=${S.route.year}` : ""}`);
+  const year = data.year;
+  const years = el("div", "tabs review-years");
+  for (const y of data.years) {
+    const b = link(String(y.year), `#/calendar/${y.year}`, "tab");
+    b.setAttribute("aria-pressed", String(y.year === year));
+    b.title = plural(y.count, "item");
+    years.append(b);
+  }
+  const total = Object.values(data.days).reduce((a, b) => a + b, 0);
+  headRow(String(year), total ? plural(total, "item") : null, [
+    link("‹", `#/calendar/${year - 1}`, "btn small"), link("›", `#/calendar/${year + 1}`, "btn small"),
+  ]);
+  if (data.years.length > 1) $("page-head").append(years);
+  if (!data.years.length) { showEmpty("No photos yet", "Each day you took photos will show up here."); return; }
+  // Shades: a day's count against the busiest days of the year (so one huge day doesn't wash out the rest).
+  const counts = Object.values(data.days).sort((a, b) => a - b);
+  const high = counts.length ? counts[Math.floor(counts.length * 0.9)] || 1 : 1;
+  const level = (n) => (n >= high ? 4 : n >= high / 2 ? 3 : n >= high / 5 ? 2 : 1);
+  const first = new Intl.Locale(navigator.language || "en-US");
+  const weekStart = ((first.getWeekInfo ? first.getWeekInfo() : first.weekInfo) || { firstDay: 7 }).firstDay % 7;  // 0 = Sunday
+  const dayNames = [...Array(7)].map((_, i) => new Date(2023, 0, 1 + ((i + weekStart) % 7)).toLocaleDateString(undefined, { weekday: "narrow" }));
+  const today = new Date();
+  const wrap = el("div", "calendar");
+  for (let m = 0; m < 12; m++) {
+    const box = el("section", "cal-month");
+    const key = `${year}-${String(m + 1).padStart(2, "0")}`;
+    const inMonth = Object.entries(data.days).filter(([d]) => d.startsWith(key)).reduce((a, [, n]) => a + n, 0);
+    const name = new Date(year, m, 1).toLocaleDateString(undefined, { month: "long" });
+    const head = el("h2", "cal-name");
+    if (inMonth) {
+      const a = link(name, `#/calendar/${key}`);
+      a.title = `${plural(inMonth, "item")} in ${name}`;
+      head.append(a, el("span", "muted", ` ${inMonth}`));
+    } else head.append(el("span", "muted", name));
+    box.append(head);
+    const grid = el("div", "cal-grid");
+    for (const n of dayNames) grid.append(el("span", "cal-dow", n));
+    const startsOn = (new Date(year, m, 1).getDay() - weekStart + 7) % 7;
+    for (let i = 0; i < startsOn; i++) grid.append(el("span", "cal-blank"));
+    const length = new Date(year, m + 1, 0).getDate();
+    for (let d = 1; d <= length; d++) {
+      const day = `${key}-${String(d).padStart(2, "0")}`;
+      const n = data.days[day] || 0;
+      const isToday = today.getFullYear() === year && today.getMonth() === m && today.getDate() === d;
+      let cell;
+      if (n) {
+        cell = link(String(d), `#/calendar/${day}`, `cal-day has l${level(n)}`);
+        const label = `${new Date(year, m, d).toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long" })}: ${plural(n, "item")}`;
+        cell.title = label;
+        cell.setAttribute("aria-label", label);
+      } else {
+        cell = el("span", "cal-day", String(d));
+      }
+      if (isToday) cell.classList.add("today");
+      grid.append(cell);
+    }
+    box.append(grid);
+    wrap.append(box);
+  }
+  $("collection").replaceChildren(wrap);
+}
 
 async function renderReview() {
   const info = await pageApi("/api/review");
