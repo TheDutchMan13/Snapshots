@@ -77,6 +77,7 @@ Snapshots is a self-hosted photo and video library for Windows. Your originals s
 - Select many photos at once (Shift-click for a range) to favourite, add to an album or move to the trash
 - Full-screen viewer with arrow-key navigation, details (who is in it, where it was taken, which albums) and download
 - HEIC, HEIF and AVIF photos from phones are shown as normal images
+- **JPEG XL** (`.jxl`) photos too, with their date, camera and place. The app window gets a JPEG copy to show; downloads give you the original
 - Dates come from EXIF, then from a sidecar, the GPS time, names like `IMG_20241005_142233.jpg`, the numbered photos beside it, and last the file's modified time
 - Upload from the browser by button or drag and drop, with duplicate detection
 - Video playback and thumbnails; dates and positions too when ffmpeg is installed
@@ -350,6 +351,7 @@ Contributions are welcome. Please open an issue before starting a large change s
 - Search by content: [CLIP](https://github.com/openai/CLIP) by OpenAI, MIT licence, in the ONNX version by [Xenova](https://huggingface.co/Xenova/clip-vit-base-patch32)
 - Text reading: [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR), Apache 2.0 licence, in the ONNX version by [RapidOCR](https://huggingface.co/SWHL/RapidOCR)
 - [ONNX Runtime](https://onnxruntime.ai/), MIT licence
+- JPEG XL: [libjxl](https://github.com/libjxl/libjxl) (BSD 3-clause) through [imagecodecs](https://github.com/cgohlke/imagecodecs) (BSD 3-clause)
 - RAW files: [LibRaw](https://www.libraw.org/) (LGPL 2.1 or CDDL) through [rawpy](https://github.com/letmaik/rawpy) (MIT)
 - Photo quality: [LAION-Aesthetics predictor V1](https://github.com/LAION-AI/aesthetic-predictor) weights for CLIP ViT-B/32 (MIT), in `snapshots/aesthetic.py`
 - Photo descriptions: [Florence-2](https://huggingface.co/microsoft/Florence-2-base-ft) by Microsoft, MIT licence, in the ONNX version by the [ONNX Community](https://huggingface.co/onnx-community/Florence-2-base-ft)

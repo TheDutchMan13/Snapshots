@@ -28,6 +28,11 @@ try:  # HEIC / HEIF (iPhone photos) and AVIF need this optional codec package
 except Exception:  # pragma: no cover - depends on the install
     HEIF = False
 
+from . import jxl
+
+jxl.register()       # JPEG XL: decoded by imagecodecs when it is installed (it is in the exe)
+JXL = jxl.AVAILABLE
+
 try:  # camera RAW files (LibRaw)
     import rawpy
 
@@ -43,7 +48,7 @@ RAW_EXTS = {
 PHOTO_EXTS = {
     ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp",
     ".tif", ".tiff", ".heic", ".heif", ".avif",
-} | RAW_EXTS
+} | RAW_EXTS | ({".jxl"} if JXL else set())
 VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".mkv", ".avi", ".webm", ".3gp"}
 # Formats every browser can show directly. Anything else gets a JPEG preview.
 BROWSER_NATIVE = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".avif"}
