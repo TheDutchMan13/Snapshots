@@ -48,6 +48,9 @@ jobs:
           # A JPEG XL photo: decoded by imagecodecs' JPEG XL module, which the exe must carry.
           python -c "import numpy, imagecodecs; open(r'$lib\z.jxl', 'wb').write(imagecodecs.jpegxl_encode(numpy.full((48, 64, 3), 90, numpy.uint8)))"
           if ($LASTEXITCODE -ne 0 -or -not (Test-Path (Join-Path $lib 'z.jxl'))) { throw 'Could not make the test JPEG XL file.' }
+          # Decode it in plain Python first: if this dies, the library itself (not the exe) is the problem.
+          python -c "import numpy, imagecodecs; a = imagecodecs.jpegxl_decode(open(r'$lib\z.jxl', 'rb').read()); print('JXL decode in Python ok', a.shape)"
+          if ($LASTEXITCODE -ne 0) { throw "imagecodecs cannot decode the test JPEG XL file on this runner (exit $LASTEXITCODE)." }
           # No downloads in the smoke test: faces and places are checked by the Python tests.
           [IO.File]::WriteAllText($conf, "faces = false`nplaces = false`nsmart_search = false`ntext_search = false`nscan_interval_minutes = 0`n")
 
@@ -164,6 +167,7 @@ jobs:
             # Diagnostic: what the exe saw in the library, so a failure says why.
             $dstat = Invoke-RestMethod "$base/api/status" -WebSession $web
             $dnames = ((Invoke-RestMethod "$base/api/assets" -WebSession $web).items | ForEach-Object { $_.filename }) -join ','
+            Write-Host "DIAG exe alive=$(-not $p.HasExited) exit=$(if ($p.HasExited) { $p.ExitCode })"
             Write-Host "DIAG photos=$($dstat.photos) jxl=$($dstat.jxl) heif=$($dstat.heif) raw=$($dstat.raw) scanning=$($dstat.scan.running) error=$($dstat.scan.error)"
             Write-Host "DIAG indexed: $dnames"
             Write-Host "DIAG library: $((Get-ChildItem $lib | ForEach-Object { $_.Name + ' ' + $_.Length }) -join ', ')"
