@@ -68,6 +68,7 @@ class Config:
     xmp_sidecars: bool = False             # write descriptions, tags, people and dates to .xmp files beside photos
     upload_template: str = "Uploads/{year}/{month}"  # where uploads and imported files are filed
     max_upload_gb: float = 20.0            # largest single upload request (one or more files)
+    check_updates: bool = True             # now and then ask GitHub whether a newer Snapshots is out
     config_file: Path | None = None  # the file these settings were read from, if any
 
     @property
@@ -152,7 +153,7 @@ _FILE_KEYS = {
     "map_tiles": str, "map_attribution": str,
     "backup_hours": float, "backup_keep": int, "video_encoder": str, "video_cache_gb": float,
     "offsite_method": str, "offsite_target": str, "offsite_hours": float,
-    "xmp_sidecars": bool, "upload_template": str, "max_upload_gb": float, "health_check_days": float, "review_seconds": float,
+    "xmp_sidecars": bool, "upload_template": str, "max_upload_gb": float, "check_updates": bool, "health_check_days": float, "review_seconds": float,
 }
 VIDEO_ENCODERS = ("auto", "libx264", "h264_amf", "h264_nvenc", "h264_qsv")
 OFFSITE_METHODS = ("", "folder", "rclone", "restic")

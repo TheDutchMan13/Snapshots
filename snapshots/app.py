@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from . import __version__, db, webhooks
 from .auth import COOKIE, CSRF_HEADER, USER_LIMIT, LoginThrottle, Tickets, user_for_token
 from .config import Config
+from .updates import UpdateChecker
 from .worker import Worker
 
 
@@ -111,7 +112,7 @@ def create_app(cfg: Config, start_worker: bool = True) -> FastAPI:
     worker = Worker(cfg)
     sender = webhooks.Sender(cfg)
     ctx = SimpleNamespace(cfg=cfg, worker=worker, throttle=LoginThrottle(limits={"user:": USER_LIMIT}), pin_throttle=LoginThrottle(limit=5), tickets=Tickets(), pending_totp={},
-                          webhooks=sender, quit=None)
+                          webhooks=sender, quit=None, updates=UpdateChecker(cfg.check_updates))
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):

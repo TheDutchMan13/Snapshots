@@ -177,6 +177,7 @@ Copy `config.example.toml` to `config.toml` and edit it, or use command-line opt
 | | `face_suggest_threshold` | `0.30` | Ask "Same person?" about groups this alike; `0` turns the questions off |
 | | `xmp_sidecars` | `false` | Write `.xmp` files beside photos (also set in the app: Settings) |
 | | `upload_template` | `Uploads/{year}/{month}` | Where uploads are filed; can use `{year}`, `{month}`, `{monthname}`, `{day}`, `{date}`, `{camera}`, `{type}`, `{user}` |
+| | `check_updates` | `true` | Now and then (twice a day) ask GitHub for the newest version number and show a note in the menu to administrators when a newer Snapshots is out. Nothing about you or your photos is sent. Also a switch in Settings |
 | | `max_upload_gb` | `20` | The most one upload can send at once. Uploads are also refused when they would leave less than 1 GB free on the library's drive or the temporary folder |
 | | `health_check_days` | `0` | Check every file for damage this often; `0` only when asked (also set in Clean up, Library health) |
 | | `review_seconds` | `4` | Year in review videos: seconds each photo is shown |
@@ -294,9 +295,10 @@ Run the new `Snapshots-Setup.exe` (it closes a running Snapshots first), or repl
 - [x] Offsite copies of the photos, webhooks
 - [x] "Same person?" suggestions, a duplicates screen, two-step login, XMP files, storage templates
 - [x] Stars, labels, compare and cull, year in review videos, library health check, storage report
-- [ ] Android app with automatic backup
+- [x] Android app with automatic backup
 - [ ] Sharing links for people without an account
 - [x] Optional start with Windows (Settings)
+- [x] A note in the menu when a new version is out (can be switched off)
 - [x] A layout for phones, a timeline scrubber, Settings as a page, a first-run welcome
 - [ ] A tray icon and a true Windows service that runs before anyone signs in
 

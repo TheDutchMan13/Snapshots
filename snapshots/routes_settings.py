@@ -3,13 +3,14 @@
 import json
 import threading
 import urllib.parse
+import webbrowser
 from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from . import auth, backup, db, libraries, media, offsite, startup, storage, webhooks
+from . import auth, backup, db, libraries, media, offsite, startup, storage, updates, webhooks
 from .app import current_user, require_admin, require_session
 from .config import OFFSITE_METHODS, save_extra_libraries, save_settings
 from .scanner import delete_asset_row
@@ -20,6 +21,10 @@ class FolderBody(BaseModel):
 
 
 class StartupBody(BaseModel):
+    enabled: bool
+
+
+class UpdatesBody(BaseModel):
     enabled: bool
 
 
@@ -98,6 +103,7 @@ def router(ctx) -> APIRouter:
             "xmp": xmp_json(),
             "storage": storage_json(cfg.upload_template),
             "startup": startup_json(),
+            "updates": ctx.updates.status(),
             "shortcuts": startup.shortcut_status(cfg),
             "sorting": sorting_json(),
         }
@@ -143,6 +149,31 @@ def router(ctx) -> APIRouter:
 
     def startup_json() -> dict:
         return dict(startup.status(cfg), can_stop=ctx.quit is not None, port=cfg.port)
+
+    @r.get("/api/update")
+    def update_status(request: Request):
+        """Is a newer version out? Answers at once from what was found last; the looking happens in the background."""
+        require_admin(request)
+        ctx.updates.refresh_if_due()
+        return ctx.updates.status()
+
+    @r.put("/api/settings/updates")
+    def save_updates(body: UpdatesBody, request: Request):
+        require_admin(request)
+        save_settings({"check_updates": body.enabled}, cfg.config_file)
+        cfg.check_updates = ctx.updates.enabled = body.enabled
+        if body.enabled:
+            ctx.updates.refresh_if_due()
+        return ctx.updates.status()
+
+    @r.post("/api/update/open")
+    def open_release_page(request: Request):
+        """Open the release page in this computer's browser (only when asked from this computer)."""
+        require_admin(request)
+        if not request.client or request.client.host not in ("127.0.0.1", "::1"):
+            raise HTTPException(400, "Open the link in your own browser.")
+        webbrowser.open(updates.PAGE_URL)
+        return {"ok": True}
 
     @r.put("/api/settings/startup")
     def save_startup(body: StartupBody, request: Request):

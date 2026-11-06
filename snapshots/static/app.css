@@ -1199,3 +1199,13 @@ a.bar-row:hover .bar-name { color: var(--accent-ink); text-decoration: underline
   .nav-toggle { display: none; }
   .nav-more:not(.open), .nav-more { display: contents; }
 }
+
+/* ---- "a new version is out" note in the sidebar */
+.update-note {
+  display: flex; align-items: center; gap: 4px; margin: 8px 0 0; padding: 6px 6px 6px 10px; border-radius: 8px;
+  background: var(--accent-soft); color: var(--accent-ink); font-size: 13px;
+}
+.update-note[hidden] { display: none; }
+.update-note a { flex: 1; color: inherit; font-weight: 600; text-decoration: none; }
+.update-note a:hover { text-decoration: underline; }
+.update-note .icon-btn { width: 24px; height: 24px; font-size: 16px; line-height: 1; color: inherit; }

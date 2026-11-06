@@ -116,3 +116,7 @@ search_threads = 2
 
 # Year in review videos: how many seconds each photo is shown.
 # review_seconds = 4
+
+# Now and then ask GitHub whether a newer Snapshots is out, and show a note to administrators.
+# Only the newest version number is asked for. Set to false to never look.
+# check_updates = true

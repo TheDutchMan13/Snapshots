@@ -5212,6 +5212,54 @@ function captionsLine(st) {
   return "Every photo is described. New photos are described as they arrive.";
 }
 
+function updatesSection(ctl) {
+  const box = el("div");
+  const draw = (o) => {
+    box.replaceChildren();
+    box.append(el("p", "muted", "Snapshots can look on GitHub now and then to see whether a newer version is out, and show a note in the menu if there is. It only asks for the newest version number; nothing about you or your photos is sent."));
+    const wrap = el("label", "field inline");
+    const on = el("input");
+    on.type = "checkbox";
+    on.checked = o.enabled;
+    wrap.append(on, el("span", null, "Tell me when a new version is out"));
+    on.addEventListener("change", async () => {
+      try {
+        const r = await api("/api/settings/updates", { method: "PUT", json: { enabled: on.checked } });
+        draw(r);
+        ctl.error("");
+        showUpdateNote();
+      } catch (err) { on.checked = !on.checked; ctl.error(err.message); }
+    });
+    box.append(wrap);
+    if (o.enabled && o.newer) box.append(el("p", "muted", `Version ${o.latest} is out (you have ${o.current}).`));
+    else if (o.enabled) box.append(el("p", "muted", `You have version ${o.current}.`));
+  };
+  return { box, draw };
+}
+
+async function showUpdateNote() {
+  const note = $("update-note");
+  if (!S.me || !S.me.is_admin) { note.hidden = true; return; }
+  let st;
+  try { st = await api("/api/update"); } catch (_) { return; }
+  let hidden = null;
+  try { hidden = localStorage.getItem("snapshots.update-hidden"); } catch (_) { /* not kept */ }
+  note.hidden = !(st.newer && hidden !== st.latest);
+  if (st.newer) { $("update-version").textContent = st.latest; note.dataset.version = st.latest; }
+}
+
+$("update-hide").addEventListener("click", () => {
+  try { localStorage.setItem("snapshots.update-hidden", $("update-note").dataset.version || ""); } catch (_) { /* not kept */ }
+  $("update-note").hidden = true;
+});
+$("update-link").addEventListener("click", (e) => {
+  // In the app window a link would not open the browser; ask the app to do it (only from this computer).
+  if (["127.0.0.1", "localhost", "[::1]"].includes(location.hostname)) {
+    e.preventDefault();
+    api("/api/update/open", { method: "POST" }).catch(() => window.open(e.currentTarget.href, "_blank", "noopener"));
+  }
+});
+
 function startupSection(ctl) {
   const box = el("div");
   const draw = (o) => {
@@ -5616,6 +5664,9 @@ async function renderSettings() {
     }
     section("Video conversion", video);
   } else {
+    const upd = updatesSection(ctl);
+    section("Updates", upd.box);
+    upd.draw(data.updates || { enabled: false, current: "" });
     const boot = startupSection(ctl);
     section("Start with Windows", boot.box);
     boot.draw(data.startup);
@@ -6156,6 +6207,9 @@ async function welcomeDialog() {
   S.me = state.user;
   await refreshStatus();
   await render();
+  showUpdateNote();                                       // the first answer comes from the next ask: GitHub is looked at in the background
+  setTimeout(showUpdateNote, 20000);
+  setInterval(showUpdateNote, 2 * 3600 * 1000);
   let left = null;
   try { left = sessionStorage.getItem("snapshots-recovery-left"); sessionStorage.removeItem("snapshots-recovery-left"); } catch (_) { /* fine */ }
   let startNote = null;
