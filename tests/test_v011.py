@@ -188,10 +188,11 @@ def test_lookalike_copies_in_clean_up(tmp_path):
     with c:
         setup_admin(c)
         wait_scan(c)
-        wait_for(lambda: c.get("/api/cleanup").json()["status"]["pending"] == 0)
+        # "pending" reads 0 until the first batch has run, so wait for the fingerprints themselves
+        conn = db.connect(cfg.db_path)
+        wait_for(lambda: conn.execute("SELECT COUNT(*) FROM assets WHERE quality_done = 0").fetchone()[0] == 0)
         ids = ids_by_name(c)
         assert c.get("/api/cleanup").json()["groups"] == 0      # the fingerprints differ
-        conn = db.connect(cfg.db_path)
         conn.executemany("INSERT INTO clip_vectors (asset_id, vec) VALUES (?, ?)", [
             (ids["orig.jpg"], _vec(1, 0.2, 0.1)), (ids["cropped.jpg"], _vec(1, 0.21, 0.1)),
             (ids["other.jpg"], _vec(0.2, 1, 0))])

@@ -712,14 +712,14 @@ def test_import_from_google_takeout(tmp_path, monkeypatch):
         state = wait_for(lambda: (s := c.get("/api/imports").json()["current"]) and not s["running"] and s)
         assert "whole path" in state["error"]
 
-        c.post("/api/imports/takeout", json={"path": str(export), "dry_run": True})
+        assert c.post("/api/imports/takeout", json={"path": str(export), "dry_run": True}).status_code == 202
         state = wait_for(lambda: (s := c.get("/api/imports").json()["current"]) and s["dry_run"]
                          and not s["running"] and s)      # (the first run's state is not this one's)
         assert state["error"] is None, state
         s = state["summary"]
         assert (s["files"], s["matched"], s["missing"], s["without_details"], s["albums_found"]) == (6, 2, 2, 1, 1)
 
-        c.post("/api/imports/takeout", json={"path": str(export)})
+        assert c.post("/api/imports/takeout", json={"path": str(export)}).status_code == 202
         state = wait_for(lambda: (s := c.get("/api/imports").json()["current"]) and not s["dry_run"]
                          and not s["running"] and s)      # (the first run's state is not this one's)
         assert state["error"] is None, state

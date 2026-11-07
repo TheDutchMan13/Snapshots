@@ -244,7 +244,9 @@ class Manager:
     def start(self, kind: str, run, user_id: int, dry_run: bool) -> bool:
         """run(manager) does the work and returns a summary dict."""
         with self.lock:
-            if self.thread and self.thread.is_alive():
+            # "running" goes False a moment before the old thread exits (it still records the import):
+            # a new import must not be refused in that gap.
+            if self.state.get("running") or (self.thread and self.thread.is_alive()):
                 return False
             self._cancel = False
             self.state = {"running": True, "kind": kind, "dry_run": dry_run, "phase": "Starting", "done": 0,
