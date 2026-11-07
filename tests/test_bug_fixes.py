@@ -168,3 +168,23 @@ def test_landmark_places_come_back_after_guessing_is_switched_on_again(tmp_path)
         with db.session(cfg.db_path) as conn:
             # The place goes; the photo is looked at for landmarks again, so it returns when switched back on.
             assert tuple(conn.execute("SELECT lat, landmark_done FROM assets").fetchone()) == (None, 0)
+
+
+def test_free_up_space_only_counts_files_not_in_the_trash(tmp_path):
+    import hashlib
+
+    root = tmp_path / "Photos"
+    make_jpeg(root / "a.jpg", "2024:01:01 10:00:00")
+    make_jpeg(root / "b.jpg", "2024:01:02 10:00:00", color=(10, 20, 30))
+    sums = {n: hashlib.sha1((root / n).read_bytes()).hexdigest() for n in ("a.jpg", "b.jpg")}
+    c, cfg = new_client(tmp_path, root)
+    with c:
+        setup_admin(c)
+        wait_scan(c)
+        assert c.post("/api/trash", json={"ids": [ids_by_name(c)["b.jpg"]]}).status_code == 200
+        both = list(sums.values())
+        # Backup: a file in the trash is still "there" (it is not sent again)...
+        assert set(c.post("/api/upload/check", json={"sha1": both}).json()["have"]) == set(both)
+        # ...but the phone may only remove its own copy of a file that is kept.
+        r = c.post("/api/upload/check", json={"sha1": both, "kept": True}).json()
+        assert r["have"] == [sums["a.jpg"]] and r["kept"] is True

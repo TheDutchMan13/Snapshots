@@ -261,7 +261,7 @@ The safe way to reach Snapshots from your phone is [Tailscale](https://tailscale
 
 ## Building the exe
 
-`Snapshots.exe` has to be built on Windows. There are two ways. The GitHub build also makes the installer, `Snapshots-Setup.exe` (with [Inno Setup](https://jrsoftware.org/isinfo.php); its script is `installer\snapshots.iss`). To make the installer on your own PC after `build.bat`, install Inno Setup and run `iscc /DAppVersion=0.14.5 installer\snapshots.iss`; it is written to `dist\Snapshots-Setup.exe`.
+`Snapshots.exe` has to be built on Windows. There are two ways. The GitHub build also makes the installer, `Snapshots-Setup.exe` (with [Inno Setup](https://jrsoftware.org/isinfo.php); its script is `installer\snapshots.iss`). To make the installer on your own PC after `build.bat`, install Inno Setup and run `iscc /DAppVersion=0.14.6 installer\snapshots.iss`; it is written to `dist\Snapshots-Setup.exe`.
 
 **Let GitHub build it (no setup on your PC).** Push the project to GitHub, open the repository's **Actions** tab, choose **Build Windows exe**, and press **Run workflow**. When it finishes, download `Snapshots-windows` from the run's page. To publish it on the **Releases** page instead, push a tag such as `v0.2.0` (it has to start with `v`). The workflow runs the tests, starts the finished exe to check it works, then installs and uninstalls the installer on the build machine to check that too, before attaching both files to the release.
 

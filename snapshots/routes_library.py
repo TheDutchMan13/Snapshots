@@ -730,6 +730,9 @@ def router(ctx) -> APIRouter:
 
     class HashList(BaseModel):
         sha1: list[str]
+        # The phone's "free up space": only files that are really kept (not in the trash), so a phone copy
+        # is never removed while the library's copy could still be emptied out of the trash.
+        kept: bool = False
 
     @r.post("/api/upload/check")
     def upload_check(body: HashList, request: Request):
@@ -743,10 +746,12 @@ def router(ctx) -> APIRouter:
             if wanted:
                 # A copy in someone's locked folder doesn't count (the same rule as upload), so this
                 # can't be used to find out what is locked.
-                rows = conn.execute(f"SELECT DISTINCT sha1 FROM assets WHERE locked_by IS NULL AND sha1 IN ({marks})",
+                kept = " AND trashed_at IS NULL" if body.kept else ""
+                rows = conn.execute(f"SELECT DISTINCT sha1 FROM assets WHERE locked_by IS NULL{kept} AND sha1 IN ({marks})",
                                     list(wanted)).fetchall()
                 have = [x["sha1"] for x in rows]
-        return {"have": have}
+        # "kept": says this server left out the trash (an older one ignores the question; the phone checks this).
+        return {"have": have, "kept": body.kept}
 
     @r.post("/api/upload")
     def upload(request: Request, files: list[UploadFile] = File(...)):
