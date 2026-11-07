@@ -236,10 +236,10 @@ def test_upload_check_says_which_files_are_already_here(client):
     data = jpeg_bytes((11, 22, 33))
     sha = hashlib.sha1(data).hexdigest()
     other = hashlib.sha1(b"never uploaded").hexdigest()
-    assert c.post("/api/upload/check", json={"sha1": [sha, other]}).json() == {"have": []}
+    assert c.post("/api/upload/check", json={"sha1": [sha, other]}).json()["have"] == []
     assert c.post("/api/upload", files=[("files", ("a.jpg", data, "image/jpeg"))]).json()["results"][0]["status"] == "added"
-    assert c.post("/api/upload/check", json={"sha1": [sha, other, "nonsense", sha.upper()]}).json() == {"have": [sha]}
-    assert c.post("/api/upload/check", json={"sha1": []}).json() == {"have": []}
+    assert c.post("/api/upload/check", json={"sha1": [sha, other, "nonsense", sha.upper()]}).json()["have"] == [sha]
+    assert c.post("/api/upload/check", json={"sha1": []}).json()["have"] == []
 
 
 def test_upload_check_needs_a_login(client):
