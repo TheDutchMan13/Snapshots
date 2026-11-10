@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 from . import db, linking, smart, webhooks
 from .app import current_user, require_admin
 from .routes_library import library_root, original_path
-from .scanner import delete_asset_row
+from .scanner import delete_asset_row, sha1_of
 
 
 class Ids(BaseModel):
@@ -94,14 +94,14 @@ def router(ctx) -> APIRouter:
             if body.ids is None:
                 # Never an item a scan found gone (missing_since): its file isn't there, and whatever
                 # has its name now is some other file. Its record is forgotten by a later scan.
-                rows = conn.execute("SELECT id, path, filename FROM assets"
+                rows = conn.execute("SELECT id, path, filename, size, mtime_ns, sha1 FROM assets"
                                     " WHERE trashed_at IS NOT NULL AND missing_since IS NULL"
                                     " AND locked_by IS NULL").fetchall()
             else:
                 ids = linking.with_clips(conn, db.open_ids(conn, body.ids))
                 marks = ",".join("?" * len(ids)) or "NULL"
                 rows = conn.execute(
-                    f"SELECT id, path, filename FROM assets WHERE trashed_at IS NOT NULL AND missing_since IS NULL"
+                    f"SELECT id, path, filename, size, mtime_ns, sha1 FROM assets WHERE trashed_at IS NOT NULL AND missing_since IS NULL"
                     f" AND id IN ({marks})",
                     ids,
                 ).fetchall()
@@ -113,6 +113,19 @@ def router(ctx) -> APIRouter:
                     continue
                 try:
                     if full.exists():
+                        # Only the file that was trashed: if another file has this name now (saved there
+                        # since, by someone or by the phone app), it is left alone. A different size or
+                        # time is checked by content before the file is called a different one.
+                        st = full.stat()
+                        if not (st.st_size == row["size"] and st.st_mtime_ns == row["mtime_ns"]):
+                            try:
+                                same = bool(row["sha1"]) and full.is_file() and sha1_of(full) == row["sha1"]
+                            except OSError:
+                                same = False
+                            if not same:
+                                failed.append({"id": row["id"], "filename": row["filename"],
+                                               "reason": "A different file is at this place now. It was left alone."})
+                                continue
                         os.remove(full)
                     side = Path(str(full) + ".xmp")      # its sidecar goes with it
                     if side.is_file():

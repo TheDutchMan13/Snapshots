@@ -334,3 +334,48 @@ def test_emptying_the_trash_leaves_a_set_aside_items_name_alone(tmp_path):
             assert (root / "rest" / "p5.jpg").is_file()
         s = rescan(c)
         assert s["added"] == 1 and "p5.jpg" in ids_by_name(c)
+
+
+def _trash_one(c, root, name="p5.jpg"):
+    old = ids_by_name(c)[name]
+    assert c.post("/api/trash", json={"ids": [old]}).status_code == 200
+    return old, next(root.rglob(name))
+
+
+def test_emptying_the_trash_leaves_a_different_file_at_the_same_place(tmp_path):
+    """The trashed photo's file was replaced (same name, another picture) and no scan has run yet."""
+    c, cfg, root = library(tmp_path)
+    with c:
+        setup_admin(c)
+        wait_scan(c)
+        old, path = _trash_one(c, root)
+        make_jpeg(path, "2025:02:02 09:00:00", color=(9, 9, 9), size=(800, 600))
+        for body in ({"confirm": True}, {"confirm": True, "ids": [old]}):
+            r = c.post("/api/trash/empty", json=body).json()
+            assert r["deleted"] == 0 and [f["id"] for f in r["failed"]] == [old]
+            assert "different file" in r["failed"][0]["reason"] and path.is_file()
+
+
+def test_emptying_the_trash_deletes_the_same_file_even_if_its_time_changed(tmp_path):
+    c, cfg, root = library(tmp_path)
+    with c:
+        setup_admin(c)
+        wait_scan(c)
+        old, path = _trash_one(c, root)
+        st = path.stat()
+        import os
+        os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 7_000_000_000))      # touched, not changed
+        r = c.post("/api/trash/empty", json={"confirm": True}).json()
+        assert r["deleted"] == 1 and r["failed"] == [] and not path.exists()
+
+
+def test_emptying_the_trash_deletes_a_normal_trashed_photo_and_its_sidecar(tmp_path):
+    c, cfg, root = library(tmp_path)
+    with c:
+        setup_admin(c)
+        wait_scan(c)
+        old, path = _trash_one(c, root)
+        side = path.parent / (path.name + ".xmp")
+        side.write_text("<x/>")
+        r = c.post("/api/trash/empty", json={"confirm": True}).json()
+        assert r["deleted"] == 1 and not path.exists() and not side.exists()
