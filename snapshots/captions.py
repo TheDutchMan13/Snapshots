@@ -194,7 +194,7 @@ class CaptionJob:
 
     def pending(self, conn) -> int:
         return conn.execute("SELECT COUNT(*) FROM assets WHERE caption_done = 0 AND has_thumb = 1"
-                            " AND trashed_at IS NULL").fetchone()[0]
+                            " AND trashed_at IS NULL AND missing_since IS NULL").fetchone()[0]
 
     def load_engine(self) -> CaptionEngine:
         with self._load_lock:
@@ -232,7 +232,7 @@ class CaptionJob:
         if now < self.retry_at or not self.cfg.captions:
             return False
         rows = conn.execute("SELECT id, sha1, edit_v, kind, path FROM assets WHERE caption_done = 0 AND has_thumb = 1"
-                            " AND trashed_at IS NULL ORDER BY taken_at DESC LIMIT ?", (batch,)).fetchall()
+                            " AND trashed_at IS NULL AND missing_since IS NULL ORDER BY taken_at DESC LIMIT ?", (batch,)).fetchall()
         if not rows:
             self.state.update(running=False, pending=0)
             return False

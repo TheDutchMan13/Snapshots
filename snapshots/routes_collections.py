@@ -139,7 +139,7 @@ def router(ctx) -> APIRouter:
             stats = conn.execute(
                 "SELECT COUNT(*) AS n, MIN(a.taken_at) AS first, MAX(a.taken_at) AS last,"
                 " MAX(a.taken_at || '|' || a.id) AS cover"
-                " FROM album_assets aa JOIN assets a ON a.id = aa.asset_id AND a.trashed_at IS NULL"
+                " FROM album_assets aa JOIN assets a ON a.id = aa.asset_id AND a.trashed_at IS NULL AND a.missing_since IS NULL"
                 f" AND {db.NOT_LOCKED} WHERE aa.album_id = ?",
                 (row["id"],),
             ).fetchone()

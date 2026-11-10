@@ -63,6 +63,7 @@ class Config:
     offsite_target: str = ""               # a folder (folder), an rclone remote:path, or a restic repository
     offsite_hours: float = 24              # how often the copy is brought up to date
     offsite_password_file: Path | None = None  # restic: a file holding the repository password
+    keep_missing_days: float = 30          # a file that is gone keeps its albums, favourites and people this long (0: forget at once)
     health_check_days: float = 0           # check every file for damage this often (0: only when asked)
     review_seconds: float = 4              # year in review videos: seconds each photo is shown
     xmp_sidecars: bool = False             # write descriptions, tags, people and dates to .xmp files beside photos
@@ -154,6 +155,7 @@ _FILE_KEYS = {
     "backup_hours": float, "backup_keep": int, "video_encoder": str, "video_cache_gb": float,
     "offsite_method": str, "offsite_target": str, "offsite_hours": float,
     "xmp_sidecars": bool, "upload_template": str, "max_upload_gb": float, "check_updates": bool, "health_check_days": float, "review_seconds": float,
+    "keep_missing_days": float,
 }
 VIDEO_ENCODERS = ("auto", "libx264", "h264_amf", "h264_nvenc", "h264_qsv")
 OFFSITE_METHODS = ("", "folder", "rclone", "restic")

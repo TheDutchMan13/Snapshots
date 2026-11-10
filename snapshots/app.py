@@ -108,7 +108,7 @@ def require_admin(request: Request) -> dict:
 
 def create_app(cfg: Config, start_worker: bool = True) -> FastAPI:
     cfg.ensure_dirs()
-    db.init(cfg.db_path)
+    db.init(cfg.db_path, cfg.backups_path)
     worker = Worker(cfg)
     sender = webhooks.Sender(cfg)
     ctx = SimpleNamespace(cfg=cfg, worker=worker, throttle=LoginThrottle(limits={"user:": USER_LIMIT}), pin_throttle=LoginThrottle(limit=5), tickets=Tickets(), pending_totp={},

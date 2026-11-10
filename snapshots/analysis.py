@@ -97,11 +97,11 @@ class QualityJob:
         self.state = {"running": False, "pending": 0, "message": None}
 
     def pending(self, conn) -> int:
-        return conn.execute("SELECT COUNT(*) FROM assets WHERE quality_done = 0 AND trashed_at IS NULL").fetchone()[0]
+        return conn.execute("SELECT COUNT(*) FROM assets WHERE quality_done = 0 AND trashed_at IS NULL AND missing_since IS NULL").fetchone()[0]
 
     def run_batch(self, conn, now: float, should_stop, batch: int = 100) -> bool:
         rows = conn.execute(
-            "SELECT id, kind, has_thumb FROM assets WHERE quality_done = 0 AND trashed_at IS NULL LIMIT ?", (batch,)
+            "SELECT id, kind, has_thumb FROM assets WHERE quality_done = 0 AND trashed_at IS NULL AND missing_since IS NULL LIMIT ?", (batch,)
         ).fetchall()
         self.state["pending"] = self.pending(conn)
         if not rows:
@@ -407,7 +407,7 @@ class DuplicateFinder:
             # New content vectors (for edited copies): while photos are still being learned, only every
             # thousand counts, so indexing doesn't make this start over after each small batch
             " COALESCE(SUM(id % 1000003), 0), (SELECT COUNT(*) FROM clip_vectors)"
-            " / CASE WHEN EXISTS (SELECT 1 FROM assets WHERE clip_done = 0 AND trashed_at IS NULL) THEN 1000 ELSE 1 END,"
+            " / CASE WHEN EXISTS (SELECT 1 FROM assets WHERE clip_done = 0 AND trashed_at IS NULL AND missing_since IS NULL) THEN 1000 ELSE 1 END,"
             # dates: bursts and look-alikes depend on when photos were taken (and dates can be changed)
             " COALESCE(SUM((CAST(strftime('%s', taken_at) AS INTEGER) % 1000003) * (id % 997 + 1)), 0)"
             " FROM assets"
@@ -449,9 +449,9 @@ class DuplicateFinder:
         rows = [dict(r) for r in conn.execute(
             "SELECT a.id, a.dhash, a.taken_at, a.width, a.height, a.size, a.sharpness, a.stack_id, a.sha1, a.kind, a.path,"
             " a.date_guess"
-            " FROM assets a WHERE a.trashed_at IS NULL AND a.locked_by IS NULL"
+            " FROM assets a WHERE a.trashed_at IS NULL AND a.missing_since IS NULL AND a.locked_by IS NULL"
             " AND ((a.dhash IS NOT NULL AND a.kind = 'photo')"
-            "      OR a.sha1 IN (SELECT sha1 FROM assets WHERE trashed_at IS NULL AND locked_by IS NULL"
+            "      OR a.sha1 IN (SELECT sha1 FROM assets WHERE trashed_at IS NULL AND missing_since IS NULL AND locked_by IS NULL"
             "                    GROUP BY sha1 HAVING COUNT(*) > 1))"
             " AND NOT EXISTS (SELECT 1 FROM assets lp WHERE lp.live_video = a.id)"   # a Live Photo's hidden clip
         )]
@@ -691,7 +691,7 @@ class EventFinder:
             # a photo whose picture changed loses its vector (clip_done = 0) and gets a new one
             " COALESCE(SUM(CASE WHEN clip_done = 1 THEN id END), 0), (SELECT COUNT(*) FROM clip_vectors),"
             " (SELECT COUNT(*) || ':' || COALESCE(SUM(person_id), 0) || ':' || COALESCE(MAX(id), 0) FROM faces)"
-            " FROM assets WHERE trashed_at IS NULL"
+            " FROM assets WHERE trashed_at IS NULL AND missing_since IS NULL"
         ).fetchone()) + (_people_version(conn),)
 
     def events(self, conn) -> list[dict]:
@@ -702,7 +702,7 @@ class EventFinder:
                     "SELECT a.id, a.taken_at, a.lat, a.lon, a.city, a.state, a.country, a.sharpness, a.beauty,"
                     " CASE WHEN a.category IN ('screenshot', 'document', 'receipt') THEN a.category END AS category"
                     " FROM assets a"
-                    " WHERE a.trashed_at IS NULL AND a.archived_at IS NULL AND a.locked_by IS NULL"
+                    " WHERE a.trashed_at IS NULL AND a.missing_since IS NULL AND a.archived_at IS NULL AND a.locked_by IS NULL"
                     " AND NOT EXISTS (SELECT 1 FROM assets lp WHERE lp.live_video = a.id) ORDER BY a.taken_at, a.id"
                 )]
                 found = find_events(rows, self.cfg.event_gap_hours, min_items=self.cfg.event_min_items)

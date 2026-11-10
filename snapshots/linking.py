@@ -121,7 +121,7 @@ def stack_members(conn, stack_id: int) -> list:
     return conn.execute(
         "SELECT a.id, a.filename, a.sha1, a.edit_v, a.taken_at, a.kind, a.width, a.height, (a.id = s.cover_id) AS cover"
         " FROM assets a JOIN stacks s ON s.id = a.stack_id"
-        " WHERE a.stack_id = ? AND a.trashed_at IS NULL AND a.locked_by IS NULL ORDER BY (a.id = s.cover_id) DESC, a.taken_at, a.id",
+        " WHERE a.stack_id = ? AND a.trashed_at IS NULL AND a.missing_since IS NULL AND a.locked_by IS NULL ORDER BY (a.id = s.cover_id) DESC, a.taken_at, a.id",
         (stack_id,),
     ).fetchall()
 

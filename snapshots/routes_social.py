@@ -142,7 +142,7 @@ def router(ctx) -> APIRouter:
                 " MAX(aa.added_at) AS at, COUNT(*) AS n, MAX(a.taken_at || '|' || a.id) AS cover"
                 " FROM album_assets aa JOIN albums al ON al.id = aa.album_id"
                 " LEFT JOIN users u ON u.id = aa.added_by"
-                " JOIN assets a ON a.id = aa.asset_id AND a.trashed_at IS NULL AND a.locked_by IS NULL"
+                " JOIN assets a ON a.id = aa.asset_id AND a.trashed_at IS NULL AND a.missing_since IS NULL AND a.locked_by IS NULL"
                 " WHERE aa.added_at < ? AND aa.added_by IS NOT NULL"
                 " GROUP BY aa.album_id, aa.added_by, hour ORDER BY at DESC LIMIT ?", (cutoff, limit)):
                 cover = int(g["cover"].rpartition("|")[2])

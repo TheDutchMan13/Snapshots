@@ -63,7 +63,7 @@ def router(ctx) -> APIRouter:
         with db.session(cfg.db_path) as conn:
             groups = duplicates.groups(conn, strictness) if cfg.photo_checks else []
             low = conn.execute(
-                f"SELECT COUNT(*) FROM assets a WHERE a.trashed_at IS NULL AND {db.NOT_LOCKED}"
+                f"SELECT COUNT(*) FROM assets a WHERE a.trashed_at IS NULL AND a.missing_since IS NULL AND {db.NOT_LOCKED}"
                 f" AND {analysis.low_quality_sql(cfg)}"
             ).fetchone()[0] if cfg.photo_checks else 0
         kinds = {}
@@ -158,19 +158,19 @@ def router(ctx) -> APIRouter:
         user = current_user(request)
         with db.session(cfg.db_path) as conn:
             counts = dict(conn.execute(
-                f"SELECT a.category, COUNT(*) FROM assets a WHERE {db.CLUTTER} AND a.trashed_at IS NULL"
+                f"SELECT a.category, COUNT(*) FROM assets a WHERE {db.CLUTTER} AND a.trashed_at IS NULL AND a.missing_since IS NULL"
                 f" AND {db.NOT_LOCKED} AND {db.LIVE_PART_HIDDEN} GROUP BY a.category").fetchall())
             where, params = db.where_clause(db.Filter(highlights=True, archived="hide", stacks=True), user["id"])
             highlights = conn.execute(f"SELECT COUNT(*) FROM assets a WHERE {where}", params).fetchone()[0]
             covers = {}
             for cat in sorting.CATEGORIES:
                 row = conn.execute(
-                    f"SELECT a.id FROM assets a WHERE a.category = ? AND a.trashed_at IS NULL AND {db.NOT_LOCKED}"
+                    f"SELECT a.id FROM assets a WHERE a.category = ? AND a.trashed_at IS NULL AND a.missing_since IS NULL AND {db.NOT_LOCKED}"
                     " ORDER BY a.taken_at DESC LIMIT 1", (cat,)).fetchone()
                 covers[cat] = row[0] if row else None
             versions = db.versions(conn, [c for c in covers.values() if c])
             pending = worker.sort.pending(conn)
-            sideways = conn.execute(f"SELECT COUNT(*) FROM assets a WHERE a.turn IS NOT NULL AND a.trashed_at IS NULL"
+            sideways = conn.execute(f"SELECT COUNT(*) FROM assets a WHERE a.turn IS NOT NULL AND a.trashed_at IS NULL AND a.missing_since IS NULL"
                                     f" AND {db.NOT_LOCKED}").fetchone()[0]
         return {
             "sideways": sideways,

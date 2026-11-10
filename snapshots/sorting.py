@@ -148,7 +148,7 @@ class SortJob:
         self._picked = None           # what Highlights were last picked from
 
     def pending(self, conn) -> int:
-        return conn.execute("SELECT COUNT(*) FROM assets WHERE sort_done = 0 AND trashed_at IS NULL").fetchone()[0]
+        return conn.execute("SELECT COUNT(*) FROM assets WHERE sort_done = 0 AND trashed_at IS NULL AND missing_since IS NULL").fetchone()[0]
 
     def _prompts(self):
         if not self.cfg.smart_search or not self.clip.ready():
@@ -177,7 +177,7 @@ class SortJob:
         rows = conn.execute(
             "SELECT a.id, a.kind, a.filename, a.camera, a.width, a.height, a.ocr_text, a.category_hand, c.vec"
             " FROM assets a LEFT JOIN clip_vectors c ON c.asset_id = a.id"
-            " WHERE a.sort_done = 0 AND a.trashed_at IS NULL"
+            " WHERE a.sort_done = 0 AND a.trashed_at IS NULL AND a.missing_since IS NULL"
             + (" AND c.asset_id IS NULL" if waiting else "") + " LIMIT ?", (batch,)).fetchall()
         if not rows:
             self.state.update(running=False, pending=0 if not waiting else self.pending(conn))
@@ -242,11 +242,11 @@ def pick_highlights(conn) -> int:
     many were picked."""
     import numpy as np
 
-    total = conn.execute("SELECT COUNT(*) FROM assets WHERE beauty IS NOT NULL AND trashed_at IS NULL").fetchone()[0]
+    total = conn.execute("SELECT COUNT(*) FROM assets WHERE beauty IS NOT NULL AND trashed_at IS NULL AND missing_since IS NULL").fetchone()[0]
     want = max(1, int(total * HIGHLIGHT_SHARE)) if total else 0
     rows = conn.execute(
         "SELECT a.id, a.taken_at, a.beauty, c.vec FROM assets a LEFT JOIN clip_vectors c ON c.asset_id = a.id"
-        " WHERE a.beauty IS NOT NULL AND a.trashed_at IS NULL AND a.kind = 'photo' AND a.flag != -1"
+        " WHERE a.beauty IS NOT NULL AND a.trashed_at IS NULL AND a.missing_since IS NULL AND a.kind = 'photo' AND a.flag != -1"
         " AND a.locked_by IS NULL AND a.archived_at IS NULL"
         " AND coalesce(a.category, 'photo') = 'photo' ORDER BY a.beauty DESC LIMIT ?", (want,)).fetchall()
     rows = sorted(rows, key=lambda r: r["taken_at"])
@@ -303,7 +303,7 @@ def suggest_albums(conn, clip) -> list[dict]:
         found = [x for x in clip.search(conn, look) if x[1] >= SUGGEST_MIN_SCORE]
         if found:
             alive = {r[0] for r in conn.execute(
-                "SELECT id FROM assets WHERE trashed_at IS NULL AND archived_at IS NULL"
+                "SELECT id FROM assets WHERE trashed_at IS NULL AND missing_since IS NULL AND archived_at IS NULL"
                 " AND id IN (SELECT value FROM json_each(?))", (json.dumps([i for i, _ in found]),))}
             found = [x for x in found if x[0] in alive]
         if len(found) >= SUGGEST_MIN_PHOTOS:

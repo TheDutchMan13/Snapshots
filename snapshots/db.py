@@ -1,10 +1,12 @@
 """SQLite storage. One short-lived connection per request; the background worker keeps its own."""
 
 import json
+import os
 import re
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from . import dates
@@ -438,8 +440,14 @@ MIGRATIONS = [
     CREATE TRIGGER landmark_clip AFTER INSERT ON clip_vectors
         BEGIN UPDATE assets SET landmark_done = 0 WHERE id = NEW.asset_id; END;
     """,
+    # 13: a file that is missing from a folder that is there is set aside, not forgotten (scanner.py)
+    """
+    ALTER TABLE assets ADD COLUMN missing_since TEXT;       -- when a scan first found the file gone; NULL: it is there
+    CREATE INDEX idx_assets_missing ON assets (missing_since) WHERE missing_since IS NOT NULL;
+    """,
 ]
 SCHEMA_VERSION = len(MIGRATIONS)
+UPGRADE_BACKUPS_KEPT = 3
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
@@ -451,8 +459,42 @@ def connect(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
-def init(db_path: Path) -> None:
-    """Create the database, or bring an older one up to date."""
+def backup_before_upgrade(conn: sqlite3.Connection, db_path: Path, current: int, backup_dir: Path | None) -> Path:
+    """Copy the database as it is, before an update of Snapshots changes its layout. Returns the copy.
+
+    The copy is a whole, self-contained database: `Snapshots.exe --restore-backup "<file>"` puts it back
+    (with the older version of Snapshots that made it). The newest few of these copies are kept.
+    """
+    folder = backup_dir or db_path.parent / "backups"
+    folder.mkdir(parents=True, exist_ok=True)
+    dest = folder / f"snapshots-before-upgrade-v{current}-{datetime.now():%Y%m%d-%H%M%S}.db"
+    tmp = dest.with_name(dest.name + ".part")
+    out = sqlite3.connect(str(tmp))
+    try:
+        conn.backup(out)
+        out.execute("PRAGMA journal_mode=DELETE")  # one self-contained file
+        ok = out.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    finally:
+        out.close()
+    if not ok:
+        tmp.unlink(missing_ok=True)
+        raise RuntimeError("the copy of the database did not pass its check")
+    os.replace(tmp, dest)
+    older = sorted(p for p in folder.glob("snapshots-before-upgrade-v*.db") if p != dest)
+    for p in older[:-(UPGRADE_BACKUPS_KEPT - 1)]:
+        try:
+            p.unlink()
+        except OSError:
+            pass
+    return dest
+
+
+def init(db_path: Path, backup_dir: Path | None = None) -> None:
+    """Create the database, or bring an older one up to date.
+
+    Before an existing database is changed, a copy of it is made (in backup_dir, or "backups" beside it).
+    If the copy can't be made, nothing is changed and Snapshots does not start.
+    """
     conn = connect(db_path)
     try:
         current = conn.execute("PRAGMA user_version").fetchone()[0]
@@ -461,6 +503,23 @@ def init(db_path: Path) -> None:
                 f"This database was made by a newer version of Snapshots "
                 f"(schema {current}, this program knows {SCHEMA_VERSION}). Please update Snapshots."
             )
+        has_data = conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'assets'").fetchone()
+        if current < SCHEMA_VERSION and has_data:    # (version 0.1 made its table without a version number)
+            try:
+                try:
+                    backup_before_upgrade(conn, db_path, current, backup_dir)
+                except Exception:
+                    if backup_dir is None:
+                        raise
+                    # The chosen backups folder can't be used (a drive that isn't connected, say):
+                    # the copy goes beside the database instead.
+                    backup_before_upgrade(conn, db_path, current, None)
+            except Exception as exc:
+                raise RuntimeError(
+                    "Snapshots needs to update its database, and first makes a copy of it. The copy could "
+                    f"not be made ({exc}), so nothing was changed. Check that the drive has free space and "
+                    "that the backups folder can be written to, then start Snapshots again."
+                ) from exc
         for version in range(current + 1, SCHEMA_VERSION + 1):
             # executescript runs outside Python's transaction handling, so the
             # whole step (including the version bump) is wrapped in one transaction.
@@ -540,13 +599,15 @@ def _like(text: str) -> str:
 # A Live Photo's clip is shown with its photo, never on its own.
 LABELS = ("red", "yellow", "green", "blue", "purple")   # colour labels, as Lightroom names them
 
+# A file a scan found gone from a folder that is there: its record is kept for a while (scanner.py) but shown nowhere.
+MISSING_HIDDEN = "a.missing_since IS NULL"
 LIVE_PART_HIDDEN = "NOT EXISTS (SELECT 1 FROM assets lp WHERE lp.live_video = a.id)"
 # In a stack, only the first photo still in the library is shown: the cover, or else the oldest
 # other member (by id). The others are reached from it.
 STACK_HIDDEN = (
     "(a.stack_id IS NULL OR NOT EXISTS ("
     " SELECT 1 FROM assets sm JOIN stacks st ON st.id = sm.stack_id"
-    " WHERE sm.stack_id = a.stack_id AND sm.id != a.id AND sm.trashed_at IS NULL AND sm.locked_by IS NULL"
+    " WHERE sm.stack_id = a.stack_id AND sm.id != a.id AND sm.trashed_at IS NULL AND sm.missing_since IS NULL AND sm.locked_by IS NULL"
     " AND (sm.id IS st.cover_id OR (a.id IS NOT st.cover_id AND sm.id < a.id))))"
 )
 
@@ -655,7 +716,7 @@ def where_clause(f: Filter, user_id: int | None) -> tuple[str, list]:
     looked for in
     the file path, camera, place names, description, text read in the photo and the names of people in it.
     """
-    where: list[str] = ["a.trashed_at IS NOT NULL" if f.trashed else "a.trashed_at IS NULL", LIVE_PART_HIDDEN]
+    where: list[str] = ["a.trashed_at IS NOT NULL" if f.trashed else "a.trashed_at IS NULL", MISSING_HIDDEN, LIVE_PART_HIDDEN]
     params: list = []
     if f.locked:
         where.append("a.locked_by = ?")
@@ -792,7 +853,7 @@ ASSET_COLUMNS = (
     # Where the faces are (their middle, weighted by size), so cropped tiles keep them in view.
     " (SELECT CASE WHEN COUNT(*) THEN printf('%.3f,%.3f', sum((fc.x + fc.w / 2) * fc.w * fc.h) / sum(fc.w * fc.h),"
     "  sum((fc.y + fc.h / 2) * fc.w * fc.h) / sum(fc.w * fc.h)) END FROM faces fc WHERE fc.asset_id = a.id) AS focus,"
-    " (SELECT COUNT(*) FROM assets sc WHERE sc.stack_id = a.stack_id AND sc.trashed_at IS NULL"
+    " (SELECT COUNT(*) FROM assets sc WHERE sc.stack_id = a.stack_id AND sc.trashed_at IS NULL AND sc.missing_since IS NULL"
     "  AND sc.locked_by IS NULL) AS stack_count"
 )
 

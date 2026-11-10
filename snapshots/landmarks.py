@@ -102,7 +102,7 @@ class LandmarkJob:
         rows = conn.execute(
             "SELECT a.id, a.lat, a.lon, a.place_guess, a.position_edited, c.vec FROM assets a"
             " JOIN clip_vectors c ON c.asset_id = a.id"
-            " WHERE a.landmark_done = 0 AND a.trashed_at IS NULL LIMIT ?", (batch,)).fetchall()
+            " WHERE a.landmark_done = 0 AND a.trashed_at IS NULL AND a.missing_since IS NULL LIMIT ?", (batch,)).fetchall()
         if not rows:
             conn.commit()
             self.state["running"] = False

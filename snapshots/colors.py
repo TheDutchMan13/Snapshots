@@ -74,7 +74,7 @@ class ColorJob:
     def run_batch(self, conn, now: float, should_stop, batch: int = 100) -> bool:
         from PIL import Image
 
-        rows = conn.execute("SELECT id FROM assets WHERE colors_done = 0 AND has_thumb = 1 AND trashed_at IS NULL"
+        rows = conn.execute("SELECT id FROM assets WHERE colors_done = 0 AND has_thumb = 1 AND trashed_at IS NULL AND missing_since IS NULL"
                             " LIMIT ?", (batch,)).fetchall()
         if not rows:
             self.state["running"] = False

@@ -283,7 +283,7 @@ def router(ctx) -> APIRouter:
         with db.session(cfg.db_path) as conn:
             rows = conn.execute(
                 "SELECT a.camera, COUNT(*) FROM assets a WHERE a.camera IS NOT NULL AND a.camera != ''"
-                f" AND a.trashed_at IS NULL AND {db.NOT_LOCKED} GROUP BY a.camera ORDER BY COUNT(*) DESC, a.camera"
+                f" AND a.trashed_at IS NULL AND a.missing_since IS NULL AND {db.NOT_LOCKED} GROUP BY a.camera ORDER BY COUNT(*) DESC, a.camera"
                 " LIMIT 200").fetchall()
         return {"cameras": [{"name": r[0], "count": r[1]} for r in rows]}
 
@@ -693,6 +693,7 @@ def router(ctx) -> APIRouter:
                 # so nobody can find out what is locked by uploading.
                 dup = conn.execute(
                     "SELECT id, trashed_at FROM assets WHERE sha1 = ? AND locked_by IS NULL"
+                    " AND missing_since IS NULL"   # a set-aside item's file is gone: this upload brings it back
                     " ORDER BY trashed_at IS NOT NULL LIMIT 1",
                     (digest.hexdigest(),),
                 ).fetchone()
@@ -747,7 +748,9 @@ def router(ctx) -> APIRouter:
                 # A copy in someone's locked folder doesn't count (the same rule as upload), so this
                 # can't be used to find out what is locked.
                 kept = " AND trashed_at IS NULL" if body.kept else ""
-                rows = conn.execute(f"SELECT DISTINCT sha1 FROM assets WHERE locked_by IS NULL{kept} AND sha1 IN ({marks})",
+                # Nor does an item whose file a scan found gone: the phone must send that photo again.
+                rows = conn.execute(f"SELECT DISTINCT sha1 FROM assets WHERE locked_by IS NULL AND missing_since IS NULL{kept}"
+                                    f" AND sha1 IN ({marks})",
                                     list(wanted)).fetchall()
                 have = [x["sha1"] for x in rows]
         # "kept": says this server left out the trash (an older one ignores the question; the phone checks this).
@@ -771,11 +774,16 @@ def router(ctx) -> APIRouter:
         user = current_user(request)
         with db.session(cfg.db_path) as conn:
             counts = {row["kind"]: row["c"] for row in conn.execute(
-                f"SELECT kind, COUNT(*) AS c FROM assets a WHERE trashed_at IS NULL AND {db.LIVE_PART_HIDDEN}"
+                f"SELECT kind, COUNT(*) AS c FROM assets a WHERE trashed_at IS NULL AND missing_since IS NULL AND {db.LIVE_PART_HIDDEN}"
                 f" AND {db.NOT_LOCKED} GROUP BY kind")}
             trashed = conn.execute(
-                f"SELECT COUNT(*) FROM assets a WHERE trashed_at IS NOT NULL AND {db.NOT_LOCKED}").fetchone()[0]
-            locked = conn.execute("SELECT COUNT(*) FROM assets WHERE locked_by = ?", (user["id"],)).fetchone()[0]
+                f"SELECT COUNT(*) FROM assets a WHERE trashed_at IS NOT NULL AND {db.MISSING_HIDDEN} AND {db.NOT_LOCKED}").fetchone()[0]
+            locked = conn.execute("SELECT COUNT(*) FROM assets WHERE locked_by = ? AND missing_since IS NULL",
+                                  (user["id"],)).fetchone()[0]
+            # Files a scan found gone, whose records are kept for a while (scanner.py). Not counted for
+            # locked ones: the number must not show what is in someone's locked folder.
+            set_aside = conn.execute(
+                "SELECT COUNT(*) FROM assets WHERE missing_since IS NOT NULL AND locked_by IS NULL").fetchone()[0]
             has_pin = conn.execute("SELECT pin_hash IS NOT NULL FROM users WHERE id = ?", (user["id"],)).fetchone()[0]
             unread = unread_activity(conn, user["id"])
         root = cfg.library_path
@@ -787,6 +795,8 @@ def router(ctx) -> APIRouter:
             "photos": counts.get("photo", 0),
             "videos": counts.get("video", 0),
             "trashed": trashed,
+            "set_aside": set_aside,
+            "keep_missing_days": cfg.keep_missing_days,
             "ffmpeg": media.has_ffmpeg(),
             "heif": media.HEIF,
             "raw": media.RAW,
@@ -831,7 +841,7 @@ def unread_activity(conn, user_id: int) -> int:
         (since, user_id)).fetchone()[0]
     additions = conn.execute(
         "SELECT COUNT(DISTINCT aa.album_id || '|' || coalesce(aa.added_by, 0) || '|' || substr(aa.added_at, 1, 13))"
-        " FROM album_assets aa JOIN assets a ON a.id = aa.asset_id AND a.trashed_at IS NULL AND a.locked_by IS NULL"
+        " FROM album_assets aa JOIN assets a ON a.id = aa.asset_id AND a.trashed_at IS NULL AND a.missing_since IS NULL AND a.locked_by IS NULL"
         " WHERE aa.added_at > ? AND aa.added_by IS NOT NULL AND aa.added_by != ?",
         (since, user_id)).fetchone()[0]
     return comments + additions

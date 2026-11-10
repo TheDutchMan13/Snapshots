@@ -24,7 +24,7 @@ FMT = "%Y-%m-%dT%H:%M:%S"
 
 # Photos whose own place counts as evidence: a real position, a date of their own (not the file's), and not
 # in anyone's locked folder (its place must not show up on someone else's photo).
-SOURCE = ("lat IS NOT NULL AND place_guess IS NULL AND trashed_at IS NULL AND locked_by IS NULL"
+SOURCE = ("lat IS NOT NULL AND place_guess IS NULL AND trashed_at IS NULL AND missing_since IS NULL AND locked_by IS NULL"
           " AND coalesce(date_guess, '') NOT IN ('file', 'nearby')")
 
 
@@ -86,7 +86,7 @@ class PlaceGuessJob:
         # Photos are looked at once sorted (so screenshots are known).
         rows = conn.execute(
             "SELECT id, taken_at FROM assets WHERE place_checked = 0 AND lat IS NULL AND position_edited = 0"
-            " AND sort_done = 1 AND trashed_at IS NULL AND coalesce(date_guess, '') != 'file'"
+            " AND sort_done = 1 AND trashed_at IS NULL AND missing_since IS NULL AND coalesce(date_guess, '') != 'file'"
             " AND coalesce(category, '') NOT IN ('screenshot', 'document', 'receipt') LIMIT ?", (batch,)).fetchall()
         # Photos that have a place (or can't be guessed) need no look.
         conn.execute("UPDATE assets SET place_checked = 1 WHERE place_checked = 0 AND (lat IS NOT NULL"

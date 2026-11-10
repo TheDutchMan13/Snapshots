@@ -111,6 +111,10 @@ search_threads = 2
 # {camera} {type} (Photos or Videos) and {user} (who uploaded it).
 # upload_template = "Uploads/{year}/{month}"
 
+# A file that is gone from the library (deleted or moved away in Windows) keeps its albums, favourites
+# and people this many days, hidden, in case it comes back. 0 forgets at once.
+# keep_missing_days = 30
+
 # Check every file for damage this often, in days (0: only when you ask, in Clean up, Library health).
 # health_check_days = 0
 

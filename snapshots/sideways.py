@@ -72,7 +72,7 @@ class TurnJob:
         conn.commit()
         rows = conn.execute(
             "SELECT a.id, c.vec FROM assets a JOIN clip_vectors c ON c.asset_id = a.id"
-            " WHERE a.turn_done = 0 AND a.trashed_at IS NULL AND a.has_thumb = 1 LIMIT ?", (batch,)).fetchall()
+            " WHERE a.turn_done = 0 AND a.trashed_at IS NULL AND a.missing_since IS NULL AND a.has_thumb = 1 LIMIT ?", (batch,)).fetchall()
         if not rows:
             self.state["running"] = False
             return False

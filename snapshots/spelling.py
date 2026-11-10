@@ -122,7 +122,7 @@ def library_words(conn) -> Counter:
     df: Counter = Counter()
     ocr: Counter = Counter()
     for row in conn.execute("SELECT path, city, state, country, description, ocr_text, colors, camera, caption,"
-                            " landmark FROM assets WHERE trashed_at IS NULL AND locked_by IS NULL"):
+                            " landmark FROM assets WHERE trashed_at IS NULL AND missing_since IS NULL AND locked_by IS NULL"):
         words = set()
         for text in (row[0].replace("\\", "/"), row[1], row[2], row[3], row[4], row[6], row[7], row[8], row[9]):
             if text:
@@ -133,15 +133,15 @@ def library_words(conn) -> Counter:
     df.update({w: n for w, n in ocr.items() if n >= 2})
     for name, n in conn.execute(
             "SELECT t.name, COUNT(*) FROM tags t JOIN asset_tags at ON at.tag_id = t.id"
-            " JOIN assets a ON a.id = at.asset_id AND a.trashed_at IS NULL AND a.locked_by IS NULL GROUP BY t.id"):
+            " JOIN assets a ON a.id = at.asset_id AND a.trashed_at IS NULL AND a.missing_since IS NULL AND a.locked_by IS NULL GROUP BY t.id"):
         for w in set(WORD.findall((name or "").lower())):
             df[w] += n
     for name, n in list(conn.execute(
             "SELECT p.name, COUNT(DISTINCT f.asset_id) FROM people p JOIN faces f ON f.person_id = p.id"
-            " JOIN assets a ON a.id = f.asset_id AND a.trashed_at IS NULL AND a.locked_by IS NULL"
+            " JOIN assets a ON a.id = f.asset_id AND a.trashed_at IS NULL AND a.missing_since IS NULL AND a.locked_by IS NULL"
             " WHERE p.name IS NOT NULL AND p.hidden = 0 GROUP BY p.id")) + list(conn.execute(
             "SELECT p.name, COUNT(DISTINCT s.asset_id) FROM pets p JOIN pet_sightings s ON s.pet_id = p.id"
-            " JOIN assets a ON a.id = s.asset_id AND a.trashed_at IS NULL AND a.locked_by IS NULL"
+            " JOIN assets a ON a.id = s.asset_id AND a.trashed_at IS NULL AND a.missing_since IS NULL AND a.locked_by IS NULL"
             " WHERE p.name IS NOT NULL AND p.hidden = 0 GROUP BY p.id")):
         for w in set(WORD.findall(name.lower())):
             df[w] += n
@@ -181,7 +181,7 @@ class Speller:
         key = conn.execute("SELECT COUNT(*), COALESCE(MAX(id), 0), COALESCE(SUM(length(coalesce(description, ''))"
                            " + length(coalesce(ocr_text, '')) + length(coalesce(city, ''))"
                            " + length(coalesce(caption, '')) + length(coalesce(landmark, ''))), 0),"
-                           " COUNT(locked_by), COUNT(colors) FROM assets WHERE trashed_at IS NULL").fetchone()
+                           " COUNT(locked_by), COUNT(colors) FROM assets WHERE trashed_at IS NULL AND missing_since IS NULL").fetchone()
         key = tuple(key) + tuple(conn.execute(
             "SELECT (SELECT COUNT(*) FROM asset_tags), (SELECT COUNT(*) FROM people WHERE name IS NOT NULL),"
             " (SELECT COUNT(*) FROM pets WHERE name IS NOT NULL)").fetchone())

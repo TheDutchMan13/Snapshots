@@ -181,6 +181,7 @@ Copy `config.example.toml` to `config.toml` and edit it, or use command-line opt
 | | `upload_template` | `Uploads/{year}/{month}` | Where uploads are filed; can use `{year}`, `{month}`, `{monthname}`, `{day}`, `{date}`, `{camera}`, `{type}`, `{user}` |
 | | `check_updates` | `true` | Now and then (twice a day) ask GitHub for the newest version number and show a note in the menu to administrators when a newer Snapshots is out. Nothing about you or your photos is sent. Also a switch in Settings |
 | | `max_upload_gb` | `20` | The most one upload can send at once. Uploads are also refused when they would leave less than 1 GB free on the library's drive or the temporary folder |
+| | `keep_missing_days` | `30` | A file that is gone from the library keeps its albums, favourites and people this many days, in case it comes back; `0` forgets at once |
 | | `health_check_days` | `0` | Check every file for damage this often; `0` only when asked (also set in Clean up, Library health) |
 | | `review_seconds` | `4` | Year in review videos: seconds each photo is shown |
 | `--restore-backup FILE` | | | Put a database backup back in place (close Snapshots first), then exit |
@@ -238,14 +239,14 @@ Everything runs on your own computer, in the background after a scan, a few phot
 - **Year in review videos** are saved in the data folder for download, and in `Year in review` in the library only if you tick that box.
 - **Moving a photo to the trash doesn't touch the file.** It is only hidden, and can be restored. **Emptying the trash deletes the files from your disk**, and only an administrator can do that, after a confirmation.
 - If the library folder is missing (an unplugged drive) or can't be read completely, Snapshots does **not** remove anything from its index, and the trash can't be emptied.
-- Deleting a photo from the library folder yourself removes it from Snapshots on the next scan.
+- Deleting a photo from the library folder yourself takes it out of Snapshots on the next scan. Its albums, favourites, people and description are remembered for 30 days (`keep_missing_days`), so a file or folder put back from the Recycle Bin or a backup, at the same place or another, carries on as if it never left. After that the record is forgotten. No file is ever deleted by this.
 - A Live Photo's clip goes to the trash, comes back and is deleted together with its photo.
 - Archiving, tagging, stacking, editing, changing details, comments and the locked folder change nothing in your files.
 - **Extra library folders** are read the same way. Removing one in Settings takes its photos out of Snapshots and leaves the files alone.
 - **The locked folder** hides photos inside Snapshots only. The files stay where they are, so anyone who can open your folders in Windows can still see them.
 - **Trimmed videos and stills** are new files next to the video. **Imports** only add files to `From Immich` and `From Google Photos` in the library; nothing is changed in Immich or in the export.
 - **The offsite copy** only reads your library. It never deletes anything from the copy either, so a photo deleted by mistake is still there.
-- **Backups** contain the database (albums, tags, people's names, favourites, accounts, edits, comments), not your photos. To restore one, close Snapshots and run `Snapshots.exe --restore-backup "<backup file>"`; the database it replaces is kept as `snapshots.before-restore.db`.
+- **Backups** contain the database (albums, tags, people's names, favourites, accounts, edits, comments), not your photos. To restore one, close Snapshots and run `Snapshots.exe --restore-backup "<backup file>"`; the database it replaces is kept as `snapshots.before-restore.db`. When an update of Snapshots changes the database's layout, a copy is made first, named `snapshots-before-upgrade-…db`, in the same backups folder (the newest 3 are kept); if the copy can't be made, Snapshots stops without changing anything.
 
 ## Accounts and remote access
 

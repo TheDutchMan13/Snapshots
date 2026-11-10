@@ -216,7 +216,7 @@ def reset_password(cfg, username: str, read_password=None) -> int:
     if read_password("Type it again: ") != first:
         return fail("The two passwords were different. Nothing was changed.")
     cfg.data_dir.mkdir(parents=True, exist_ok=True)
-    db.init(cfg.db_path)
+    db.init(cfg.db_path, cfg.backups_path)
     with db.session(cfg.db_path) as conn:
         row = conn.execute("SELECT id FROM users WHERE username = ?", (username.strip(),)).fetchone()
         if row:

@@ -638,7 +638,7 @@ def _group_sums(conn):
     sums, counts = {}, {}
     for person_id, blob in conn.execute(
         "SELECT f.person_id, f.embedding FROM faces f JOIN people p ON p.id = f.person_id AND p.hidden = 0"
-        " JOIN assets a ON a.id = f.asset_id AND a.trashed_at IS NULL AND a.locked_by IS NULL"
+        " JOIN assets a ON a.id = f.asset_id AND a.trashed_at IS NULL AND a.missing_since IS NULL AND a.locked_by IS NULL"
     ):
         v = np.frombuffer(blob, dtype=np.float32)
         if person_id in sums:
@@ -658,7 +658,7 @@ def _spans(conn) -> dict[int, tuple[str, str]]:
     """{person: (first, last date)} of each person's photos."""
     return {r[0]: (r[1], r[2]) for r in conn.execute(
         "SELECT f.person_id, min(a.taken_at), max(a.taken_at) FROM faces f JOIN assets a ON a.id = f.asset_id"
-        " WHERE f.person_id IS NOT NULL AND a.trashed_at IS NULL GROUP BY f.person_id")}
+        " WHERE f.person_id IS NOT NULL AND a.trashed_at IS NULL AND a.missing_since IS NULL GROUP BY f.person_id")}
 
 
 def years_apart_bonus(a: tuple[str, str] | None, b: tuple[str, str] | None) -> float:
@@ -784,7 +784,7 @@ class FacesJob:
 
     def pending(self, conn) -> int:
         return conn.execute(
-            "SELECT COUNT(*) FROM assets WHERE faces_done = 0 AND trashed_at IS NULL"
+            "SELECT COUNT(*) FROM assets WHERE faces_done = 0 AND trashed_at IS NULL AND missing_since IS NULL"
         ).fetchone()[0]
 
     def unload(self) -> None:
@@ -809,7 +809,7 @@ class FacesJob:
         if now < self.retry_at:
             return False
         rows = conn.execute(
-            "SELECT id, path FROM assets WHERE faces_done = 0 AND trashed_at IS NULL LIMIT ?", (batch,)
+            "SELECT id, path FROM assets WHERE faces_done = 0 AND trashed_at IS NULL AND missing_since IS NULL LIMIT ?", (batch,)
         ).fetchall()
         self.state["pending"] = self.pending(conn)
         if not rows:
@@ -879,7 +879,7 @@ class FacesJob:
     def _measure_older(self, conn, now: float, should_stop, batch: int = 20) -> bool:
         """Faces found before eyes and sharpness were measured: measure them (once). True if any were."""
         rows = conn.execute(
-            "SELECT a.id, a.path FROM assets a WHERE a.faceq_done = 0 AND a.faces_done = 1 AND a.trashed_at IS NULL"
+            "SELECT a.id, a.path FROM assets a WHERE a.faceq_done = 0 AND a.faces_done = 1 AND a.trashed_at IS NULL AND a.missing_since IS NULL"
             " LIMIT ?", (batch,)).fetchall()
         if not rows:
             return False

@@ -115,7 +115,7 @@ def restore(cfg, backup: Path) -> Path:
     tmp = target.with_name(target.name + ".restoring")
     shutil.copy2(backup, tmp)
     os.replace(tmp, target)
-    db.init(target)  # an older backup is brought up to date
+    db.init(target, cfg.backups_path)  # an older backup is brought up to date
     return kept
 
 

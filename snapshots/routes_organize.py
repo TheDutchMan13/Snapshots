@@ -58,7 +58,7 @@ _versions = db.versions
 
 
 # Shown in memories and the map: everything in the library that isn't hidden.
-VISIBLE = f"a.trashed_at IS NULL AND a.archived_at IS NULL AND {db.LIVE_PART_HIDDEN} AND {db.NOT_LOCKED}"
+VISIBLE = f"a.trashed_at IS NULL AND a.missing_since IS NULL AND a.archived_at IS NULL AND {db.LIVE_PART_HIDDEN} AND {db.NOT_LOCKED}"
 
 
 def _leap(year: int) -> bool:
@@ -133,7 +133,7 @@ def router(ctx) -> APIRouter:
     def tag_json(conn, row) -> dict:
         stats = conn.execute(
             "SELECT COUNT(*) AS n, MAX(a.taken_at || '|' || a.id) AS cover FROM asset_tags at"
-            f" JOIN assets a ON a.id = at.asset_id AND a.trashed_at IS NULL AND {db.NOT_LOCKED}"
+            f" JOIN assets a ON a.id = at.asset_id AND a.trashed_at IS NULL AND a.missing_since IS NULL AND {db.NOT_LOCKED}"
             " WHERE at.tag_id = ?", (row["id"],)
         ).fetchone()
         cover = int(stats["cover"].rpartition("|")[2]) if stats["cover"] else None
@@ -269,7 +269,7 @@ def router(ctx) -> APIRouter:
         prefix = db.folder_prefix(path)
         n = len(prefix)
         all_roots = libraries.roots(cfg)
-        shown = f"a.trashed_at IS NULL AND {db.LIVE_PART_HIDDEN} AND {db.NOT_LOCKED}"
+        shown = f"a.trashed_at IS NULL AND a.missing_since IS NULL AND {db.LIVE_PART_HIDDEN} AND {db.NOT_LOCKED}"
         # the newest photo that isn't too dark or blurry, else the newest item
         cover_sql = (
             "coalesce(MAX(CASE WHEN a.kind = 'photo' AND coalesce(a.brightness, 255) >= 40"
@@ -346,7 +346,7 @@ def router(ctx) -> APIRouter:
                 # the cover: a favourite if there is one, else the best-looking photo (sorting.py), else the
                 # sharpest; never a screenshot or a document
                 " (SELECT b.id FROM assets b WHERE substr(b.taken_at, 1, 10) = substr(a.taken_at, 1, 10)"
-                f"  AND b.trashed_at IS NULL AND b.archived_at IS NULL AND b.locked_by IS NULL"
+                f"  AND b.trashed_at IS NULL AND b.missing_since IS NULL AND b.archived_at IS NULL AND b.locked_by IS NULL"
                 "  AND b.kind = 'photo' AND b.has_thumb = 1"
                 "  ORDER BY EXISTS (SELECT 1 FROM favorites f WHERE f.asset_id = b.id) DESC,"
                 "  coalesce(b.category, '') IN ('screenshot', 'document', 'receipt'),"

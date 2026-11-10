@@ -76,7 +76,7 @@ class DateGuessJob:
             return False
         rows = conn.execute(
             "SELECT id, path, filename, taken_at, mtime_ns, date_guess FROM assets"
-            " WHERE date_checked = 0 AND taken_at_file IS NULL AND trashed_at IS NULL LIMIT ?", (batch,)).fetchall()
+            " WHERE date_checked = 0 AND taken_at_file IS NULL AND trashed_at IS NULL AND missing_since IS NULL LIMIT ?", (batch,)).fetchall()
         if not rows:
             self.state["running"] = False
             return False
@@ -111,4 +111,4 @@ class DateGuessJob:
         """(filename, taken_at) of the files in `folder` whose date is their own."""
         return [(r[0], r[1]) for r in _folder_rows(
             conn, folder, "filename, taken_at",
-            "AND trashed_at IS NULL AND coalesce(date_guess, '') NOT IN ('file', 'nearby')")]
+            "AND trashed_at IS NULL AND missing_since IS NULL AND coalesce(date_guess, '') NOT IN ('file', 'nearby')")]

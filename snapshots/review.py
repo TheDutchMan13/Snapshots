@@ -37,7 +37,7 @@ TITLE_SECONDS = 3.0
 def years(conn) -> list[dict]:
     rows = conn.execute(
         f"SELECT substr(a.taken_at, 1, 4) AS year, COUNT(*) AS photos FROM assets a"
-        f" WHERE a.kind = 'photo' AND a.trashed_at IS NULL AND a.archived_at IS NULL AND {db.NOT_LOCKED}"
+        f" WHERE a.kind = 'photo' AND a.trashed_at IS NULL AND a.missing_since IS NULL AND a.archived_at IS NULL AND {db.NOT_LOCKED}"
         f" AND {db.LIVE_PART_HIDDEN} GROUP BY year ORDER BY year DESC").fetchall()
     return [{"year": int(r["year"]), "photos": r["photos"]} for r in rows if r["year"] and r["year"].isdigit()]
 
@@ -52,7 +52,7 @@ def _candidates(conn, cfg, year: int, user_id: int) -> list[dict]:
         f"   WHERE f.asset_id = a.id AND p.name IS NOT NULL AND p.hidden = 0) AS named,"
         f" (SELECT COUNT(*) FROM faces f WHERE f.asset_id = a.id) AS faces"
         f" FROM assets a WHERE a.kind = 'photo' AND a.taken_at >= ? AND a.taken_at < ?"
-        f" AND a.trashed_at IS NULL AND a.archived_at IS NULL AND {db.NOT_LOCKED} AND {db.LIVE_PART_HIDDEN}"
+        f" AND a.trashed_at IS NULL AND a.missing_since IS NULL AND a.archived_at IS NULL AND {db.NOT_LOCKED} AND {db.LIVE_PART_HIDDEN}"
         f" AND {db.STACK_HIDDEN} AND a.flag != -1 AND NOT COALESCE({analysis.low_quality_sql(cfg)}, 0)"
         f" AND NOT coalesce({db.CLUTTER}, 0)",
         (user_id, f"{year:04d}-01-01", f"{year + 1:04d}-01-01")).fetchall()
@@ -120,11 +120,11 @@ def pick(conn, cfg, year: int, user_id: int, count: int = 60) -> dict:
         for name, n in conn.execute(
             f"SELECT p.name, COUNT(DISTINCT f.asset_id) FROM faces f JOIN people p ON p.id = f.person_id"
             f" JOIN assets a ON a.id = f.asset_id WHERE p.name IS NOT NULL AND p.hidden = 0"
-            f" AND a.taken_at >= ? AND a.taken_at < ? AND a.trashed_at IS NULL AND {db.NOT_LOCKED}"
+            f" AND a.taken_at >= ? AND a.taken_at < ? AND a.trashed_at IS NULL AND a.missing_since IS NULL AND {db.NOT_LOCKED}"
             f" GROUP BY p.id", (f"{year:04d}-01-01", f"{year + 1:04d}-01-01")):
             people[name] = n
     all_photos = conn.execute(
-        f"SELECT COUNT(*) FROM assets a WHERE a.taken_at >= ? AND a.taken_at < ? AND a.trashed_at IS NULL"
+        f"SELECT COUNT(*) FROM assets a WHERE a.taken_at >= ? AND a.taken_at < ? AND a.trashed_at IS NULL AND a.missing_since IS NULL"
         f" AND {db.NOT_LOCKED} AND {db.LIVE_PART_HIDDEN}", (f"{year:04d}-01-01", f"{year + 1:04d}-01-01")).fetchone()[0]
     return {"year": year, "ids": ids, "photos": all_photos, "candidates": len(rows),
             "places": [p for p, _ in places.most_common(5)], "people": [p for p, _ in people.most_common(5)],

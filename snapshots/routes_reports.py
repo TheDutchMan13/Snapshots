@@ -148,7 +148,7 @@ def router(ctx) -> APIRouter:
     def storage_report(user) -> dict:
         admin = bool(user.get("is_admin"))
         with db.session(cfg.db_path) as conn:
-            base = f"a.trashed_at IS NULL AND {db.NOT_LOCKED}"
+            base = f"a.trashed_at IS NULL AND a.missing_since IS NULL AND {db.NOT_LOCKED}"
             kinds = {"photos": [0, 0], "raw": [0, 0], "videos": [0, 0]}
             years: dict[str, list] = defaultdict(lambda: [0, 0, 0])   # photos bytes, video bytes, items
             folders: dict[str, list] = defaultdict(lambda: [0, 0])
@@ -243,7 +243,7 @@ def router(ctx) -> APIRouter:
             with db.session(cfg.db_path) as conn:
                 marks = ",".join("?" * len(ids))
                 still = {r[0] for r in conn.execute(
-                    f"SELECT id FROM assets WHERE id IN ({marks}) AND locked_by IS NULL AND trashed_at IS NULL", ids)}
+                    f"SELECT id FROM assets WHERE id IN ({marks}) AND locked_by IS NULL AND trashed_at IS NULL AND missing_since IS NULL", ids)}
             out = dict(out, biggest=[b for b in out["biggest"] if b["id"] in still])
         return out
 
@@ -276,7 +276,7 @@ def router(ctx) -> APIRouter:
             ids = db.open_ids(conn, body.ids)
             marks = ",".join("?" * len(ids)) or "NULL"
             rows = conn.execute(f"SELECT id, path, edits, taken_at, kind FROM assets WHERE id IN ({marks})"
-                                f" AND kind = 'photo' AND trashed_at IS NULL ORDER BY taken_at, id", ids).fetchall()
+                                f" AND kind = 'photo' AND trashed_at IS NULL AND missing_since IS NULL ORDER BY taken_at, id", ids).fetchall()
             facts = review.pick(conn, cfg, year, user["id"], 10) if rows else None
         if not rows:
             raise HTTPException(400, "Choose some photos first.")

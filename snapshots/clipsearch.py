@@ -279,7 +279,7 @@ class ClipJob:
         return self.cfg.model_dir / "clip"
 
     def pending(self, conn) -> int:
-        return conn.execute("SELECT COUNT(*) FROM assets WHERE clip_done = 0 AND trashed_at IS NULL").fetchone()[0]
+        return conn.execute("SELECT COUNT(*) FROM assets WHERE clip_done = 0 AND trashed_at IS NULL AND missing_since IS NULL").fetchone()[0]
 
     def load_engine(self) -> ClipEngine:
         with self._load_lock:
@@ -301,7 +301,7 @@ class ClipJob:
         if now < self.retry_at:
             return False
         rows = conn.execute(
-            "SELECT id FROM assets WHERE clip_done = 0 AND trashed_at IS NULL LIMIT ?", (batch,)
+            "SELECT id FROM assets WHERE clip_done = 0 AND trashed_at IS NULL AND missing_since IS NULL LIMIT ?", (batch,)
         ).fetchall()
         self.state["pending"] = self.pending(conn)
         if not rows:

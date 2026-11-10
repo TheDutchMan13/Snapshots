@@ -93,12 +93,12 @@ def _person_json(row) -> dict:
 
 _PEOPLE_SQL = """
     SELECT p.id, p.name, p.hidden, p.birthday, COUNT(DISTINCT f.asset_id) AS photos, COUNT(f.id) AS faces,
-           (SELECT f2.id FROM faces f2 JOIN assets a2 ON a2.id = f2.asset_id AND a2.trashed_at IS NULL
+           (SELECT f2.id FROM faces f2 JOIN assets a2 ON a2.id = f2.asset_id AND a2.trashed_at IS NULL AND a2.missing_since IS NULL
               AND a2.locked_by IS NULL
              WHERE f2.person_id = p.id ORDER BY f2.score * f2.w DESC LIMIT 1) AS face_id
     FROM people p
     JOIN faces f ON f.person_id = p.id
-    JOIN assets a ON a.id = f.asset_id AND a.trashed_at IS NULL AND a.locked_by IS NULL
+    JOIN assets a ON a.id = f.asset_id AND a.trashed_at IS NULL AND a.missing_since IS NULL AND a.locked_by IS NULL
 """
 
 
@@ -243,7 +243,7 @@ def router(ctx) -> APIRouter:
                 "SELECT o.person_id, COUNT(DISTINCT o.asset_id) AS n FROM faces me"
                 " JOIN faces o ON o.asset_id = me.asset_id AND o.person_id != me.person_id"
                 " JOIN people p ON p.id = o.person_id AND p.hidden = 0 AND p.name IS NOT NULL"
-                " JOIN assets a ON a.id = me.asset_id AND a.trashed_at IS NULL AND a.locked_by IS NULL"
+                " JOIN assets a ON a.id = me.asset_id AND a.trashed_at IS NULL AND a.missing_since IS NULL AND a.locked_by IS NULL"
                 " WHERE me.person_id = ? GROUP BY o.person_id ORDER BY n DESC LIMIT 12", (person_id,)).fetchall()
             people = []
             for pid, n in rows:
@@ -287,7 +287,7 @@ def router(ctx) -> APIRouter:
             get_person(conn, person_id)
             rows = conn.execute(
                 "SELECT f.id, f.asset_id, f.embedding, f.quality FROM faces f JOIN assets a ON a.id = f.asset_id"
-                " WHERE f.person_id = ? AND a.trashed_at IS NULL AND a.locked_by IS NULL", (person_id,)).fetchall()
+                " WHERE f.person_id = ? AND a.trashed_at IS NULL AND a.missing_since IS NULL AND a.locked_by IS NULL", (person_id,)).fetchall()
         if not rows:
             return {"faces": [], "total": 0}
         V = np.stack([np.frombuffer(r["embedding"], dtype=np.float32) for r in rows])
@@ -327,9 +327,9 @@ def router(ctx) -> APIRouter:
     _PET_SQL = (
         "SELECT p.id, p.name, p.species, p.hidden, p.birthday, COUNT(DISTINCT s.asset_id) AS photos,"
         " (SELECT s2.id FROM pet_sightings s2 JOIN assets a2 ON a2.id = s2.asset_id WHERE s2.pet_id = p.id"
-        "  AND a2.trashed_at IS NULL AND a2.locked_by IS NULL ORDER BY s2.score DESC LIMIT 1) AS cover"
+        "  AND a2.trashed_at IS NULL AND a2.missing_since IS NULL AND a2.locked_by IS NULL ORDER BY s2.score DESC LIMIT 1) AS cover"
         " FROM pets p LEFT JOIN pet_sightings s ON s.pet_id = p.id"
-        " AND s.asset_id IN (SELECT id FROM assets WHERE trashed_at IS NULL AND locked_by IS NULL)")
+        " AND s.asset_id IN (SELECT id FROM assets WHERE trashed_at IS NULL AND missing_since IS NULL AND locked_by IS NULL)")
 
     def _pet_json(row) -> dict:
         return {"id": row["id"], "name": row["name"], "species": row["species"], "hidden": bool(row["hidden"]),
@@ -440,7 +440,7 @@ def router(ctx) -> APIRouter:
             rows = conn.execute(
                 "SELECT country, state, city, COUNT(*) AS count,"
                 " MAX(taken_at || '|' || id) AS cover FROM assets"
-                " WHERE trashed_at IS NULL AND locked_by IS NULL AND country IS NOT NULL"
+                " WHERE trashed_at IS NULL AND missing_since IS NULL AND locked_by IS NULL AND country IS NOT NULL"
                 " GROUP BY country, state, city ORDER BY country, state, count DESC"
             ).fetchall()
             out = []
@@ -452,7 +452,7 @@ def router(ctx) -> APIRouter:
             for o in out:
                 o["cover_v"] = versions.get(o["cover"])
             located = conn.execute(
-                "SELECT COUNT(*) FROM assets WHERE trashed_at IS NULL AND locked_by IS NULL AND lat IS NOT NULL"
+                "SELECT COUNT(*) FROM assets WHERE trashed_at IS NULL AND missing_since IS NULL AND locked_by IS NULL AND lat IS NOT NULL"
             ).fetchone()[0]
         return {"places": out, "located": located, "status": worker.status()["places"]}
 

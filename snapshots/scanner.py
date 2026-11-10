@@ -6,6 +6,9 @@ Safety rules:
 * If the walk of a folder hit errors or came back empty, nothing in it is removed.
 * A file that was moved or renamed keeps its albums, favourites and faces
   (it is recognised by its content).
+* A file that is gone from a folder that is there is set aside, not forgotten: its record (albums,
+  favourites, faces, description, edits) is hidden everywhere and kept for keep_missing_days. If the
+  file comes back in that time, at the same place or another, it carries on as if it never left.
 """
 
 import hashlib
@@ -36,7 +39,9 @@ class ScanState:
     added: int = 0
     updated: int = 0
     moved: int = 0
-    removed: int = 0
+    removed: int = 0            # files that were gone: taken out of the library (set aside, or forgotten at once)
+    restored: int = 0           # set-aside items whose file came back
+    forgotten: int = 0          # set-aside items whose time ran out: their records were deleted
     skipped_removals: int = 0   # missing entries kept because removing them looked like a mistake
     errors: int = 0
     message: str | None = None
@@ -142,15 +147,26 @@ def index_file(cfg: Config, conn, rel: str, full: Path, digest: str | None = Non
     digest = digest or sha1_of(full)
 
     prev = conn.execute(
-        "SELECT id, sha1, has_thumb, taken_at, taken_at_file, position_edited, lat, lon, edits FROM assets"
-        " WHERE path = ?", (rel,)).fetchone()
+        "SELECT id, sha1, has_thumb, taken_at, taken_at_file, position_edited, lat, lon, edits, missing_since"
+        " FROM assets WHERE path = ?", (rel,)).fetchone()
+    if prev is not None and prev["missing_since"] and prev["sha1"] != digest:
+        # The file that was here went missing, and a different one now has its name (an upload or a
+        # camera reusing IMG_0001, say). It is a new item, and must not inherit the old one's albums.
+        delete_asset_row(cfg, conn, prev["id"])
+        prev = None
     if prev is not None and prev["sha1"] == digest:
-        # Same content, only the timestamp moved: keep everything already known.
-        conn.execute("UPDATE assets SET size = ?, mtime_ns = ? WHERE id = ?",
+        # Same content, only the timestamp moved (or the file is back): keep everything already known.
+        conn.execute("UPDATE assets SET size = ?, mtime_ns = ?, missing_since = NULL WHERE id = ?",
                      (st.st_size, st.st_mtime_ns, prev["id"]))
         if not cfg.thumb_path(prev["id"]).exists():
             _make_thumb(cfg, conn, prev["id"], kind, full, prev["edits"])
         return prev["id"]
+    if prev is None:
+        back = set_aside_copy(conn, digest)
+        if back is not None:
+            # A file that went missing is here again under another name (uploaded again, say).
+            put_back(cfg, conn, back, rel, full, st.st_size, st.st_mtime_ns)
+            return back["id"]
 
     info = media.read_photo_info(full) if kind == "photo" else media.read_video_info(full)
     side = None
@@ -232,7 +248,8 @@ def index_file(cfg: Config, conn, rel: str, full: Path, digest: str | None = Non
                 colors = NULL, colors_done = 0, turn = NULL, turn_done = 0, pets_done = 0,
                 place_guess = NULL, place_checked = 0, caption = NULL, caption_done = 0,
                 landmark = NULL, landmark_done = 0, eyes_closed = 0,
-                trashed_at = NULL   -- a different picture now: never inherit the old one's trash state
+                trashed_at = NULL,  -- a different picture now: never inherit the old one's trash state
+                missing_since = NULL
             WHERE id = ?
             """,
             values + (asset_id,),
@@ -243,6 +260,26 @@ def index_file(cfg: Config, conn, rel: str, full: Path, digest: str | None = Non
         xmp.apply_on_index(conn, asset_id, side)
     _make_thumb(cfg, conn, asset_id, kind, full, prev["edits"] if prev is not None else None)
     return asset_id
+
+
+def set_aside_copy(conn, digest: str):
+    """A set-aside item with this content that a new file may take over, or None.
+
+    Never one in the trash (a kept file must not inherit "in the trash") and never one in someone's
+    locked folder (an upload must not disappear into it, or show what is locked).
+    """
+    return conn.execute(
+        "SELECT id, kind, edits FROM assets WHERE sha1 = ? AND missing_since IS NOT NULL"
+        " AND trashed_at IS NULL AND locked_by IS NULL ORDER BY id LIMIT 1", (digest,)).fetchone()
+
+
+def put_back(cfg: Config, conn, row, rel: str, full: Path, size: int, mtime_ns: int) -> None:
+    """A set-aside item's file is here again (at `rel`): it carries on with everything it had."""
+    conn.execute(
+        "UPDATE assets SET path = ?, filename = ?, size = ?, mtime_ns = ?, missing_since = NULL WHERE id = ?",
+        (rel, full.name, size, mtime_ns, row["id"]))
+    if not cfg.thumb_path(row["id"]).exists():
+        _make_thumb(cfg, conn, row["id"], row["kind"], full, row["edits"])
 
 
 def _make_thumb(cfg: Config, conn, asset_id: int, kind: str, full: Path, edits: str | None = None) -> None:
@@ -298,6 +335,7 @@ class Scanner:
                 r["path"]: r
                 for r in conn.execute(
                     "SELECT a.id, a.path, a.kind, a.size, a.mtime_ns, a.has_thumb, a.sha1, a.trashed_at, a.edits,"
+                    " a.missing_since,"
                     " (SELECT COUNT(*) FROM album_assets WHERE asset_id = a.id)"
                     " + (SELECT COUNT(*) FROM favorites WHERE asset_id = a.id)"
                     " + (SELECT COUNT(*) FROM faces WHERE asset_id = a.id) AS links"
@@ -345,6 +383,12 @@ class Scanner:
                     continue
                 row = existing.get(rel)
                 unchanged = row is not None and row["size"] == size and row["mtime_ns"] == mtime_ns
+                was_set_aside = row is not None and bool(row["missing_since"])
+                if was_set_aside and unchanged:
+                    # Set aside by an earlier scan, and here again: it carries on with everything it had.
+                    conn.execute("UPDATE assets SET missing_since = NULL WHERE id = ?", (row["id"],))
+                    state.restored += 1
+                    pending += 1
                 if unchanged and row["kind"] == "video" and not row["has_thumb"] and row["id"] not in _video_retried:
                     # Videos left without a picture (no ffmpeg then): try once per run, now OpenCV can help.
                     _video_retried.add(row["id"])
@@ -357,24 +401,36 @@ class Scanner:
                     continue
                 try:
                     digest = None
-                    if row is None and missing_by_sha:
+                    if was_set_aside:
                         digest = sha1_of(full)
+                        if digest != row["sha1"]:
+                            # A different file now has the missing one's name: a new item (see index_file).
+                            delete_asset_row(cfg, conn, row["id"])
+                            row, was_set_aside = None, False
+                    if row is None and missing_by_sha:
+                        digest = digest or sha1_of(full)
                         candidates = missing_by_sha.get(digest)
                         taken = conn.execute("SELECT 1 FROM assets WHERE path = ?", (rel,)).fetchone()
                         if candidates and not taken:
                             old = candidates.pop()
                             conn.execute(
-                                "UPDATE assets SET path = ?, filename = ?, size = ?, mtime_ns = ? WHERE id = ?",
+                                "UPDATE assets SET path = ?, filename = ?, size = ?, mtime_ns = ?,"
+                                " missing_since = NULL WHERE id = ?",
                                 (rel, full.name, size, mtime_ns, old["id"]),
                             )
                             moved_away.add(old["path"])
-                            state.moved += 1
+                            if old["missing_since"]:
+                                state.restored += 1
+                            else:
+                                state.moved += 1
                             pending += 1
                             continue
                     new_id = index_file(cfg, conn, rel, full, digest)
-                    if row is None:
+                    if row is None or new_id != row["id"]:
                         state.added += 1
                         added_ids.append(new_id)
+                    elif was_set_aside:
+                        state.restored += 1     # back, saved again since (index_file kept what it had)
                     else:
                         state.updated += 1
                 except Exception as exc:
@@ -397,7 +453,11 @@ class Scanner:
                     "could not be read completely."
                 )
                 state.skipped_removals = len(kept)
-            if gone and not remove_missing and len(gone) >= MASS_REMOVAL_MIN and len(gone) * 2 > len(existing):
+            # Files an earlier scan already set aside, and files that are newly gone.
+            waiting = [p for p in gone if existing[p]["missing_since"]]
+            gone = [p for p in gone if not existing[p]["missing_since"]]
+            present = sum(1 for r in existing.values() if not r["missing_since"])
+            if gone and not remove_missing and len(gone) >= MASS_REMOVAL_MIN and len(gone) * 2 > present:
                 # More than half the library vanished at once: far more likely a wrong folder or a
                 # half-connected drive than a real clear-out. Keep everything until someone confirms.
                 state.message = (
@@ -408,11 +468,30 @@ class Scanner:
                 gone = []
             if gone:
                 from .health import awaiting_restore
-                waiting = awaiting_restore(cfg, conn)
-                gone = [p for p in gone if existing[p]["id"] not in waiting]
+                restorable = awaiting_restore(cfg, conn)
+                gone = [p for p in gone if existing[p]["id"] not in restorable]
+            keep_days = max(0.0, float(cfg.keep_missing_days))
+            stamp = now()
             for path in gone:
-                delete_asset_row(cfg, conn, existing[path]["id"])
+                if keep_days > 0:
+                    # Set aside: hidden everywhere, with its albums, favourites and faces kept.
+                    conn.execute("UPDATE assets SET missing_since = ? WHERE id = ? AND missing_since IS NULL",
+                                 (stamp, existing[path]["id"]))
+                else:
+                    delete_asset_row(cfg, conn, existing[path]["id"])
                 state.removed += 1
+            limit = (datetime.now() - timedelta(days=keep_days)).isoformat(timespec="seconds")
+            for path in waiting:
+                if existing[path]["missing_since"] <= limit:
+                    delete_asset_row(cfg, conn, existing[path]["id"])
+                    state.forgotten += 1
+            if state.removed and keep_days > 0 and not state.message:
+                days = int(keep_days) if keep_days == int(keep_days) else round(keep_days, 1)
+                state.message = (
+                    f"{state.removed} {'file was' if state.removed == 1 else 'files were'} not found. "
+                    f"Their albums, favourites and people are kept for {days} "
+                    f"{'day' if days == 1 else 'days'} in case the files come back."
+                )
             conn.commit()
             try:
                 linking.link_pairs(conn, cfg)

@@ -3098,7 +3098,7 @@ async function refreshStatus() {
   if (!sc.running && sc.finished_at && sc.finished_at !== lastFinished) {
     const first = lastFinished === null;
     lastFinished = sc.finished_at;
-    if (!first && (sc.added || sc.removed || sc.moved || sc.updated) && S.route && S.route.view === "grid") {
+    if (!first && (sc.added || sc.removed || sc.moved || sc.updated || sc.restored) && S.route && S.route.view === "grid") {
       const quiet = $("scroller").scrollTop < 200 && !S.selecting && !$("viewer").open;
       if (quiet) await reload(); else $("new-items").hidden = false;
     }
@@ -3128,6 +3128,7 @@ function renderStatus() {
   if (st.text && st.text.enabled && st.text.pending) work.push(`Reading text: ${fmtInt(st.text.pending)} to go`);
   $("st-work").textContent = work.join(" · ");
   const notes = [];
+  if (st.set_aside) notes.push(`${plural(st.set_aside, "missing file")} remembered in case ${st.set_aside === 1 ? "it comes" : "they come"} back`);
   if (!st.heif) notes.push("HEIC photos need pillow-heif");
   if (st.raw === false) notes.push("RAW files need rawpy");
   if (st.videos && !st.ffmpeg) notes.push("Video thumbnails need ffmpeg");
@@ -3151,11 +3152,11 @@ $("rescan").addEventListener("click", async () => {
   // The last scan kept a lot of missing photos, in case of a wrong folder. An administrator can
   // confirm that they really are gone.
   if (sc && sc.skipped_removals && S.me && S.me.is_admin) {
-    const ok = await confirmBox("Forget the missing photos?",
+    const ok = await confirmBox("Take the missing photos out?",
       `${plural(sc.skipped_removals, "photo")} were not found in the library folder last time. ` +
-      "If you deleted or moved them out of the library on purpose, Snapshots can forget them, along with " +
-      "their albums, favourites and faces. If the drive is just not connected, press Cancel. " +
-      "Either way, no files are deleted.", "Forget them");
+      "If you deleted or moved them out of the library on purpose, Snapshots can take them out of the library. " +
+      "Their albums, favourites and faces are remembered for a while in case the files come back. " +
+      "If the drive is just not connected, press Cancel. Either way, no files are deleted.", "Take them out");
     body = { remove_missing: !!ok };
   }
   try { await post("/api/scan", body); } catch (err) { flashNote(err.message); }

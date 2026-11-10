@@ -406,7 +406,7 @@ class XmpJob:
         return conn.execute("SELECT COUNT(*) FROM assets WHERE xmp_dirty = 1").fetchone()[0]
 
     def mark_all(self, conn) -> None:
-        conn.execute("UPDATE assets SET xmp_dirty = 1 WHERE locked_by IS NULL AND trashed_at IS NULL")
+        conn.execute("UPDATE assets SET xmp_dirty = 1 WHERE locked_by IS NULL AND trashed_at IS NULL AND missing_since IS NULL")
 
     def run_batch(self, conn, now: float, should_stop, batch: int = 50) -> bool:
         if now < self.retry_at:
