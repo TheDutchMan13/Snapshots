@@ -152,23 +152,28 @@ def router(ctx) -> APIRouter:
             kinds = {"photos": [0, 0], "raw": [0, 0], "videos": [0, 0]}
             years: dict[str, list] = defaultdict(lambda: [0, 0, 0])   # photos bytes, video bytes, items
             folders: dict[str, list] = defaultdict(lambda: [0, 0])
-            names = {r.prefix: r.name for r in libraries.roots(cfg) if not r.main}
+            all_roots = libraries.roots(cfg)             # looked up once, not once per item
+            names = {r.prefix: r.name for r in all_roots if not r.main}
+            has_main = any(r.main for r in all_roots)
+            extras = [r for r in all_roots if not r.main]
+            raw_exts = media.RAW_EXTS
             for row in conn.execute(f"SELECT a.path, a.filename, a.kind, a.size, a.taken_at FROM assets a WHERE {base}"):
                 size = row["size"] or 0
-                k = "videos" if row["kind"] == "video" else "raw" if media.is_raw(row["filename"]) else "photos"
+                k = ("videos" if row["kind"] == "video"
+                     else "raw" if os.path.splitext(row["filename"])[1].lower() in raw_exts else "photos")
                 kinds[k][0] += 1
                 kinds[k][1] += size
                 y = years[row["taken_at"][:4]]
                 y[1 if row["kind"] == "video" else 0] += size
                 y[2] += 1
-                root = libraries.root_of(cfg, row["path"])
-                if root is None:
-                    top = "Folders no longer in the library"
-                elif root.main:
-                    parts = row["path"].split("/")
+                path = row["path"]
+                if has_main and not db.is_external(path):
+                    parts = path.split("/")
                     top = parts[0] if len(parts) > 1 else "(the library folder itself)"
                 else:
-                    top = names.get(root.prefix, root.name) + " (another drive)"
+                    root = next((x for x in extras if path.startswith(x.prefix)), None)
+                    top = ("Folders no longer in the library" if root is None
+                           else names.get(root.prefix, root.name) + " (another drive)")
                 folders[top][0] += 1
                 folders[top][1] += size
             trash = conn.execute(f"SELECT COUNT(*), COALESCE(SUM(size), 0) FROM assets a WHERE a.trashed_at IS NOT NULL"

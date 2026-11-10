@@ -19,6 +19,8 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
+import numpy as np
+
 log = logging.getLogger("snapshots.analysis")
 
 
@@ -187,9 +189,43 @@ def _bands(distance: int) -> list[tuple[int, int]]:
     return [(edges[i], edges[i + 1]) for i in range(n)]
 
 
+_bitwise_count = getattr(np, "bitwise_count", None)          # NumPy 2 and newer; older ones use the table below
+_BITS = np.array([bin(i).count("1") for i in range(256)], dtype=np.uint8)   # bits set in each byte
+_BLOCK_CELLS = 500_000          # how many pairs one numpy step compares (a few MB of memory)
+_NUMPY_FROM = 24                # buckets smaller than this are quicker to compare one by one
+
+
+def _bucket_pairs(ids: list[int], unsigned: dict[int, int], distance: int, found: set[tuple[int, int]]) -> None:
+    """Adds the pairs in one bucket whose hashes differ in at most `distance` bits."""
+    n = len(ids)
+    if n < _NUMPY_FROM:
+        for x in range(n):
+            hx = unsigned[ids[x]]
+            for y in range(x + 1, n):
+                if (hx ^ unsigned[ids[y]]).bit_count() <= distance:
+                    a, b = ids[x], ids[y]
+                    found.add((a, b) if a < b else (b, a))
+        return
+    h = np.array([unsigned[i] for i in ids], dtype=np.uint64)
+    step = max(1, _BLOCK_CELLS // n)
+    for i0 in range(0, n - 1, step):
+        i1 = min(n - 1, i0 + step)
+        x = h[i0:i1, None] ^ h[None, i0 + 1:]                      # each row against the ones after the block's start
+        if _bitwise_count is not None:                             # NumPy 2: one step
+            bits = _bitwise_count(x)
+        else:
+            bits = _BITS[x.view(np.uint8).reshape(x.shape[0], x.shape[1], 8)].sum(axis=2, dtype=np.uint8)
+        rows, cols = np.nonzero(bits <= distance)
+        for r, c in zip(rows.tolist(), cols.tolist()):
+            x_, y_ = i0 + r, i0 + 1 + c
+            if y_ > x_:                                            # each pair once
+                a, b = ids[x_], ids[y_]
+                found.add((a, b) if a < b else (b, a))
+
+
 def similar_pairs(items: list[tuple[int, int]], distance: int) -> set[tuple[int, int]]:
     """Pairs of ids whose hashes differ in at most `distance` bits. items: [(id, dhash)]."""
-    found = set()
+    found: set[tuple[int, int]] = set()
     unsigned = {i: _unsigned(h) for i, h in items}
     for lo, hi in _bands(distance):
         mask = ((1 << (hi - lo)) - 1) << lo
@@ -199,12 +235,7 @@ def similar_pairs(items: list[tuple[int, int]], distance: int) -> set[tuple[int,
         for ids in buckets.values():
             if len(ids) < 2 or len(ids) > 2000:  # a giant bucket means a meaningless pattern: skip it
                 continue
-            for x in range(len(ids)):
-                hx = unsigned[ids[x]]
-                for y in range(x + 1, len(ids)):
-                    if (hx ^ unsigned[ids[y]]).bit_count() <= distance:
-                        a, b = ids[x], ids[y]
-                        found.add((a, b) if a < b else (b, a))
+            _bucket_pairs(ids, unsigned, distance, found)
     return found
 
 
