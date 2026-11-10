@@ -312,3 +312,25 @@ def test_only_the_newest_upgrade_copies_are_kept(tmp_path):
     names = sorted(p.name for p in folder.iterdir())
     assert len([n for n in names if "before-upgrade" in n]) == db.UPGRADE_BACKUPS_KEPT
     assert any("before-upgrade-v12-" in n for n in names) and "snapshots-20260101-000000.db" in names
+
+
+def test_emptying_the_trash_leaves_a_set_aside_items_name_alone(tmp_path):
+    """A trashed file that then went missing is hidden from the trash. A new file with its name is another
+    photo: emptying the trash must not delete it."""
+    c, cfg, root = library(tmp_path)
+    with c:
+        setup_admin(c)
+        wait_scan(c)
+        old = ids_by_name(c)["p5.jpg"]
+        assert c.post("/api/trash", json={"ids": [old]}).status_code == 200
+        (root / "rest" / "p5.jpg").unlink()
+        rescan(c)
+        assert c.get("/api/assets", params={"trashed": "true"}).json()["items"] == []
+        # Another photo is saved under that name, and the trash is emptied before a scan has seen it.
+        make_jpeg(root / "rest" / "p5.jpg", "2025:02:02 09:00:00", color=(9, 9, 9), size=(640, 480))
+        for body in ({"confirm": True}, {"confirm": True, "ids": [old]}):
+            r = c.post("/api/trash/empty", json=body)
+            assert r.status_code == 200 and r.json()["deleted"] == 0
+            assert (root / "rest" / "p5.jpg").is_file()
+        s = rescan(c)
+        assert s["added"] == 1 and "p5.jpg" in ids_by_name(c)

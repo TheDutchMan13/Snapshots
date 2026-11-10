@@ -92,13 +92,17 @@ def router(ctx) -> APIRouter:
         deleted, failed = 0, []
         with db.session(cfg.db_path) as conn:
             if body.ids is None:
+                # Never an item a scan found gone (missing_since): its file isn't there, and whatever
+                # has its name now is some other file. Its record is forgotten by a later scan.
                 rows = conn.execute("SELECT id, path, filename FROM assets"
-                                    " WHERE trashed_at IS NOT NULL AND locked_by IS NULL").fetchall()
+                                    " WHERE trashed_at IS NOT NULL AND missing_since IS NULL"
+                                    " AND locked_by IS NULL").fetchall()
             else:
                 ids = linking.with_clips(conn, db.open_ids(conn, body.ids))
                 marks = ",".join("?" * len(ids)) or "NULL"
                 rows = conn.execute(
-                    f"SELECT id, path, filename FROM assets WHERE trashed_at IS NOT NULL AND id IN ({marks})",
+                    f"SELECT id, path, filename FROM assets WHERE trashed_at IS NOT NULL AND missing_since IS NULL"
+                    f" AND id IN ({marks})",
                     ids,
                 ).fetchall()
             for row in rows:

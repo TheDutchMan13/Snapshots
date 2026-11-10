@@ -353,9 +353,12 @@ def test_missing_items_wait_for_restore(tmp_path):
     root = library(tmp_path)
     copy = tmp_path / "copy"
     c, cfg, _ = ready(tmp_path, root, offsite_method="folder", offsite_target=str(copy))
+    # The automatic copy runs once at the start, on its own thread. Wait for it to end, or it could put
+    # hike.jpg back in the copy after the line below takes it out.
+    wait_for(lambda: (s := c.get("/api/settings").json()["offsite"]["state"])["last"] and not s["running"])
     (copy / "Library" / "2024").mkdir(parents=True, exist_ok=True)
     shutil.copy(root / "2024" / "dog.jpg", copy / "Library" / "2024" / "dog.jpg")
-    (copy / "Library" / "2024" / "hike.jpg").unlink(missing_ok=True)   # the automatic copy may have made one
+    (copy / "Library" / "2024" / "hike.jpg").unlink(missing_ok=True)   # the automatic copy made one
     ids = ids_by_name(c)
     c.post("/api/favorites", json={"ids": [ids["dog.jpg"]], "value": True})
     (root / "2024" / "dog.jpg").unlink()
