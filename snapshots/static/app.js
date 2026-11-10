@@ -3128,7 +3128,8 @@ function renderStatus() {
   if (st.text && st.text.enabled && st.text.pending) work.push(`Reading text: ${fmtInt(st.text.pending)} to go`);
   $("st-work").textContent = work.join(" · ");
   const notes = [];
-  if (st.set_aside) notes.push(`${plural(st.set_aside, "missing file")} remembered in case ${st.set_aside === 1 ? "it comes" : "they come"} back`);
+  // (the last scan's own message says the same when it has just set them aside)
+  if (st.set_aside && !sc.message) notes.push(`${plural(st.set_aside, "missing file")} remembered`);
   if (!st.heif) notes.push("HEIC photos need pillow-heif");
   if (st.raw === false) notes.push("RAW files need rawpy");
   if (st.videos && !st.ffmpeg) notes.push("Video thumbnails need ffmpeg");
