@@ -260,7 +260,7 @@ def _place_thumb(cfg: Config, conn, asset_id: int, p: Prepared, edits: str | Non
     conn.execute("UPDATE assets SET has_thumb = ? WHERE id = ?", (1 if ok else 0, asset_id))
 
 
-def store(cfg: Config, conn, p: Prepared) -> tuple[int, str]:
+def store(cfg: Config, conn, p: Prepared, replaces: int | None = None) -> tuple[int, str]:
     """Insert or update the row for a file prepare() has read. Returns (asset id, what happened):
     "added", "updated" or "restored" (a set-aside item whose file is back).
 
@@ -285,6 +285,12 @@ def store(cfg: Config, conn, p: Prepared) -> tuple[int, str]:
         return prev["id"], "restored" if prev["missing_since"] else "updated"
     if prev is None:
         back = set_aside_copy(conn, digest)
+        if back is None and replaces is not None:
+            # The caller found this item's file gone from a folder that is there (an upload of the same
+            # photo, see routes_library.save_upload). The same rules as for a set-aside item.
+            back = conn.execute(
+                "SELECT id, kind, edits FROM assets WHERE id = ? AND sha1 = ? AND trashed_at IS NULL"
+                " AND locked_by IS NULL", (replaces, digest)).fetchone()
         if back is not None:
             # A file that went missing is here again under another name (uploaded again, say):
             # it carries on with everything it had.
@@ -385,8 +391,11 @@ def store(cfg: Config, conn, p: Prepared) -> tuple[int, str]:
     return asset_id, "added" if prev is None else "updated"
 
 
-def index_file(cfg: Config, conn, rel: str, full: Path, digest: str | None = None) -> int:
+def index_file(cfg: Config, conn, rel: str, full: Path, digest: str | None = None,
+               replaces: int | None = None) -> int:
     """Read one file and insert or update its row. Returns the asset id.
+
+    `replaces`: an item with the same content whose own file is gone; the new file takes its place.
 
     The file is read, and its thumbnail made, before anything is written (see prepare and store), so a
     caller that has written nothing yet locks the database only for a moment.
@@ -396,12 +405,12 @@ def index_file(cfg: Config, conn, rel: str, full: Path, digest: str | None = Non
     p = prepare(cfg, rel, full, digest, hint)
     try:
         try:
-            return store(cfg, conn, p)[0]
+            return store(cfg, conn, p, replaces)[0]
         except Incomplete:      # the row changed between the look above and the write (very rare)
             digest = p.digest
             p.discard()
             p = prepare(cfg, rel, full, digest)
-            return store(cfg, conn, p)[0]
+            return store(cfg, conn, p, replaces)[0]
     finally:
         p.discard()
 

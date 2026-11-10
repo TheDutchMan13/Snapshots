@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 
 from . import __version__, analysis, colors, dates, db, libraries, linking, media, ranking, smart, sorting, spelling, storage, webhooks
 from .app import current_user, require_admin, safe_filename
-from .scanner import _make_thumb, index_file
+from .scanner import _make_thumb, index_file, sha1_of
 from .videos import Converter
 
 KIND = Query("", pattern="^(photo|video)?$")
@@ -170,6 +170,15 @@ def original_path(cfg, stored: str) -> Path:
     if full is None:
         raise HTTPException(404, "Not found")
     return full
+
+
+def same_content(cfg, stored: str, sha1: str) -> bool:
+    """Is the file at this stored path there, with exactly this content? (Reads the whole file.)"""
+    full = libraries.full_path(cfg, stored)
+    try:
+        return full is not None and full.is_file() and sha1_of(full) == sha1
+    except OSError:
+        return False
 
 
 def can_see(row, user) -> bool:
@@ -691,14 +700,29 @@ def router(ctx) -> APIRouter:
             with db.session(cfg.db_path) as conn:
                 # A copy in someone's locked folder doesn't count: the upload is added like any new photo,
                 # so nobody can find out what is locked by uploading.
-                dup = conn.execute(
-                    "SELECT id, trashed_at FROM assets WHERE sha1 = ? AND locked_by IS NULL"
+                known = conn.execute(
+                    "SELECT id, path, size, mtime_ns, trashed_at FROM assets WHERE sha1 = ? AND locked_by IS NULL"
                     " AND missing_since IS NULL"   # a set-aside item's file is gone: this upload brings it back
-                    " ORDER BY trashed_at IS NOT NULL LIMIT 1",
+                    " ORDER BY trashed_at IS NOT NULL, id",
                     (digest.hexdigest(),),
-                ).fetchone()
-                if dup and dup["trashed_at"]:
-                    # Uploading something that is in the trash brings it back.
+                ).fetchall()
+            # A record is only a reason to throw this upload away if its file is really in the library
+            # (or on a drive that isn't connected just now, which is expected back). If the file is gone
+            # from a folder that is there, the upload is kept: it may be the only copy left.
+            dup, gone = None, None
+            presence = libraries.Presence(cfg)
+            for row in known:
+                state = presence.state(row["path"], row["size"], row["mtime_ns"])
+                if state == "changed" and same_content(cfg, row["path"], digest.hexdigest()):
+                    state = "here"      # saved again without a change (a scan will note the new time)
+                if state in ("here", "away"):
+                    dup = row
+                    break
+                if state == "gone" and gone is None:
+                    gone = row          # (one outside the trash first: see the ORDER BY)
+            if dup and dup["trashed_at"]:
+                # Uploading something that is in the trash brings it back.
+                with db.session(cfg.db_path) as conn:
                     conn.execute("UPDATE assets SET trashed_at = NULL WHERE id = ?", (dup["id"],))
             if dup:
                 tmp.unlink()
@@ -720,7 +744,15 @@ def router(ctx) -> APIRouter:
 
             rel = os.path.relpath(target, root).replace(os.sep, "/")
             with db.session(cfg.db_path) as conn:
-                asset_id = index_file(cfg, conn, rel, target, digest.hexdigest())
+                # If the library had this photo and its file is gone, the upload carries on as that
+                # item, with its albums, favourites and people. Out of the trash, if it was there:
+                # the file that was just stored must not be deleted when the trash is emptied.
+                if gone and gone["trashed_at"]:
+                    conn.execute("UPDATE assets SET trashed_at = NULL WHERE id = ? AND sha1 = ?",
+                                 (gone["id"], digest.hexdigest()))
+                    conn.commit()       # nothing stays locked while the file is read below
+                asset_id = index_file(cfg, conn, rel, target, digest.hexdigest(),
+                                      replaces=gone["id"] if gone else None)
             return {"name": upload.filename, "status": "added", "id": asset_id}
         except Exception as exc:
             try:
@@ -738,23 +770,37 @@ def router(ctx) -> APIRouter:
     @r.post("/api/upload/check")
     def upload_check(body: HashList, request: Request):
         """Which of these files (by SHA-1) does the library already have? The phone app asks before sending,
-        so a photo that is already here (even one put in the trash) is never sent twice."""
+        so a photo that is already here (even one put in the trash) is never sent twice.
+
+        The answer comes from the disk, not only from the records: a file counts if it is there now, with
+        the size and time it was indexed with. A record whose file is gone, or was saved again since, does
+        not count, so the phone sends that photo (again). A record on a drive that isn't connected counts
+        for "already sent" (the drive is expected back) but never for "kept": the phone's own copy may
+        only be removed for a file that was seen on the disk just now.
+        """
         current_user(request)
         wanted = {h.lower() for h in body.sha1[:1000] if len(h) == 40 and all(c in "0123456789abcdefABCDEF" for c in h)}
-        have: list[str] = []
-        with db.session(cfg.db_path) as conn:
-            marks = ",".join("?" * len(wanted))
-            if wanted:
+        rows = []
+        if wanted:
+            with db.session(cfg.db_path) as conn:
+                marks = ",".join("?" * len(wanted))
                 # A copy in someone's locked folder doesn't count (the same rule as upload), so this
                 # can't be used to find out what is locked.
                 kept = " AND trashed_at IS NULL" if body.kept else ""
                 # Nor does an item whose file a scan found gone: the phone must send that photo again.
-                rows = conn.execute(f"SELECT DISTINCT sha1 FROM assets WHERE locked_by IS NULL AND missing_since IS NULL{kept}"
-                                    f" AND sha1 IN ({marks})",
+                rows = conn.execute(f"SELECT sha1, path, size, mtime_ns FROM assets WHERE locked_by IS NULL"
+                                    f" AND missing_since IS NULL{kept} AND sha1 IN ({marks})",
                                     list(wanted)).fetchall()
-                have = [x["sha1"] for x in rows]
+        # The files are looked for with the database closed: a slow drive must not hold anything up.
+        counts = ("here",) if body.kept else ("here", "away")
+        presence = libraries.Presence(cfg)
+        have: set[str] = set()
+        for row in rows:
+            if row["sha1"] not in have and presence.state(row["path"], row["size"], row["mtime_ns"]) in counts:
+                have.add(row["sha1"])
         # "kept": says this server left out the trash (an older one ignores the question; the phone checks this).
-        return {"have": have, "kept": body.kept}
+        # "verified": says the files were looked for on the disk (an older server answered from its records).
+        return {"have": sorted(have), "kept": body.kept, "verified": True}
 
     @r.post("/api/upload")
     def upload(request: Request, files: list[UploadFile] = File(...)):

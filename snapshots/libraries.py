@@ -7,6 +7,7 @@ library keeps working as before.
 """
 
 import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -94,6 +95,54 @@ def full_path(cfg, stored: str) -> Path | None:
     if not full.is_relative_to(base):  # defence in depth: paths come from our own scan
         return None
     return full
+
+
+class Presence:
+    """Looks on the disk for the files behind records, for answers that must not rest on the records
+    alone: "does the library have this photo?" decides whether a phone sends it, and whether the
+    phone's own copy may be removed.
+
+    state() gives one of:
+      "here"     the file is there, with the size and time it had when it was indexed
+      "changed"  a file is there, but not as it was indexed (saved again, or another file by that name)
+      "gone"     its folder is there and the file is not
+      "away"     can't tell: its folder isn't connected or can't be read (records are kept for its return)
+    """
+
+    def __init__(self, cfg):
+        # The folders are worked out once, however many files are asked about (a phone asks 1000 at a time).
+        self._roots = [(r, os.path.normpath(r.path)) for r in roots(cfg)]
+        self._available: dict[str, bool] = {}
+
+    def _place(self, stored: str):
+        """(root, the file's path on disk) as root_of() and full_path() give them, or (None, None)."""
+        for root, base in self._roots:
+            if (not is_external(stored)) if root.main else stored.startswith(root.prefix):
+                full = os.path.normpath(os.path.join(base, stored[len(root.prefix):]))
+                if not Path(full).is_relative_to(base):     # defence in depth, as in full_path()
+                    return None, None
+                return root, full
+        return None, None
+
+    def state(self, stored: str, size: int | None, mtime_ns: int | None) -> str:
+        root, full = self._place(stored)
+        if root is None:
+            return "away"
+        if root.prefix not in self._available:
+            self._available[root.prefix] = root.available()
+        if not self._available[root.prefix]:
+            return "away"
+        try:
+            st = os.stat(full)
+        except (FileNotFoundError, NotADirectoryError):
+            # The folder was there a moment ago; make sure it still is before calling the file gone
+            # (a drive unplugged in between must read as "away").
+            return "gone" if root.available() else "away"
+        except OSError:
+            return "away"
+        if not stat.S_ISREG(st.st_mode):
+            return "changed"
+        return "here" if st.st_size == size and st.st_mtime_ns == mtime_ns else "changed"
 
 
 def stored_path(root: Root, full: Path) -> str:
