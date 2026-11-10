@@ -7,6 +7,7 @@ first time, remembers it, and opens Snapshots in its own window.
 """
 
 import argparse
+import logging
 import socket
 import sys
 import threading
@@ -18,7 +19,7 @@ import uvicorn
 
 from . import __version__, shell
 from .app import create_app
-from .config import load_config, save_library_path
+from .config import load_config, network_warning, save_library_path
 
 FROZEN = bool(getattr(sys, "frozen", False))  # True inside the PyInstaller exe
 BACKGROUND_WAIT = 120  # seconds to wait at sign-in for the photo folder's drive to appear
@@ -345,6 +346,10 @@ def main(argv=None) -> int:
     print(f"  Library : {cfg.library_path}")
     print(f"  Data    : {cfg.data_dir}")
     print(f"  Open    : {url}")
+    warning = network_warning(cfg.host)
+    if warning:
+        print(f"  WARNING : {warning}")
+        logging.getLogger("snapshots").warning(warning)
     if shell.console != "none":
         if mode == "window":
             print("  Close the Snapshots window to stop it.\n")

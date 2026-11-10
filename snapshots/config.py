@@ -277,3 +277,19 @@ def load_config(config_file: str | os.PathLike | None = None, **overrides) -> Co
             value = Path(value)
         setattr(cfg, key, value)
     return cfg
+
+LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+
+def network_warning(host: str) -> str | None:
+    """A sentence for when Snapshots listens beyond this PC, or None when it listens only on this PC.
+
+    Snapshots speaks plain HTTP: on any other address, passwords and photos cross the network unencrypted
+    and anyone on it can reach the login page. For a phone, keep 127.0.0.1 and let Tailscale publish it.
+    """
+    if host in LOOPBACK_HOSTS:
+        return None
+    where = "every network this PC is on" if host in ("0.0.0.0", "::", "") else host
+    return (f"Snapshots is listening on {where}, not only on this PC. The connection is plain HTTP "
+            "(passwords and photos are not encrypted) and anyone on that network can reach the login page. "
+            "For a phone, keep host = 127.0.0.1 and use Tailscale Serve instead (see the README).")

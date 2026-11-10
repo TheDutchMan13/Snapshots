@@ -2,7 +2,7 @@
 
 Snapshots is a self-hosted photo and video library for Windows. Your originals stay on your own drive, and the app indexes them locally for browsing, search, people and places. You can reach your library from your phone over Tailscale, with no cloud account or subscription required.
 
-> **Status:** early development (v0.10). Browsing, search, accounts with two-step login, albums and smart albums, tags, stars and colour labels, favourites, archive, trash, people, places, the map, memories, events, the year in review, clean-up and the library health check, editing, comments, the locked folder, exports, imports from Immich and Google Photos, offsite copies, XMP files and webhooks all work. Automatic backup from a phone is not built yet, see [Roadmap](#roadmap).
+> **Status:** under active development. Releases are on the [Releases page](https://github.com/TheDutchMan13/Snapshots/releases); the version you run is shown in the app. Browsing, search, accounts with two-step login, albums and smart albums, tags, stars and colour labels, favourites, archive, trash, people, places, the map, memories, events, the year in review, clean-up and the library health check, editing, comments, the locked folder, exports, imports from Immich and Google Photos, offsite copies, XMP files, webhooks and automatic backup from the [Snapshots for Android](https://github.com/TheDutchMan13/Snapshots-Android) app all work. See [Roadmap](#roadmap).
 
 ## What works today
 
@@ -260,11 +260,21 @@ Passwords are stored as salted scrypt hashes. Sessions last 30 days and end when
 
 Each person's **locked folder** opens with their own PIN (6 characters or more), for 10 minutes at a time and only in the window where it was typed. Wrong PINs are slowed down. If an administrator deletes an account, that person's locked photos move to the administrator's own locked folder, still hidden from everyone else. Because everyone shares one library, anyone can lock any photo; if something goes missing that way, an administrator can take that person's locked items into their own locked folder (Accounts, **Take locked items**).
 
-The safe way to reach Snapshots from your phone is [Tailscale](https://tailscale.com/). Keep Snapshots on its default `127.0.0.1` address and let Tailscale publish it to your own devices only, for example with `tailscale serve --bg 8080` (see the Tailscale documentation for the current syntax). Even with login, don't port-forward Snapshots to the open internet.
+The safe way to reach Snapshots from your phone is [Tailscale](https://tailscale.com/). Keep Snapshots on its default `127.0.0.1` address (port `8080`) and let Tailscale publish it to your own devices only:
+
+```powershell
+tailscale serve --bg 8080
+```
+
+Tailscale then gives you an encrypted address like `https://mypc.tail1234.ts.net` (see the Tailscale documentation for the current syntax). Type that address, with `https://`, into the phone app. Even with login, don't port-forward Snapshots to the open internet.
+
+Snapshots itself only speaks plain HTTP. If you set `host = "0.0.0.0"` (or another address) so that other devices can reach it directly, Snapshots warns about it when it starts, and administrators see a note in the status bar: on any network that is not your own, anyone can reach the login page, and passwords and photos are not encrypted. Over Tailscale's own addresses (`100.x.y.z:8080`) the traffic is encrypted by Tailscale; the phone app warns when you type a plain `http://` address that is not a Tailscale one.
+
+Only administrators see the folder paths on this PC (in the status bar and `/api/status`); other accounts see the photos, not where they are stored.
 
 ## Building the exe
 
-`Snapshots.exe` has to be built on Windows. There are two ways. The GitHub build also makes the installer, `Snapshots-Setup.exe` (with [Inno Setup](https://jrsoftware.org/isinfo.php); its script is `installer\snapshots.iss`). To make the installer on your own PC after `build.bat`, install Inno Setup and run `iscc /DAppVersion=0.14.7 installer\snapshots.iss`; it is written to `dist\Snapshots-Setup.exe`.
+`Snapshots.exe` has to be built on Windows. There are two ways. The GitHub build also makes the installer, `Snapshots-Setup.exe` (with [Inno Setup](https://jrsoftware.org/isinfo.php); its script is `installer\snapshots.iss`). To make the installer on your own PC after `build.bat`, install Inno Setup and run `iscc /DAppVersion=<version> installer\snapshots.iss`, where `<version>` is the number in `snapshots\__init__.py` (`python -c "import snapshots; print(snapshots.__version__)"` prints it); it is written to `dist\Snapshots-Setup.exe`. That file is the one place the version number lives: the GitHub build, the installer and the app all read it from there.
 
 **Let GitHub build it (no setup on your PC).** Push the project to GitHub, open the repository's **Actions** tab, choose **Build Windows exe**, and press **Run workflow**. When it finishes, download `Snapshots-windows` from the run's page. To publish it on the **Releases** page instead, push a tag such as `v0.2.0` (it has to start with `v`). The workflow runs the tests, starts the finished exe to check it works, then installs and uninstalls the installer on the build machine to check that too, before attaching both files to the release.
 

@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from . import __version__, analysis, colors, dates, db, libraries, linking, media, ranking, smart, sorting, spelling, storage, webhooks
 from .app import current_user, require_admin, safe_filename
+from .config import network_warning
 from .scanner import _make_thumb, index_file, sha1_of
 from .videos import Converter
 
@@ -833,10 +834,11 @@ def router(ctx) -> APIRouter:
             has_pin = conn.execute("SELECT pin_hash IS NOT NULL FROM users WHERE id = ?", (user["id"],)).fetchone()[0]
             unread = unread_activity(conn, user["id"])
         root = cfg.library_path
+        admin = bool(user.get("is_admin"))      # folder paths show the PC's folders (and its user name): admins only
         out = {
             "version": __version__,
             "user": user,
-            "library_path": str(root) if root else None,
+            "library_path": str(root) if root and admin else None,
             "library_ok": bool(root and root.is_dir()),
             "photos": counts.get("photo", 0),
             "videos": counts.get("video", 0),
@@ -847,7 +849,9 @@ def router(ctx) -> APIRouter:
             "heif": media.HEIF,
             "raw": media.RAW,
             "scan_interval_minutes": cfg.scan_interval_minutes,
-            "libraries": [{"path": str(x.path), "main": x.main, "ok": x.available()} for x in libraries.roots(cfg)],
+            "libraries": [({"path": str(x.path)} if admin else {}) | {"main": x.main, "ok": x.available()}
+                          for x in libraries.roots(cfg)],
+            "network_warning": network_warning(cfg.host) if admin else None,
             "locked": {"count": locked, "has_pin": bool(has_pin), "open": bool(user.get("unlocked"))},
             "activity_unread": unread,
             "map": {"tiles": cfg.map_tiles or None, "attribution": cfg.map_attribution if cfg.map_tiles else None},

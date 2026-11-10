@@ -3136,6 +3136,8 @@ function renderStatus() {
   if (st.faces.message && st.faces.enabled) notes.push(st.faces.message);
   if (st.places.message && st.places.enabled) notes.push(st.places.message);
   for (const job of [st.content, st.text]) if (job && job.enabled && job.message) notes.push(job.message);
+  // For administrators only: Snapshots is reachable from other devices over plain HTTP.
+  if (st.network_warning) notes.push("Reachable from other devices over plain HTTP: see the README (Tailscale Serve)");
   $("st-note").textContent = flash && Date.now() < flash.until ? flash.text : notes.join(" · ");
   $("rescan").disabled = sc.running || !st.library_ok;
   const unread = st.activity_unread || 0;
