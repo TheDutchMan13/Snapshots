@@ -15,6 +15,8 @@ import hashlib
 import logging
 import os
 import threading
+import time
+import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -25,7 +27,6 @@ from .config import Config
 log = logging.getLogger("snapshots.scanner")
 
 _SKIP_DIRS = {"$recycle.bin", "system volume information", "@eadir", "#recycle", "lost+found"}
-_COMMIT_EVERY = 25
 _video_retried: set[int] = set()
 MASS_REMOVAL_MIN = 20  # below this many, missing files are always tidied away
 
@@ -138,14 +139,120 @@ def delete_asset_row(cfg: Config, conn, asset_id: int) -> None:
     _unlink(cfg.video_path(asset_id))
 
 
-def index_file(cfg: Config, conn, rel: str, full: Path, digest: str | None = None) -> int:
-    """Read one file and insert or update its row. Returns the asset id."""
-    st = full.stat()
+class Incomplete(Exception):
+    """store() needs a file's details, and prepare() had only read its checksum."""
+
+
+@dataclass
+class Hint:
+    """What the database is believed to hold for a path, so prepare() can skip work that isn't needed."""
+    sha1: str
+    edits: str | None
+    thumb_ok: bool
+
+
+@dataclass
+class Prepared:
+    """What prepare() read from one file. Nothing in it came from, or went to, the database."""
+    rel: str
+    full: Path
+    size: int
+    mtime_ns: int
+    kind: str
+    digest: str | None
+    complete: bool = False          # the details below were read (a new or changed file)
+    info: dict | None = None
+    side: dict | None = None
+    motion: tuple | None = None
+    projection: str | None = None
+    thumb: Path | None = None       # a thumbnail waiting in a temporary file
+    thumb_made: bool = False        # a thumbnail was attempted (thumb None: the file gave no picture)
+    thumb_edits: str | None = None  # the edits it was made with
+
+    def discard(self) -> None:
+        if self.thumb is not None:
+            _unlink(self.thumb)
+            self.thumb = None
+
+
+def _new_thumb_dir(cfg: Config) -> Path:
+    return cfg.thumb_dir / "new"
+
+
+def _thumb_into(cfg: Config, p: Prepared, edits: str | None) -> None:
+    """Make the file's thumbnail in a temporary file (it gets its real name once the item has an id)."""
+    p.discard()
+    folder = _new_thumb_dir(cfg)
+    folder.mkdir(parents=True, exist_ok=True)
+    tmp = folder / f"{uuid.uuid4().hex}.jpg"
+    if p.kind == "photo":
+        ok = media.make_thumb(p.full, tmp, media.parse_edits(edits))
+    else:
+        ok = media.make_video_thumb(p.full, tmp)
+    if ok:
+        p.thumb = tmp
+    else:
+        _unlink(tmp)
+    p.thumb_made, p.thumb_edits = True, edits
+
+
+def prepare(cfg: Config, rel: str, full: Path, digest: str | None = None, hint: Hint | None = None,
+            maybe_moved=frozenset()) -> Prepared:
+    """Read everything a file's row needs: checksum, date, size, position, sidecar and thumbnail.
+
+    This is the slow part of indexing. It never touches the database, so it can run while nothing is
+    locked, and on any thread. `hint` is what the database is believed to hold for this path: a file whose
+    content matches it needs no more than its checksum (and a thumbnail if that is gone). A new file whose
+    checksum is in `maybe_moved` is probably a known photo at a new place, and is not read further either.
+    store() says so (Incomplete) if it turns out to need more.
+    """
+    st = full.stat()        # before the content is read: a file changed meanwhile is seen as changed next time
     kind = media.kind_of(full)
     if kind is None:
         raise ValueError(f"unsupported file type: {full.name}")
-    digest = digest or sha1_of(full)
+    p = Prepared(rel, full, st.st_size, st.st_mtime_ns, kind, digest or sha1_of(full))
+    if hint is not None and hint.sha1 == p.digest:
+        if not hint.thumb_ok:
+            _thumb_into(cfg, p, hint.edits)
+        return p
+    if hint is None and p.digest in maybe_moved:
+        return p
+    p.info = media.read_photo_info(full) if kind == "photo" else media.read_video_info(full)
+    try:
+        p.side = xmp.read_for(full)    # a sidecar from another program (or from Snapshots, before a move)
+    except Exception:
+        p.side = None
+    if kind == "photo":
+        p.motion = media.find_motion_video(full)
+        p.projection = media.read_projection(full)
+    _thumb_into(cfg, p, hint.edits if hint is not None else None)
+    p.complete = True
+    return p
 
+
+def _place_thumb(cfg: Config, conn, asset_id: int, p: Prepared, edits: str | None) -> None:
+    """Give an item its thumbnail: the one prepare() made if it fits, else a new one (rare)."""
+    if not (p.thumb_made and p.thumb_edits == edits):
+        _thumb_into(cfg, p, edits)
+    ok = p.thumb is not None
+    if ok:
+        try:
+            os.replace(p.thumb, cfg.thumb_path(asset_id))
+            p.thumb = None
+        except OSError:
+            ok = False
+            p.discard()
+    conn.execute("UPDATE assets SET has_thumb = ? WHERE id = ?", (1 if ok else 0, asset_id))
+
+
+def store(cfg: Config, conn, p: Prepared) -> tuple[int, str]:
+    """Insert or update the row for a file prepare() has read. Returns (asset id, what happened):
+    "added", "updated" or "restored" (a set-aside item whose file is back).
+
+    Only quick database work happens here, so the database is locked for a moment, not for as long as it
+    takes to read a photo. Raises Incomplete if the file's details are needed and were not read.
+    """
+    rel, full, digest = p.rel, p.full, p.digest
     prev = conn.execute(
         "SELECT id, sha1, has_thumb, taken_at, taken_at_file, position_edited, lat, lon, edits, missing_since"
         " FROM assets WHERE path = ?", (rel,)).fetchone()
@@ -157,24 +264,26 @@ def index_file(cfg: Config, conn, rel: str, full: Path, digest: str | None = Non
     if prev is not None and prev["sha1"] == digest:
         # Same content, only the timestamp moved (or the file is back): keep everything already known.
         conn.execute("UPDATE assets SET size = ?, mtime_ns = ?, missing_since = NULL WHERE id = ?",
-                     (st.st_size, st.st_mtime_ns, prev["id"]))
+                     (p.size, p.mtime_ns, prev["id"]))
         if not cfg.thumb_path(prev["id"]).exists():
-            _make_thumb(cfg, conn, prev["id"], kind, full, prev["edits"])
-        return prev["id"]
+            _place_thumb(cfg, conn, prev["id"], p, prev["edits"])
+        return prev["id"], "restored" if prev["missing_since"] else "updated"
     if prev is None:
         back = set_aside_copy(conn, digest)
         if back is not None:
-            # A file that went missing is here again under another name (uploaded again, say).
-            put_back(cfg, conn, back, rel, full, st.st_size, st.st_mtime_ns)
-            return back["id"]
+            # A file that went missing is here again under another name (uploaded again, say):
+            # it carries on with everything it had.
+            conn.execute(
+                "UPDATE assets SET path = ?, filename = ?, size = ?, mtime_ns = ?, missing_since = NULL"
+                " WHERE id = ?", (rel, full.name, p.size, p.mtime_ns, back["id"]))
+            if not cfg.thumb_path(back["id"]).exists():
+                _place_thumb(cfg, conn, back["id"], p, back["edits"])
+            return back["id"], "restored"
+    if not p.complete:
+        raise Incomplete(rel)
 
-    info = media.read_photo_info(full) if kind == "photo" else media.read_video_info(full)
-    side = None
-    if prev is None:
-        try:
-            side = xmp.read_for(full)    # a sidecar from another program (or from Snapshots, before a move)
-        except Exception:
-            side = None
+    info, kind = p.info, p.kind
+    side = p.side if prev is None else None
     lat, lon = info["lat"], info["lon"]
     if lat is None and side and side.get("lat") is not None:
         lat, lon = side["lat"], side["lon"]
@@ -187,7 +296,7 @@ def index_file(cfg: Config, conn, rel: str, full: Path, digest: str | None = Non
     if taken is None:
         taken = media.date_from_filename(full.name)
     if taken is None:
-        taken, guess = datetime.fromtimestamp(st.st_mtime), "file"
+        taken, guess = datetime.fromtimestamp(p.mtime_ns / 1e9), "file"
     taken = taken.isoformat(timespec="seconds")
     taken_file = None
     if prev is not None and prev["taken_at_file"]:
@@ -196,10 +305,9 @@ def index_file(cfg: Config, conn, rel: str, full: Path, digest: str | None = Non
     if prev is not None and prev["position_edited"]:
         lat, lon = prev["lat"], prev["lon"]
     has_position = lat is not None
-    motion = media.find_motion_video(full) if kind == "photo" else None
-    projection = media.read_projection(full) if kind == "photo" else None
+    motion, projection = p.motion, p.projection
     values = (
-        full.name, kind, st.st_size, st.st_mtime_ns, digest, taken,
+        full.name, kind, p.size, p.mtime_ns, digest, taken,
         info["width"], info["height"], info["camera"], lat, lon,
         0 if has_position else 1,           # geo_done: nothing to look up without a position
         0 if kind == "photo" else 1,        # faces_done: faces are found in photos only
@@ -258,8 +366,29 @@ def index_file(cfg: Config, conn, rel: str, full: Path, digest: str | None = Non
         linking.add_keywords(conn, asset_id, info["keywords"])
     if side:
         xmp.apply_on_index(conn, asset_id, side)
-    _make_thumb(cfg, conn, asset_id, kind, full, prev["edits"] if prev is not None else None)
-    return asset_id
+    _place_thumb(cfg, conn, asset_id, p, prev["edits"] if prev is not None else None)
+    return asset_id, "added" if prev is None else "updated"
+
+
+def index_file(cfg: Config, conn, rel: str, full: Path, digest: str | None = None) -> int:
+    """Read one file and insert or update its row. Returns the asset id.
+
+    The file is read, and its thumbnail made, before anything is written (see prepare and store), so a
+    caller that has written nothing yet locks the database only for a moment.
+    """
+    row = conn.execute("SELECT id, sha1, edits FROM assets WHERE path = ?", (rel,)).fetchone()
+    hint = Hint(row["sha1"], row["edits"], cfg.thumb_path(row["id"]).exists()) if row is not None else None
+    p = prepare(cfg, rel, full, digest, hint)
+    try:
+        try:
+            return store(cfg, conn, p)[0]
+        except Incomplete:      # the row changed between the look above and the write (very rare)
+            digest = p.digest
+            p.discard()
+            p = prepare(cfg, rel, full, digest)
+            return store(cfg, conn, p)[0]
+    finally:
+        p.discard()
 
 
 def set_aside_copy(conn, digest: str):
@@ -273,21 +402,24 @@ def set_aside_copy(conn, digest: str):
         " AND trashed_at IS NULL AND locked_by IS NULL ORDER BY id LIMIT 1", (digest,)).fetchone()
 
 
-def put_back(cfg: Config, conn, row, rel: str, full: Path, size: int, mtime_ns: int) -> None:
-    """A set-aside item's file is here again (at `rel`): it carries on with everything it had."""
-    conn.execute(
-        "UPDATE assets SET path = ?, filename = ?, size = ?, mtime_ns = ?, missing_since = NULL WHERE id = ?",
-        (rel, full.name, size, mtime_ns, row["id"]))
-    if not cfg.thumb_path(row["id"]).exists():
-        _make_thumb(cfg, conn, row["id"], row["kind"], full, row["edits"])
-
-
 def _make_thumb(cfg: Config, conn, asset_id: int, kind: str, full: Path, edits: str | None = None) -> None:
     if kind == "photo":
         ok = media.make_thumb(full, cfg.thumb_path(asset_id), media.parse_edits(edits))
     else:
         ok = media.make_video_thumb(full, cfg.thumb_path(asset_id))
     conn.execute("UPDATE assets SET has_thumb = ? WHERE id = ?", (1 if ok else 0, asset_id))
+
+
+@dataclass
+class _Job:
+    """One file a scan has work for."""
+    number: int                 # its place in the list of files found (for the progress count)
+    rel: str
+    full: Path
+    row: object | None          # what the database knew about this path before the folders were walked
+    mode: str                   # "index": read it and store it; "thumb": a video's thumbnail, tried again;
+                                # "back": a set-aside item whose file is here again, unchanged
+    thumb_ok: bool = False
 
 
 class Scanner:
@@ -318,6 +450,40 @@ class Scanner:
             state.phase = "idle"
             state.finished_at = now()
         return state
+
+    def _clear_old_thumbs(self) -> None:
+        """Thumbnails that never got their name (Snapshots was stopped mid-scan): remove those over an hour old."""
+        try:
+            limit = time.time() - 3600
+            for entry in os.scandir(_new_thumb_dir(self.cfg)):
+                if entry.is_file() and entry.stat().st_mtime < limit:
+                    _unlink(Path(entry.path))
+        except OSError:
+            pass
+
+    def _read(self, job: _Job, maybe_moved):
+        """The slow, database-free part of one job. Returns a Prepared (None for "back"), or the exception."""
+        try:
+            if job.mode == "back":
+                return None
+            if job.mode == "thumb":
+                st = job.full.stat()
+                p = Prepared(job.rel, job.full, st.st_size, st.st_mtime_ns, "video", None)
+                try:
+                    _thumb_into(self.cfg, p, None)
+                except Exception as exc:
+                    log.info("no thumbnail for %s: %s", job.full, exc)
+                return p
+            row = job.row
+            hint = Hint(row["sha1"], row["edits"], job.thumb_ok) if row is not None else None
+            return prepare(self.cfg, job.rel, job.full, None, hint, maybe_moved)
+        except Exception as exc:
+            return exc
+
+    def _read_all(self, jobs, maybe_moved):
+        """Yield (job, what was read) for each job, in order."""
+        for job in jobs:
+            yield job, self._read(job, maybe_moved)
 
     def _scan(self, state: ScanState, remove_missing: bool = False) -> None:
         cfg = self.cfg
@@ -375,72 +541,105 @@ class Scanner:
                 candidates.sort(key=lambda r: r["links"])  # pop() takes the best
             moved_away: set[str] = set()
 
-            pending = 0
             added_ids: list[int] = []
-            for rel, full, size, mtime_ns in found:
-                state.done += 1
-                if _held(full):
-                    continue
-                row = existing.get(rel)
-                unchanged = row is not None and row["size"] == size and row["mtime_ns"] == mtime_ns
-                was_set_aside = row is not None and bool(row["missing_since"])
-                if was_set_aside and unchanged:
+            maybe_moved = frozenset(missing_by_sha)
+            self._clear_old_thumbs()
+
+            def jobs():
+                """The files that need something done, in the order they were found."""
+                for number, (rel, full, size, mtime_ns) in enumerate(found, 1):
+                    if _held(full):
+                        continue
+                    row = existing.get(rel)
+                    if row is None:
+                        yield _Job(number, rel, full, None, "index")
+                        continue
+                    unchanged = row["size"] == size and row["mtime_ns"] == mtime_ns
+                    if unchanged and row["kind"] == "video" and not row["has_thumb"] and row["id"] not in _video_retried:
+                        # Videos left without a picture (no ffmpeg then): try once per run, now OpenCV can help.
+                        _video_retried.add(row["id"])
+                        yield _Job(number, rel, full, row, "thumb")
+                        continue
+                    thumb_ok = cfg.thumb_path(row["id"]).exists()
+                    if unchanged and (not row["has_thumb"] or thumb_ok):
+                        if row["missing_since"]:
+                            yield _Job(number, rel, full, row, "back")
+                        continue
+                    yield _Job(number, rel, full, row, "index", thumb_ok)
+
+            def write(job: _Job, p: Prepared | None) -> None:
+                """Store one file's result. Quick: the slow reading was done before."""
+                row = job.row
+                if job.mode == "back":
                     # Set aside by an earlier scan, and here again: it carries on with everything it had.
                     conn.execute("UPDATE assets SET missing_since = NULL WHERE id = ?", (row["id"],))
                     state.restored += 1
-                    pending += 1
-                if unchanged and row["kind"] == "video" and not row["has_thumb"] and row["id"] not in _video_retried:
-                    # Videos left without a picture (no ffmpeg then): try once per run, now OpenCV can help.
-                    _video_retried.add(row["id"])
-                    try:
-                        _make_thumb(cfg, conn, row["id"], "video", full)
-                    except Exception as exc:
-                        log.info("no thumbnail for %s: %s", full, exc)
-                    continue
-                if unchanged and (not row["has_thumb"] or cfg.thumb_path(row["id"]).exists()):
-                    continue
+                    return
+                if job.mode == "thumb":
+                    ok = p.thumb is not None
+                    if ok:
+                        try:
+                            os.replace(p.thumb, cfg.thumb_path(row["id"]))
+                            p.thumb = None
+                        except OSError:
+                            ok = False
+                    conn.execute("UPDATE assets SET has_thumb = ?, missing_since = NULL WHERE id = ?",
+                                 (1 if ok else 0, row["id"]))
+                    if row["missing_since"]:
+                        state.restored += 1
+                    return
+                if row is None and missing_by_sha:
+                    candidates = missing_by_sha.get(p.digest)
+                    taken = conn.execute("SELECT 1 FROM assets WHERE path = ?", (job.rel,)).fetchone()
+                    if candidates and not taken:
+                        old = candidates.pop()
+                        conn.execute(
+                            "UPDATE assets SET path = ?, filename = ?, size = ?, mtime_ns = ?,"
+                            " missing_since = NULL WHERE id = ?",
+                            (job.rel, job.full.name, p.size, p.mtime_ns, old["id"]),
+                        )
+                        moved_away.add(old["path"])
+                        if old["missing_since"]:
+                            state.restored += 1
+                        else:
+                            state.moved += 1
+                        return
                 try:
-                    digest = None
-                    if was_set_aside:
-                        digest = sha1_of(full)
-                        if digest != row["sha1"]:
-                            # A different file now has the missing one's name: a new item (see index_file).
-                            delete_asset_row(cfg, conn, row["id"])
-                            row, was_set_aside = None, False
-                    if row is None and missing_by_sha:
-                        digest = digest or sha1_of(full)
-                        candidates = missing_by_sha.get(digest)
-                        taken = conn.execute("SELECT 1 FROM assets WHERE path = ?", (rel,)).fetchone()
-                        if candidates and not taken:
-                            old = candidates.pop()
-                            conn.execute(
-                                "UPDATE assets SET path = ?, filename = ?, size = ?, mtime_ns = ?,"
-                                " missing_since = NULL WHERE id = ?",
-                                (rel, full.name, size, mtime_ns, old["id"]),
-                            )
-                            moved_away.add(old["path"])
-                            if old["missing_since"]:
-                                state.restored += 1
-                            else:
-                                state.moved += 1
-                            pending += 1
-                            continue
-                    new_id = index_file(cfg, conn, rel, full, digest)
-                    if row is None or new_id != row["id"]:
-                        state.added += 1
-                        added_ids.append(new_id)
-                    elif was_set_aside:
-                        state.restored += 1     # back, saved again since (index_file kept what it had)
-                    else:
-                        state.updated += 1
+                    asset_id, what = store(cfg, conn, p)
+                except Incomplete:
+                    # It looked like a photo that had moved (or one already known), and is not: read the
+                    # rest of it now. Nothing stays locked while that happens.
+                    conn.commit()
+                    again = prepare(cfg, job.rel, job.full, p.digest)
+                    try:
+                        asset_id, what = store(cfg, conn, again)
+                    finally:
+                        again.discard()
+                if what == "added":
+                    state.added += 1
+                    added_ids.append(asset_id)
+                elif what == "restored":
+                    state.restored += 1
+                else:
+                    state.updated += 1
+
+            # Each file is read (checksum, date, thumbnail) with nothing written and nothing locked.
+            # Its row is then stored and committed at once, before the next file is read, so the rest of
+            # Snapshots (favourites, uploads, logging in) never waits for a photo to be read.
+            for job, result in self._read_all(jobs(), maybe_moved):
+                state.done = job.number
+                try:
+                    if isinstance(result, Exception):
+                        raise result
+                    write(job, result)
                 except Exception as exc:
                     state.errors += 1
-                    log.warning("could not index %s: %s", full, exc)
-                pending += 1
-                if pending >= _COMMIT_EVERY:
-                    conn.commit()
-                    pending = 0
-            conn.commit()
+                    log.warning("could not index %s: %s", job.full, exc)
+                finally:
+                    if isinstance(result, Prepared):
+                        result.discard()
+                conn.commit()
+            state.done = len(found)
 
             state.phase = "cleanup"
             gone = [p for p in existing if p not in seen and p not in moved_away]
