@@ -26,6 +26,7 @@ class Config:
     scan_interval_minutes: int = 15        # 0 turns automatic rescans off
     faces: bool = True                     # find and group faces
     places: bool = True                    # turn GPS positions into place names
+    scan_threads: int = 0                  # threads that read files during a scan (0: by the number of CPU cores)
     face_threads: int = 2                  # CPU threads face recognition may use
     face_match_threshold: float = 0.50     # higher = stricter grouping (more, smaller groups)
     min_faces_per_person: int = 3          # unnamed groups smaller than this are not listed
@@ -143,7 +144,7 @@ class Config:
 # Settings that may appear in config.toml, with the type each must have.
 _FILE_KEYS = {
     "host": str, "port": int, "index_on_start": bool, "scan_interval_minutes": int,
-    "faces": bool, "places": bool, "face_threads": int, "face_match_threshold": float,
+    "faces": bool, "places": bool, "face_threads": int, "scan_threads": int, "face_match_threshold": float,
     "min_faces_per_person": int, "face_merge_threshold": float, "face_suggest_threshold": float,
     "photo_checks": bool, "duplicate_distance": int, "burst_seconds": int, "burst_distance": int,
     "lookalike_similarity": float,

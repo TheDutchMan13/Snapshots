@@ -181,6 +181,7 @@ Copy `config.example.toml` to `config.toml` and edit it, or use command-line opt
 | | `upload_template` | `Uploads/{year}/{month}` | Where uploads are filed; can use `{year}`, `{month}`, `{monthname}`, `{day}`, `{date}`, `{camera}`, `{type}`, `{user}` |
 | | `check_updates` | `true` | Now and then (twice a day) ask GitHub for the newest version number and show a note in the menu to administrators when a newer Snapshots is out. Nothing about you or your photos is sent. Also a switch in Settings |
 | | `max_upload_gb` | `20` | The most one upload can send at once. Uploads are also refused when they would leave less than 1 GB free on the library's drive or the temporary folder |
+| | `scan_threads` | `0` | Threads that read files during a scan (checksums, dates, thumbnails); `0` picks by the CPU: one fewer than its cores, from 2 to 6 |
 | | `keep_missing_days` | `30` | A file that is gone from the library keeps its albums, favourites and people this many days, in case it comes back; `0` forgets at once |
 | | `health_check_days` | `0` | Check every file for damage this often; `0` only when asked (also set in Clean up, Library health) |
 | | `review_seconds` | `4` | Year in review videos: seconds each photo is shown |

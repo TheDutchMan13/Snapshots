@@ -713,6 +713,50 @@ def load_oriented(path: Path, max_side: int) -> Image.Image:
         return _to_rgb(img)
 
 
+def load_ahead(paths, max_side: int, threads: int = 2):
+    """Yield each picture as load_oriented() gives it (or the exception it raised), in order.
+
+    The next few are decoded on other threads while the caller works on the one it has: finding faces or
+    reading text in a photo takes about as long as decoding it, so the two overlap instead of taking turns.
+    """
+    from collections import deque
+    from concurrent.futures import ThreadPoolExecutor
+
+    paths = list(paths)
+    if threads <= 1 or len(paths) <= 1:
+        for path in paths:
+            try:
+                yield load_oriented(path, max_side)
+            except Exception as exc:
+                yield exc
+        return
+    ahead: deque = deque()
+    rest = iter(paths)
+    pool = ThreadPoolExecutor(max_workers=threads, thread_name_prefix="decode")
+
+    def fill() -> None:
+        while len(ahead) <= threads:          # each waiting picture is held in memory: keep it to a few
+            path = next(rest, None)
+            if path is None:
+                return
+            ahead.append(pool.submit(load_oriented, path, max_side))
+
+    try:
+        fill()
+        while ahead:
+            future = ahead.popleft()
+            try:
+                picture = future.result()
+            except Exception as exc:
+                picture = exc
+            fill()
+            yield picture
+    finally:
+        for future in ahead:
+            future.cancel()
+        pool.shutdown(wait=True)
+
+
 def _to_rgb(img: Image.Image) -> Image.Image:
     if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
         rgba = img.convert("RGBA")

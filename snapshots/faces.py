@@ -52,6 +52,7 @@ MODELS = {
 }
 
 DETECT_MAX_SIDE = 1920   # photos are shrunk to this before looking for faces
+DECODE_THREADS = 2       # photos are decoded ahead on this many threads while faces are looked for
 DETECT_SCORE = 0.9       # how sure the detector must be that it found a face
 MIN_FACE_PX = 40         # smaller faces are too blurry to recognise reliably (measured on LFW)
 FACE_THUMB_PX = 160
@@ -203,9 +204,12 @@ class FaceEngine:
 
     def analyze(self, path: Path) -> list[dict]:
         """Faces in one photo: position (as fractions), score, embedding and a small picture."""
+        return self.analyze_image(media.load_oriented(path, DETECT_MAX_SIDE))
+
+    def analyze_image(self, img) -> list[dict]:
+        """The same, for a picture already loaded (the right way up, RGB, at most DETECT_MAX_SIDE)."""
         import numpy as np
 
-        img = media.load_oriented(path, DETECT_MAX_SIDE)
         w, h = img.size
         if min(w, h) < MIN_FACE_PX:
             return []
@@ -835,14 +839,19 @@ class FacesJob:
             return False
         self.state["running"] = True
 
-        for row in rows:
+        # The photos are decoded a few ahead, on other threads, while faces are looked for in the current one.
+        paths = [libraries.full_path(self.cfg, row["path"]) or root / "-missing-" for row in rows]
+        pictures = media.load_ahead(paths, DETECT_MAX_SIDE, DECODE_THREADS)
+        for row, picture in zip(rows, pictures):
             if should_stop():
                 break
             if self.clusterer is None or self._clusterer_version != self.people_version:
                 self._clusterer_version = self.people_version
                 self.clusterer = Clusterer(conn, self.cfg.face_match_threshold)
             try:
-                found = self.engine.analyze(libraries.full_path(self.cfg, row["path"]) or root / "-missing-")
+                if isinstance(picture, Exception):
+                    raise picture
+                found = self.engine.analyze_image(picture)
             except Exception as exc:  # unreadable or vanished: don't try it again and again
                 log.info("no faces read from %s: %s", row["path"], exc)
                 found = []
@@ -852,6 +861,7 @@ class FacesJob:
             except sqlite3.IntegrityError:
                 conn.rollback()  # the photo was removed meanwhile
                 self.clusterer = None
+        pictures.close()        # stopped early: the photos decoded ahead are dropped
         self.state["pending"] = self.pending(conn)
         return True
 

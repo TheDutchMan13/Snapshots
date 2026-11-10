@@ -31,6 +31,7 @@ FILES = {
 DOWNLOAD_MB = 11
 
 LOAD_SIDE = 1600        # photos are read at this size; lines of text are cut out of it
+DECODE_THREADS = 2      # photos are decoded ahead on this many threads while text is read
 DETECT_SIDE = 960       # ... and shrunk to this to look for text (PaddleOCR's default)
 DETECT_PIXEL = 0.3      # a pixel is "text" above this probability
 DETECT_BOX = 0.6        # a line is kept if its average probability is at least this
@@ -249,13 +250,20 @@ class OcrJob:
                 self.retry_at = now + 3600
                 return False
 
+        # The photos are decoded a few ahead, on other threads, while text is read in the current one.
+        pictures = media.load_ahead(
+            [libraries.full_path(self.cfg, row["path"]) or root / "-missing-" for row in rows if row["kind"] == "photo"],
+            LOAD_SIDE, DECODE_THREADS)
         for row in rows:
             if should_stop():
                 break
             text = None
             if row["kind"] == "photo":
                 try:
-                    text = self.engine.text_in(media.load_oriented(libraries.full_path(self.cfg, row["path"]) or root / "-missing-", LOAD_SIDE)) or None
+                    picture = next(pictures)
+                    if isinstance(picture, Exception):
+                        raise picture
+                    text = self.engine.text_in(picture) or None
                 except Exception as exc:
                     log.info("no text read from %s: %s", row["path"], exc)
             try:
@@ -263,6 +271,7 @@ class OcrJob:
                 conn.commit()
             except sqlite3.Error:
                 conn.rollback()
+        pictures.close()        # stopped early: the photos decoded ahead are dropped
         self.state["pending"] = self.pending(conn)
         return True
 

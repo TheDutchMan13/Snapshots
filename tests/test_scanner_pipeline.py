@@ -21,7 +21,7 @@ def photos(root, n, start=0):
 def test_nothing_is_locked_while_a_file_is_read(tmp_path, monkeypatch):
     root = tmp_path / "Photos"
     photos(root, 8)
-    c, cfg = new_client(tmp_path, root, index_on_start=False)
+    c, cfg = new_client(tmp_path, root, index_on_start=False, scan_threads=1)   # one at a time: read, store, read
     with c:
         setup_admin(c)
         real = scanner_module.prepare
@@ -166,3 +166,133 @@ def test_scanner_alone_gives_the_same_library(tmp_path):
     conn.close()
     assert sorted(r["path"] for r in rows) == sorted(f"p{i}.jpg" for i in range(12))
     assert all(r["has_thumb"] for r in rows)
+
+
+def test_with_several_threads_a_writer_never_waits_for_a_file_to_be_read(tmp_path, monkeypatch):
+    import threading
+    import time
+
+    root = tmp_path / "Photos"
+    photos(root, 16)
+    c, cfg = new_client(tmp_path, root, index_on_start=False, scan_threads=4)
+    with c:
+        setup_admin(c)
+        real = scanner_module.prepare
+        waits, failed, names = [], [], set()
+
+        def prepare(*a, **kw):
+            names.add(threading.current_thread().name)
+            time.sleep(0.05)                    # a file that takes a while to read
+            other = sqlite3.connect(str(cfg.db_path), timeout=10)
+            t = time.monotonic()
+            try:
+                other.execute("BEGIN IMMEDIATE")
+                other.execute("COMMIT")
+                waits.append(time.monotonic() - t)
+            except sqlite3.OperationalError:
+                failed.append(a[1])
+            finally:
+                other.close()
+            return real(*a, **kw)
+
+        monkeypatch.setattr(scanner_module, "prepare", prepare)
+        s = rescan(c)
+        assert (s["added"], s["errors"], s["done"]) == (16, 0, 16)
+        assert not failed and len(waits) == 16
+        # rows that are ready are stored together for a moment (_COMMIT_SECONDS): a writer waits about
+        # that long at most, never for the reading of a file
+        assert max(waits) < 2
+        assert len(names) > 1 and all(n.startswith("scan") for n in names)
+        ids = ids_by_name(c)
+        assert len(ids) == 16 and all(cfg.thumb_path(i).exists() for i in ids.values())
+        assert list((cfg.thumb_dir / "new").iterdir()) == []
+
+
+def test_files_are_stored_in_the_order_they_were_found_whatever_the_threads(tmp_path):
+    from snapshots.config import Config
+
+    root = tmp_path / "Photos"
+    photos(root, 30)
+    orders = []
+    for threads in (1, 5):
+        cfg = Config(library_path=root, data_dir=tmp_path / f"data{threads}", faces=False, places=False,
+                     scan_threads=threads)
+        cfg.ensure_dirs()
+        db.init(cfg.db_path)
+        s = Scanner(cfg).run()
+        assert (s.added, s.errors) == (30, 0)
+        conn = db.connect(cfg.db_path)
+        orders.append([tuple(r) for r in conn.execute(
+            "SELECT path, sha1, taken_at, width, height, has_thumb FROM assets ORDER BY id")])
+        conn.close()
+    assert orders[0] == orders[1]
+
+
+def test_stopping_early_leaves_nothing_that_was_read_ahead(tmp_path):
+    from snapshots.config import Config
+    from snapshots.scanner import _Job
+
+    root = tmp_path / "Photos"
+    photos(root, 12)
+    cfg = Config(library_path=root, data_dir=tmp_path / "data", scan_threads=3)
+    cfg.ensure_dirs()
+    db.init(cfg.db_path)
+    jobs = [_Job(i + 1, f"p{i}.jpg", root / f"p{i}.jpg", None, "index") for i in range(12)]
+    reader = Scanner(cfg)._read_all(iter(jobs), frozenset())
+    job, first, _ = next(reader)
+    assert job.number == 1 and first.thumb.exists()
+    first.discard()
+    reader.close()                              # the scan stops here
+    assert list((cfg.thumb_dir / "new").iterdir()) == []
+
+
+def test_scan_threads_setting(monkeypatch):
+    import os
+
+    from snapshots.config import Config
+    from snapshots.scanner import MAX_AUTO_THREADS, scan_threads
+
+    assert scan_threads(Config(scan_threads=3)) == 3
+    for cores, expected in ((1, 1), (2, 2), (4, 3), (8, MAX_AUTO_THREADS), (32, MAX_AUTO_THREADS), (None, 1)):
+        monkeypatch.setattr(os, "cpu_count", lambda cores=cores: cores)
+        assert scan_threads(Config()) == expected
+
+
+def test_a_scan_cut_short_by_closing_tidies_nothing_away_and_the_next_one_finishes(tmp_path, monkeypatch):
+    from snapshots.config import Config
+
+    root = tmp_path / "Photos"
+    photos(root, 20)
+    cfg = Config(library_path=root, data_dir=tmp_path / "data", faces=False, places=False, scan_threads=2)
+    cfg.ensure_dirs()
+    db.init(cfg.db_path)
+    scanner = Scanner(cfg)
+    assert scanner.run().added == 20
+
+    # 5 photos are deleted and 10 are new; Snapshots is closed while the scan is at work
+    for i in range(5):
+        (root / f"p{i}.jpg").unlink()
+    photos(root, 10, start=100)
+    real = scanner_module.prepare
+    seen = []
+
+    def prepare(*a, **kw):
+        seen.append(a[1])
+        if len(seen) == 3:
+            scanner.stopping.set()
+        return real(*a, **kw)
+
+    monkeypatch.setattr(scanner_module, "prepare", prepare)
+    s = scanner.run()
+    assert s.added < 10 and (s.removed, s.forgotten, s.errors) == (0, 0, 0)
+    conn = db.connect(cfg.db_path)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM assets WHERE missing_since IS NOT NULL").fetchone()[0] == 0
+        assert list((cfg.thumb_dir / "new").iterdir()) == []
+
+        scanner.stopping.clear()                # started again
+        s = scanner.run()
+        assert s.removed == 5 and s.errors == 0
+        assert conn.execute("SELECT COUNT(*) FROM assets WHERE missing_since IS NULL").fetchone()[0] == 25
+    finally:
+        conn.close()

@@ -80,6 +80,7 @@ class Worker:
         if self._thread and self._thread.is_alive():
             return
         self._stopping = False
+        self.scanner.stopping.clear()
         if self.cfg.library_path and self.cfg.index_on_start:
             self.request_scan()
         else:
@@ -89,6 +90,7 @@ class Worker:
 
     def stop(self, timeout: float = 10) -> None:
         self._stopping = True
+        self.scanner.stopping.set()
         self.offsite.stop()
         self.health.stop()
         self._wake.set()

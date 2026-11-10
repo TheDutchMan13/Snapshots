@@ -17,6 +17,8 @@ import os
 import threading
 import time
 import uuid
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -28,6 +30,9 @@ log = logging.getLogger("snapshots.scanner")
 
 _SKIP_DIRS = {"$recycle.bin", "system volume information", "@eadir", "#recycle", "lost+found"}
 _video_retried: set[int] = set()
+_COMMIT_EVERY = 50          # rows stored together when their files are already read ...
+_COMMIT_SECONDS = 0.1       # ... and for no longer than this
+MAX_AUTO_THREADS = 6
 MASS_REMOVAL_MIN = 20  # below this many, missing files are always tidied away
 
 
@@ -73,6 +78,16 @@ def _held(path: Path) -> bool:
 
 def now() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+def scan_threads(cfg: Config) -> int:
+    """How many threads read files during a scan: the scan_threads setting, or (0) one fewer than the
+    CPU has cores, between 2 and MAX_AUTO_THREADS (a single-core machine gets 1)."""
+    wanted = int(getattr(cfg, "scan_threads", 0) or 0)
+    if wanted > 0:
+        return min(wanted, 32)
+    cores = os.cpu_count() or 1
+    return 1 if cores <= 1 else max(2, min(MAX_AUTO_THREADS, cores - 1))
 
 
 def sha1_of(path: Path) -> str:
@@ -428,6 +443,7 @@ class Scanner:
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.state = ScanState()
+        self.stopping = threading.Event()   # set when Snapshots is closing: a scan under way ends early
 
     def snapshot(self) -> dict:
         return asdict(self.state)
@@ -481,9 +497,47 @@ class Scanner:
             return exc
 
     def _read_all(self, jobs, maybe_moved):
-        """Yield (job, what was read) for each job, in order."""
-        for job in jobs:
-            yield job, self._read(job, maybe_moved)
+        """Yield (job, what was read, whether the next one is ready too) for each job, in order.
+
+        Files are read on several threads (scan_threads), a few ahead of the one being stored. Reading is
+        mostly decoding pictures and checksums, which Python does outside its lock, so the threads really
+        run side by side. Only reading happens there: every database write stays on the calling thread.
+        """
+        threads = scan_threads(self.cfg)
+        if threads <= 1:
+            for job in jobs:
+                yield job, self._read(job, maybe_moved), False
+            return
+        ahead: deque = deque()      # (job, future or None), in order
+        jobs = iter(jobs)
+        pool = ThreadPoolExecutor(max_workers=threads, thread_name_prefix="scan")
+
+        def fill() -> None:
+            while len(ahead) < threads * 3:
+                job = next(jobs, None)
+                if job is None:
+                    return
+                ahead.append((job, None if job.mode == "back" else pool.submit(self._read, job, maybe_moved)))
+
+        try:
+            fill()
+            while ahead:
+                job, future = ahead.popleft()
+                result = future.result() if future is not None else None
+                fill()
+                ready = bool(ahead) and (ahead[0][1] is None or ahead[0][1].done())
+                yield job, result, ready
+        finally:
+            # Stopped early (an error, or Snapshots closing): nothing that was read ahead is left behind.
+            for _, future in ahead:
+                if future is not None:
+                    future.cancel()
+            pool.shutdown(wait=True)
+            for _, future in ahead:
+                if future is not None and not future.cancelled():
+                    left = future.result()
+                    if isinstance(left, Prepared):
+                        left.discard()
 
     def _scan(self, state: ScanState, remove_missing: bool = False) -> None:
         cfg = self.cfg
@@ -624,9 +678,16 @@ class Scanner:
                     state.updated += 1
 
             # Each file is read (checksum, date, thumbnail) with nothing written and nothing locked.
-            # Its row is then stored and committed at once, before the next file is read, so the rest of
-            # Snapshots (favourites, uploads, logging in) never waits for a photo to be read.
-            for job, result in self._read_all(jobs(), maybe_moved):
+            # Its row is then stored, and committed before the scan next has to wait for a file to be
+            # read, so the rest of Snapshots (favourites, uploads, logging in) never waits for that.
+            # Rows whose files are already read are stored together, for a moment at most.
+            pending, since = 0, time.monotonic()
+            reader = self._read_all(jobs(), maybe_moved)
+            for job, result, more_ready in reader:
+                if self.stopping.is_set():
+                    if isinstance(result, Prepared):
+                        result.discard()
+                    break
                 state.done = job.number
                 try:
                     if isinstance(result, Exception):
@@ -638,7 +699,16 @@ class Scanner:
                 finally:
                     if isinstance(result, Prepared):
                         result.discard()
-                conn.commit()
+                pending += 1
+                if not more_ready or pending >= _COMMIT_EVERY or time.monotonic() - since > _COMMIT_SECONDS:
+                    conn.commit()
+                    pending, since = 0, time.monotonic()
+            conn.commit()
+            reader.close()
+            if self.stopping.is_set():
+                # Snapshots is closing. What was stored so far is kept; nothing is tidied away on
+                # half a scan, and the next scan carries on from here.
+                return
             state.done = len(found)
 
             state.phase = "cleanup"
