@@ -1,4 +1,4 @@
 -r requirements.txt
-pytest>=8
-httpx>=0.27
-pytest-rerunfailures>=14
+pytest>=8,<10
+httpx>=0.27,<1
+pytest-rerunfailures>=14,<17
