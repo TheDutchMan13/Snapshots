@@ -235,13 +235,14 @@ def run(manager, cfg, url: str, key: str, user_id: int, copy_missing: bool, dry_
     into = root / "From Immich" if root else None
     with db.session(cfg.db_path) as conn:
         applier = imports.Applier(conn, user_id, "immich")
+        finder = imports.Finder(cfg)
         tick = imports.progress_every()
         for n, (aid, asset) in enumerate(assets.items()):
             check()
             if tick():
                 manager.update(done=n)
             sha1 = sha1_hex(asset.get("checksum"))
-            ids = imports.find_assets(conn, sha1) if sha1 else []
+            ids = finder.find(conn, sha1) if sha1 else []
             if ids is None:     # only in someone's locked folder: left alone
                 summary["matched"] += 1
                 continue
@@ -256,7 +257,7 @@ def run(manager, cfg, url: str, key: str, user_id: int, copy_missing: bool, dry_
                 summary["missing_bytes"] += int((asset.get("exifInfo") or {}).get("fileSizeInByte") or 0)
                 if dry_run or not copy_missing or into is None:
                     continue
-                new_id = _download(cfg, conn, client, asset, sha1, into)
+                new_id = _download(cfg, conn, client, asset, sha1, into, finder.replaceable.get(sha1))
                 if new_id is None:
                     summary["copy_failed"] += 1
                     continue
@@ -285,11 +286,11 @@ def _year_month(text) -> str:
     return f"{m.group(1)}/{m.group(2)}"
 
 
-def _download(cfg, conn, client: Client, asset: dict, sha1: str, into) -> int | None:
+def _download(cfg, conn, client: Client, asset: dict, sha1: str, into, replaces: int | None = None) -> int | None:
     folder = into / _year_month(asset.get("localDateTime") or asset.get("fileCreatedAt") or "")
     name = asset.get("originalFileName") or f"{asset['id']}.jpg"
     try:
-        new_id = imports.add_file(cfg, conn, folder, name, lambda fh: client.download(asset["id"], fh), sha1)
+        new_id = imports.add_file(cfg, conn, folder, name, lambda fh: client.download(asset["id"], fh), sha1, replaces)
     except Exception as exc:
         log.warning("could not download %s from Immich: %s", name, exc)
         return None

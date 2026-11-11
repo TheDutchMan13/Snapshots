@@ -809,3 +809,39 @@ def test_smart_album_filters_that_clash_find_nothing(tmp_path):
         with db.session(cfg.db_path) as conn:
             last = json.loads(conn.execute("SELECT payload FROM webhook_deliveries ORDER BY id DESC").fetchone()[0])
         assert last["data"]["ids"] == [ids["hike.jpg"]] and last["data"]["count"] == 1
+
+
+def test_import_does_not_trust_a_record_whose_file_is_gone(tmp_path):
+    """A photo whose file was deleted from the library, but whose record is still there (no scan yet), is not
+    "already in Snapshots": the import brings the file in again, as the same item (albums, people stay)."""
+    root = library(tmp_path)
+    beach = (root / "2023" / "beach.jpg").read_bytes()
+    export = tmp_path / "Downloads"
+    export.mkdir()
+    with zipfile.ZipFile(export / "takeout-001.zip", "w") as zf:
+        zf.writestr("Takeout/Google Photos/Photos from 2023/beach.jpg", beach)
+        zf.writestr("Takeout/Google Photos/Photos from 2023/beach.jpg.supplemental-metadata.json",
+                    _sidecar("beach.jpg", "2023-07-04 12:00:00", favorited=True, description="Sandy"))
+    c, cfg = new_client(tmp_path, root)
+    with c:
+        setup_admin(c)
+        wait_scan(c)
+        before = ids_by_name(c)["beach.jpg"]
+        (root / "2023" / "beach.jpg").unlink()          # gone from the disk; the record is still there
+
+        assert c.post("/api/imports/takeout", json={"path": str(export), "dry_run": True}).status_code == 202
+        state = wait_for(lambda: (s := c.get("/api/imports").json()["current"]) and s["dry_run"]
+                         and not s["running"] and s)
+        assert state["error"] is None, state
+        assert (state["summary"]["matched"], state["summary"]["missing"]) == (0, 1)     # not counted as present
+
+        assert c.post("/api/imports/takeout", json={"path": str(export)}).status_code == 202
+        state = wait_for(lambda: (s := c.get("/api/imports").json()["current"]) and not s["dry_run"]
+                         and not s["running"] and s)
+        assert state["error"] is None, state
+        assert state["summary"]["copied"] == 1
+        assert (root / "From Google Photos" / "Photos from 2023" / "beach.jpg").read_bytes() == beach
+        item = c.get(f"/api/assets/{before}")
+        assert item.status_code == 200, "the new file carries on as the same item"
+        assert item.json()["favorite"] and item.json()["description"] == "Sandy"
+        assert list(ids_by_name(c)).count("beach.jpg") == 1

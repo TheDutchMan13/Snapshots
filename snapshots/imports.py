@@ -149,15 +149,54 @@ class Applier:
         return changed
 
 
-def find_assets(conn, sha1: str) -> list[int] | None:
-    """Items with this content that are not in anyone's locked folder. None when the content is only in a
-    locked folder: the import then leaves it alone (it must neither change it nor copy it in again, which
-    would show it to everyone)."""
-    rows = conn.execute("SELECT id, locked_by FROM assets WHERE sha1 = ?", (sha1,)).fetchall()
-    open_ids = [r[0] for r in rows if r[1] is None]
-    if rows and not open_ids:
-        return None
-    return open_ids
+class Finder:
+    """Does Snapshots already have this content? Answered from the disk, not only from the records.
+
+    A record counts only if its file is really in the library (or on a drive that isn't connected just
+    now, which is expected back). If the file is gone, the import brings it in again, and when the
+    record was not set aside yet the new file takes over that item (`replaceable`), with its albums,
+    favourites and people: the same rule as an upload from the phone.
+    """
+
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.presence = libraries.Presence(cfg)
+        self.replaceable: dict[str, int] = {}     # sha1 -> an item whose file is gone, for add_file(replaces=)
+
+    def find(self, conn, sha1: str) -> list[int] | None:
+        """Items with this content whose file is there, not in anyone's locked folder. None when the content is
+        only in a locked folder: the import then leaves it alone (it must neither change it nor copy it in
+        again, which would show it to everyone)."""
+        rows = conn.execute("SELECT id, locked_by, trashed_at, missing_since, path, size, mtime_ns"
+                            " FROM assets WHERE sha1 = ?", (sha1,)).fetchall()
+        open_rows = [r for r in rows if r["locked_by"] is None]
+        if rows and not open_rows:
+            return None
+        ids, gone = [], None
+        for r in open_rows:
+            if r["trashed_at"] is not None:
+                ids.append(r["id"])         # in the trash on purpose: never brought back by an import
+                continue
+            if r["missing_since"] is not None:
+                continue                    # set aside, its file gone: a new file takes it over when stored
+            state = self.presence.state(r["path"], r["size"], r["mtime_ns"])
+            if state == "changed" and self._same_content(r["path"], sha1):
+                state = "here"
+            if state in ("here", "away"):
+                ids.append(r["id"])
+            elif state == "gone" and gone is None:
+                gone = r["id"]
+        if not ids and gone is not None:
+            self.replaceable[sha1] = gone
+        return ids
+
+    def _same_content(self, stored: str, sha1: str) -> bool:
+        from . import scanner
+        full = libraries.full_path(self.cfg, stored)
+        try:
+            return full is not None and full.is_file() and scanner.sha1_of(full) == sha1
+        except OSError:
+            return False
 
 
 def claim_name(folder: Path, name: str) -> Path:
@@ -177,7 +216,8 @@ def claim_name(folder: Path, name: str) -> Path:
             n += 1
 
 
-def add_file(cfg, conn, folder: Path, name: str, write, expect_sha1: str | None = None) -> int | None:
+def add_file(cfg, conn, folder: Path, name: str, write, expect_sha1: str | None = None,
+             replaces: int | None = None) -> int | None:
     """Write a new file into the main library (write(fh) fills it) and index it. Returns its id, or None
     when what arrived isn't what was expected."""
     from .app import safe_filename
@@ -204,7 +244,7 @@ def add_file(cfg, conn, folder: Path, name: str, write, expect_sha1: str | None 
         raise
     try:
         os.replace(tmp, target)
-        new_id = index_file(cfg, conn, libraries.stored_path(root, target), target, digest.hexdigest())
+        new_id = index_file(cfg, conn, libraries.stored_path(root, target), target, digest.hexdigest(), replaces=replaces)
         conn.commit()
     except BaseException:
         tmp.unlink(missing_ok=True)

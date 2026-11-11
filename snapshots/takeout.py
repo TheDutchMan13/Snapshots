@@ -242,6 +242,7 @@ def _run(manager, cfg, entries: list[Entry], user_id: int, copy_missing: bool, d
     known: dict[str, list[int]] = {}
     with db.session(cfg.db_path) as conn:
         applier = imports.Applier(conn, user_id, "takeout")
+        finder = imports.Finder(cfg)
         tick = imports.progress_every()
         for n, e in enumerate(media_entries):
             check()
@@ -259,7 +260,7 @@ def _run(manager, cfg, entries: list[Entry], user_id: int, copy_missing: bool, d
             meta = meta_of(data, albums.get(e.folder))
             ids = known.get(sha1)
             if ids is None:
-                ids = imports.find_assets(conn, sha1)
+                ids = finder.find(conn, sha1)
                 if ids is None:     # only in someone's locked folder: left alone
                     summary["matched"] += 1
                     ids = []
@@ -275,7 +276,7 @@ def _run(manager, cfg, entries: list[Entry], user_id: int, copy_missing: bool, d
                             with e.opener() as src:
                                 shutil.copyfileobj(src, fh, 1 << 20)
                         try:
-                            new_id = imports.add_file(cfg, conn, folder, e.name, write, sha1)
+                            new_id = imports.add_file(cfg, conn, folder, e.name, write, sha1, finder.replaceable.get(sha1))
                         except OSError as exc:
                             log.warning("could not copy %s: %s", e.where, exc)
                             new_id = None
