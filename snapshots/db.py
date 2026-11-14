@@ -459,6 +459,10 @@ MIGRATIONS = [
     );
     CREATE INDEX idx_file_backups_asset ON file_backups (asset_id);
     """,
+    # 15: a pet said by a person to be in (or not in) a photo stays that way when photos are looked at again (pets.py)
+    """
+    ALTER TABLE pet_sightings ADD COLUMN manual INTEGER NOT NULL DEFAULT 0;
+    """,
 ]
 SCHEMA_VERSION = len(MIGRATIONS)
 UPGRADE_BACKUPS_KEPT = 3

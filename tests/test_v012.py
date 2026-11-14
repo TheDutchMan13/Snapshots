@@ -461,3 +461,58 @@ def test_locked_photos_never_win_a_highlight(tmp_path):
     picked = [r[0] for r in conn.execute("SELECT asset_id FROM highlight_picks")]
     assert picked == [2]                      # the moment is still there, from a photo everyone can see
     conn.close()
+
+
+def test_a_misidentified_pet_can_be_moved_and_a_missed_one_added(tmp_path, monkeypatch):
+    """Someone's word about who is in a photo is kept, even when photos are looked at again."""
+    root = tmp_path / "Photos"
+    for k in range(3):
+        make_jpeg(root / f"dog{k}.jpg", f"2024:01:0{k + 1} 10:00:00", color=(230, 30, 30))
+    for k in range(3):
+        make_jpeg(root / f"cat{k}.jpg", f"2024:02:0{k + 1} 10:00:00", color=(30, 30, 230))
+    make_jpeg(root / "hidden.jpg", "2024:03:01 10:00:00", color=(30, 200, 30))      # a pet nobody found
+    c, cfg = new_client(tmp_path, root, smart_search=True)
+    monkeypatch.setattr(c.app.state.ctx.worker.clip, "load_engine", lambda: AnimalEngine())
+    monkeypatch.setattr(clipsearch.ClipJob, "ready", lambda self: True)
+    with c:
+        setup_admin(c)
+        wait_scan(c)
+        ids = ids_by_name(c)
+
+        def done():
+            with db.session(cfg.db_path) as conn:
+                return conn.execute("SELECT COUNT(*) FROM assets WHERE pets_done = 0 OR clip_done = 0"
+                                    " OR turn_done = 0").fetchone()[0] == 0
+        wait_for(done, timeout=60)
+        by_species = {p["species"]: p["id"] for p in c.get("/api/pets").json()["pets"]}
+        dog, cat = by_species["dog"], by_species["cat"]
+
+        # A cat that was taken for the dog moves to the cat.
+        r = c.post(f"/api/pets/{cat}/add", json={"ids": [ids["dog0.jpg"]]})
+        assert r.status_code == 200 and (r.json()["moved"], r.json()["added"]) == (1, 0) and r.json()["photos"] == 4
+        assert c.get(f"/api/pets/{dog}").json()["photos"] == 2
+
+        # A photo where nothing was found is put in by hand.
+        r = c.post(f"/api/pets/{dog}/add", json={"ids": [ids["hidden.jpg"]]})
+        assert (r.json()["moved"], r.json()["added"]) == (0, 1) and r.json()["photos"] == 3
+        assert ids["hidden.jpg"] in {i["id"] for i in c.get("/api/assets", params={"pet": dog}).json()["items"]}
+        assert c.get(f"/api/pets/{dog}/thumb").status_code == 200            # the hand-put one is never the face
+
+        # Photos are looked at again (as when a model changes): what was said stays.
+        with db.session(cfg.db_path) as conn:
+            conn.execute("UPDATE assets SET pets_done = 0")
+        c.app.state.ctx.worker.poke()
+        wait_for(done, timeout=60)
+        on_dog = {i["id"] for i in c.get("/api/assets", params={"pet": dog}).json()["items"]}
+        on_cat = {i["id"] for i in c.get("/api/assets", params={"pet": cat}).json()["items"]}
+        assert ids["hidden.jpg"] in on_dog and ids["dog0.jpg"] in on_cat
+
+        # "Not this pet" stays too, and nothing changes for photos that cannot be put anywhere.
+        c.post(f"/api/pets/{cat}/remove", json={"ids": [ids["cat0.jpg"]]})
+        with db.session(cfg.db_path) as conn:
+            conn.execute("UPDATE assets SET pets_done = 0")
+        c.app.state.ctx.worker.poke()
+        wait_for(done, timeout=60)
+        assert ids["cat0.jpg"] not in {i["id"] for i in c.get("/api/assets", params={"pet": cat}).json()["items"]}
+        assert c.post(f"/api/pets/{cat}/add", json={"ids": [999999]}).status_code == 409
+        assert c.post("/api/pets/999999/add", json={"ids": [ids["cat0.jpg"]]}).status_code == 404

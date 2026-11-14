@@ -1,6 +1,7 @@
 """People (groups of faces) and places."""
 
 import threading
+from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
@@ -401,9 +402,42 @@ def router(ctx) -> APIRouter:
             get_pet(conn, pet_id)
             ids = db.open_ids(conn, body.ids)
             marks = ",".join("?" * len(ids)) or "NULL"
-            conn.execute(f"UPDATE pet_sightings SET pet_id = NULL WHERE pet_id = ? AND asset_id IN ({marks})",
+            conn.execute(f"UPDATE pet_sightings SET pet_id = NULL, manual = 1 WHERE pet_id = ? AND asset_id IN ({marks})",
                          [pet_id] + ids)
             return get_pet(conn, pet_id)
+
+    @r.post("/api/pets/{pet_id}/add")
+    def add_to_pet(pet_id: int, body: PetPhotos, request: Request):
+        """'This is them': put these photos in the pet, whoever Snapshots thought was in them (or nobody).
+
+        A photo that already shows an animal moves to this pet. One where none was found gets the
+        whole picture as the animal's place (it is never chosen as the pet's face).
+        """
+        current_user(request)
+        with db.session(cfg.db_path) as conn:
+            pet = get_pet(conn, pet_id)
+            ids = db.open_ids(conn, body.ids)
+            stamp = datetime.now().isoformat(timespec="seconds")
+            moved = added = 0
+            for asset_id in ids:
+                row = conn.execute("SELECT kind, trashed_at FROM assets WHERE id = ?", (asset_id,)).fetchone()
+                if row is None or row["kind"] != "photo" or row["trashed_at"]:
+                    continue
+                if conn.execute("SELECT 1 FROM pet_sightings WHERE asset_id = ?", (asset_id,)).fetchone():
+                    conn.execute("UPDATE pet_sightings SET pet_id = ?, species = ?, manual = 1 WHERE asset_id = ?",
+                                 (pet_id, pet["species"], asset_id))
+                    moved += 1
+                    continue
+                vec = conn.execute("SELECT vec FROM clip_vectors WHERE asset_id = ?", (asset_id,)).fetchone()
+                if vec is None:
+                    continue                       # not looked at yet: nothing to describe the animal with
+                conn.execute("INSERT INTO pet_sightings (asset_id, pet_id, species, x, y, w, h, vec, score, created_at,"
+                             " manual) VALUES (?, ?, ?, 0, 0, 1, 1, ?, 0, ?, 1)",
+                             (asset_id, pet_id, pet["species"], vec["vec"], stamp))
+                added += 1
+            if not (moved or added):
+                raise HTTPException(409, "Those photos could not be put in this pet (they may not have been looked at yet).")
+            return {**get_pet(conn, pet_id), "moved": moved, "added": added}
 
     @r.get("/api/pets/{pet_id}/thumb")
     def pet_thumb(pet_id: int, request: Request):

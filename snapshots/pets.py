@@ -162,6 +162,9 @@ class PetsJob:
         self.groups = PetGroups(conn)          # read again each batch: merges and removed photos count
         stamp = datetime.now().isoformat(timespec="seconds")
         for asset_id, species, found in results:
+            if conn.execute("SELECT 1 FROM pet_sightings WHERE asset_id = ? AND manual = 1", (asset_id,)).fetchone():
+                conn.execute("UPDATE assets SET pets_done = 1 WHERE id = ? AND has_thumb = 1", (asset_id,))
+                continue                                    # someone said who this is: that stays
             conn.execute("DELETE FROM pet_sightings WHERE asset_id = ?", (asset_id,))
             if found:
                 (x, y, w, h), v, score = found

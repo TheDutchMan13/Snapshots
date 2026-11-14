@@ -1136,6 +1136,23 @@ function updateSelection() {
       try { await post(`/api/pets/${r.pet}/remove`, { ids: chosen }); removeItems(chosen); flashNote(`${plural(chosen.length, "photo")} taken out`); }
       catch (err) { flashNote(err.message); }
     }));
+    actions.append(button("It's another pet…", "btn", async () => {
+      const chosen = ids();
+      const target = await pickPet("Which pet is in these photos?", r.pet);
+      if (!target) return;
+      try { await post(`/api/pets/${target.id}/add`, { ids: chosen }); removeItems(chosen); flashNote(`${plural(chosen.length, "photo")} moved to ${petName(target)}`); }
+      catch (err) { flashNote(err.message); }
+    }));
+  } else if (r.name !== "pets" && S.items.some((it) => S.selected.has(it.id) && it.kind === "photo")) {
+    actions.append(button("It's a pet…", "btn", async () => {
+      const chosen = ids();
+      const target = await pickPet("Which pet is in these photos?", null);
+      if (!target) return;
+      try {
+        const out = await post(`/api/pets/${target.id}/add`, { ids: chosen });
+        flashNote(`${plural(out.moved + out.added, "photo")} put in ${petName(target)}`);
+      } catch (err) { flashNote(err.message); }
+    }));
   }
   if (r.sideways) {
     actions.append(button("Turn upright", "btn", () => turnUpright(ids().map((id) => S.items.find((it) => it.id === id)).filter(Boolean))));
@@ -1943,6 +1960,27 @@ async function renderPets() {
   $("collection").replaceChildren(g);
 }
 
+/** A list of the pets to choose from (null if closed, or when there is none to choose). */
+async function pickPet(title, except) {
+  const others = (await api("/api/pets")).pets.filter((p) => p.id !== except);
+  if (!others.length) { flashNote("There is no pet to choose yet. Pets show up once the same animal is in a few photos."); return null; }
+  return modal({
+    title, ok: null, cancel: "Cancel",
+    build: (body, ctl) => {
+      const list = el("div", "pick-list");
+      for (const p of others) {
+        const b = button("", "pick", () => ctl.close(p));
+        b.append(p.cover ? img(petUrl(p), "", "avatar small") : el("span", "pick-ph"));
+        const t = el("span", null, petName(p));
+        t.append(el("small", null, plural(p.photos, "photo")));
+        b.append(t);
+        list.append(b);
+      }
+      body.append(list);
+    },
+  });
+}
+
 async function renderPetHead(id) {
   const pet = await pageApi(`/api/pets/${id}`);
   const wrap = el("div", "person-title");
@@ -1989,7 +2027,7 @@ async function renderPetHead(id) {
       try { await patch(`/api/pets/${pet.id}`, { hidden: !pet.hidden }); if (!pet.hidden) location.hash = "#/pets"; else renderHead(); }
       catch (err) { flashNote(err.message); }
     }),
-  ], "A photo that isn't this pet? Select it and press Not this pet.");
+  ], "A photo that isn't this pet? Select it and press Not this pet, or It's another pet. A pet that was missed in a photo: select the photo anywhere and press It's a pet.");
 }
 
 /** "Same person?" questions: for everyone (person = null) or for one person. Null when there are none. */
