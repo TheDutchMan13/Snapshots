@@ -37,7 +37,7 @@ def test_data_dir_defaults_outside_library(tmp_path):
 
 @pytest.mark.parametrize("folder", [
     r"D:\Photos",
-    r"C:\Users\Hans\Dad's Photos",          # an apostrophe is legal in Windows folder names
+    r"C:\Users\Sam\Dad's Photos",          # an apostrophe is legal in Windows folder names
     r'D:\Family "Best of"',
     "D:\\Zoë & Renée — vacances",           # accents and symbols
     "D:\\Фото",
