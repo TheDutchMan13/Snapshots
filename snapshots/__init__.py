@@ -1,6 +1,6 @@
 """Snapshots: a self-hosted photo and video library for Windows."""
 
-__version__ = "0.14.7"
+__version__ = "0.15.0"
 
 
 def _no_console_windows() -> None:
