@@ -189,7 +189,7 @@ def router(ctx) -> APIRouter:
         for key, path in (("thumbnails", cfg.thumb_dir), ("previews", cfg.preview_dir), ("videos", cfg.video_dir),
                           ("faces", cfg.face_dir), ("edited", cfg.edited_dir), ("motion", cfg.motion_dir),
                           ("models", cfg.model_dir), ("places", cfg.places_dir), ("backups", cfg.backups_path),
-                          ("exports", cfg.export_dir)):
+                          ("exports", cfg.export_dir), ("kept_files", cfg.original_files_dir)):
             data[key] = _dir_size(path)[0]
         try:
             data["database"] = sum(p.stat().st_size for p in cfg.data_dir.glob("snapshots.db*") if p.is_file())

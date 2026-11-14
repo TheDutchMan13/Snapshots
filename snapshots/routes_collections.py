@@ -8,7 +8,7 @@ from datetime import datetime
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from . import db, linking, smart, webhooks
+from . import db, filechange, linking, smart, webhooks
 from .app import current_user, require_admin
 from .routes_library import library_root, original_path
 from .scanner import delete_asset_row, sha1_of
@@ -136,6 +136,7 @@ def router(ctx) -> APIRouter:
                 except OSError as exc:
                     failed.append({"id": row["id"], "filename": row["filename"], "reason": exc.strerror or str(exc)})
                     continue
+                filechange.forget(cfg, conn, row["id"])        # the old files kept for this photo go with it
                 delete_asset_row(cfg, conn, row["id"])
                 deleted += 1
             linking.tidy_stacks(conn)

@@ -2744,7 +2744,8 @@ async function renderStorage() {
   const data = el("div", "bars");
   const dataNames = { thumbnails: "Thumbnails", previews: "Previews", videos: "Converted videos", faces: "Face pictures",
     edited: "Edited copies", motion: "Live Photo clips", models: "Search and face models", places: "Place names",
-    backups: "Database backups", exports: "Exports", database: "Database" };
+    backups: "Database backups", exports: "Exports", database: "Database",
+    kept_files: "Old files kept before an edit was saved into them" };
   const maxD = Math.max(1, ...Object.values(s.data));
   for (const [k, v] of Object.entries(s.data).sort((a, b) => b[1] - a[1])) {
     if (!v) continue;
@@ -3408,7 +3409,15 @@ function renderDetails(item) {
     const dl = link("Download edited", `/api/assets/${item.id}/edited`, "linklike");
     dl.setAttribute("download", "");
     box.append(dl);
+    if (fileCanChange(item)) box.append(button("Save into the file…", "linklike", () => writeEditIntoFile(item)));
     row("Edits", box);
+  }
+  if (S.me && S.me.is_admin && !item.locked && item.file_backups && item.file_backups.length) {
+    const box = el("span", "with-action");
+    const newest = item.file_backups.find((b) => !b.restored) || item.file_backups[0];
+    box.append(document.createTextNode(`Old file kept (${fmtDateTime(newest.created_at)}, ${fmtSize(newest.size)}) `));
+    box.append(button("Put the old file back…", "linklike", () => putOldFileBack(item)));
+    row("Old file", box);
   }
   if (item.people && item.people.length) {
     const chips = el("div", "face-chips");
@@ -3992,6 +4001,35 @@ showDlg.addEventListener("close", () => {
 
 // ------------------------------------------------------------------ the editor
 
+/** Can this photo's own file be rewritten? (JPEG and PNG only; the server checks the rest.) */
+function fileCanChange(item) {
+  return !!(S.me && S.me.is_admin) && item.kind === "photo" && /\.(jpe?g|png)$/i.test(item.filename || "") && !item.locked;
+}
+
+const CHANGE_FILE_TEXT = "This turns the photo's own file, not just how Snapshots shows it, so other programs show it that way too. "
+  + "Snapshots keeps the old file safe in its own folder (outside your library), and you can put it back from the photo's details. "
+  + "The picture is saved again at high quality, and the faces in it are looked for again.";
+
+/** Write a photo's saved edit into its file, after asking. Returns true if the file was changed. */
+async function writeEditIntoFile(item, beforeApply) {
+  if (!await confirmBox("Change the original file?", CHANGE_FILE_TEXT, "Change the file", true)) return false;
+  try {
+    if (beforeApply) await beforeApply();
+    const updated = await post(`/api/assets/${item.id}/apply-edits`, {});
+    applyUpdated(updated);
+    flashNote("The file was changed. The old file is kept: see the photo's details to put it back.");
+    return true;
+  } catch (err) { flashNote(err.message); return false; }
+}
+
+async function putOldFileBack(item) {
+  if (!await confirmBox("Put the old file back?", "The photo's file goes back to what it was before. What is in the file now is kept as well, so this can be undone.", "Put it back")) return;
+  try {
+    applyUpdated(await post(`/api/assets/${item.id}/restore-file`, {}));
+    flashNote("The old file is back.");
+  } catch (err) { flashNote(err.message); }
+}
+
 const editor = $("editor");
 const ED = {};
 
@@ -4004,6 +4042,7 @@ async function openEditor(item) {
     item: full, image: null, rotate: e.rotate || 0, flip: !!e.flip, angle: e.straighten || 0,
     crop: e.crop ? [...e.crop] : [0, 0, 1, 1], ratio: "free", box: null,
   });
+  $("ed-file").hidden = !fileCanChange(full);
   $("ed-angle").value = ED.angle;
   $("ed-angle-out").textContent = `${ED.angle}°`;
   $("ed-flip").setAttribute("aria-pressed", String(ED.flip));
@@ -4138,11 +4177,21 @@ $("ed-reset").addEventListener("click", () => {
   drawEditor();
 });
 $("ed-cancel").addEventListener("click", () => editor.close());
-$("ed-save").addEventListener("click", async () => {
+function editorRecipe() {
   const round = (v) => Math.round(v * 100000) / 100000;
   const crop = ED.crop.map(round);
   const whole = crop[0] <= 0.001 && crop[1] <= 0.001 && crop[2] >= 0.999 && crop[3] >= 0.999;
-  const edits = { rotate: ED.rotate, flip: ED.flip, straighten: ED.angle, crop: whole ? null : crop };
+  return { rotate: ED.rotate, flip: ED.flip, straighten: ED.angle, crop: whole ? null : crop };
+}
+$("ed-file").addEventListener("click", async () => {
+  const item = ED.item, edits = editorRecipe();
+  $("ed-file").disabled = $("ed-save").disabled = true;
+  const done = await writeEditIntoFile(item, () => post(`/api/assets/${item.id}/edits`, { edits }));
+  $("ed-file").disabled = $("ed-save").disabled = false;
+  if (done) editor.close();
+});
+$("ed-save").addEventListener("click", async () => {
+  const edits = editorRecipe();
   $("ed-save").disabled = true;
   try {
     const updated = await post(`/api/assets/${ED.item.id}/edits`, { edits });

@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Upl
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from . import __version__, analysis, colors, dates, db, libraries, linking, media, ranking, smart, sorting, spelling, storage, webhooks
+from . import __version__, analysis, colors, dates, db, filechange, libraries, linking, media, ranking, smart, sorting, spelling, storage, webhooks
 from .app import current_user, require_admin, safe_filename
 from .config import network_warning
 from .scanner import _make_thumb, index_file, sha1_of
@@ -373,6 +373,9 @@ def router(ctx) -> APIRouter:
         out["text"] = row["ocr_text"]
         out["description"] = row["description"]
         out["edits"] = media.parse_edits(row["edits"]) if row["edits"] else None
+        if user.get("is_admin") and row["kind"] == "photo":
+            with db.session(cfg.db_path) as conn:
+                out["file_backups"] = filechange.backups_of(conn, asset_id)
         out["date_edited"] = row["taken_at_file"] is not None
         out["date_guess"] = row["date_guess"] if row["taken_at_file"] is None else None
         out["position_edited"] = bool(row["position_edited"])
@@ -556,6 +559,41 @@ def router(ctx) -> APIRouter:
             row = db.get_asset(conn, asset_id, user["id"])
         worker.poke()
         return asset_dict(row)
+
+    def _file_change(asset_id: int, request: Request, action):
+        """Run apply_edits / restore_file for an administrator, and say what happened as the sentence it is."""
+        user = require_admin(request)
+        get_row(asset_id, user)                      # 404 for what this person can't see
+        with db.session(cfg.db_path) as conn:
+            row = filechange.row_of(conn, asset_id)
+            try:
+                full = original_path(cfg, row["path"])
+                if not full.is_file():
+                    raise filechange.Refused(404, "The file is no longer on disk.")
+                done = action(conn, row, full, user["id"])
+            except filechange.Refused as refused:
+                raise HTTPException(refused.status, refused.message) from None
+            kept = filechange.backups_of(conn, asset_id)
+            out = asset_dict(db.get_asset(conn, asset_id, user["id"]))
+        worker.poke()
+        out["file_backups"] = kept
+        out["done_backup"] = done
+        return out
+
+    @r.post("/api/assets/{asset_id}/apply-edits")
+    def apply_edits(asset_id: int, request: Request):
+        """Write the photo's edit into its own file. Administrators only. The old file is kept first
+        (see filechange.py for everything that is checked), and can be put back."""
+        return _file_change(asset_id, request, lambda conn, row, full, uid: filechange.apply_edits(cfg, conn, row, full, uid))
+
+    class RestoreBody(BaseModel):
+        backup: int | None = None       # which kept copy; the newest one not yet put back if left out
+
+    @r.post("/api/assets/{asset_id}/restore-file")
+    def restore_file(asset_id: int, body: RestoreBody, request: Request):
+        """Put an older kept file back as the photo's file. Administrators only. The file it replaces is kept too."""
+        return _file_change(asset_id, request,
+                            lambda conn, row, full, uid: filechange.restore_file(cfg, conn, row, full, body.backup, uid))
 
     @r.post("/api/assets/details")
     def change_details(body: DetailsBody, request: Request):

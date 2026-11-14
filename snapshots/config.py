@@ -114,6 +114,11 @@ class Config:
         return Path(self.backup_dir) if self.backup_dir else self.data_dir / "backups"
 
     @property
+    def original_files_dir(self) -> Path:
+        """Where the old file is kept when an edit is written into a photo's own file (filechange.py)."""
+        return self.data_dir / "original-files"
+
+    @property
     def export_dir(self) -> Path:
         return self.data_dir / "exports"
 

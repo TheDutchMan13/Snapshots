@@ -222,11 +222,12 @@
 <dialog id="editor" class="editor" aria-label="Edit photo">
   <div class="ed-bar">
     <span class="ed-title">Edit photo</span>
-    <span class="ed-note">Your original file is not changed.</span>
+    <span class="ed-note">Save keeps your original file as it is.</span>
     <span class="spacer"></span>
     <button id="ed-reset" class="v-btn" type="button">Reset</button>
     <button id="ed-cancel" class="v-btn" type="button">Cancel</button>
     <button id="ed-save" class="v-btn primary" type="button">Save</button>
+    <button id="ed-file" class="v-btn" type="button" hidden title="Change the photo's own file (the old file is kept)">Save into the file…</button>
   </div>
   <div id="ed-stage" class="ed-stage">
     <canvas id="ed-canvas"></canvas>

@@ -445,6 +445,20 @@ MIGRATIONS = [
     ALTER TABLE assets ADD COLUMN missing_since TEXT;       -- when a scan first found the file gone; NULL: it is there
     CREATE INDEX idx_assets_missing ON assets (missing_since) WHERE missing_since IS NOT NULL;
     """,
+    # 14: the old file, kept when an edit is written into a photo's own file (filechange.py)
+    """
+    CREATE TABLE file_backups (
+        id INTEGER PRIMARY KEY,
+        asset_id INTEGER NOT NULL,
+        name TEXT NOT NULL,                  -- the kept file, inside <data>/original-files/<asset id>/
+        sha1 TEXT NOT NULL,
+        size INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        created_by INTEGER,
+        restored_at TEXT                     -- set when this copy was put back
+    );
+    CREATE INDEX idx_file_backups_asset ON file_backups (asset_id);
+    """,
 ]
 SCHEMA_VERSION = len(MIGRATIONS)
 UPGRADE_BACKUPS_KEPT = 3
