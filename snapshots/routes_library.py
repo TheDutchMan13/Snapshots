@@ -9,7 +9,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from . import __version__, analysis, colors, dates, db, filechange, libraries, linking, media, ranking, smart, sorting, spelling, storage, webhooks
 from .app import current_user, require_admin, safe_filename
@@ -26,6 +26,18 @@ class ScanBody(BaseModel):
 
 class EditsBody(BaseModel):
     edits: dict | None = None      # None (or nothing changed) = back to the original picture
+
+
+class TurnBody(BaseModel):
+    ids: list[int] = Field(min_length=1, max_length=200)
+    degrees: int = Field(description="clockwise: 90, 180 or 270")
+
+    @field_validator("degrees")
+    @classmethod
+    def _quarter(cls, v):
+        if v not in (90, 180, 270):
+            raise ValueError("degrees must be 90, 180 or 270")
+        return v
 
 
 class DetailsBody(BaseModel):
@@ -542,6 +554,11 @@ def router(ctx) -> APIRouter:
             edits = media.parse_edits(body.edits)
         except (ValueError, TypeError) as exc:
             raise HTTPException(400, f"Bad edit: {exc}") from None
+        return asset_dict(store_edits(row, user, edits))
+
+    def store_edits(row, user, edits):
+        """Keep this recipe for the photo and make its thumbnail again. Returns the photo's new row."""
+        asset_id = row["id"]
         text = media.edits_json(edits)
         edit_v = hashlib.sha1(text.encode(), usedforsecurity=False).hexdigest()[:6] if text else None
         full = file_of(row)
@@ -558,7 +575,35 @@ def router(ctx) -> APIRouter:
             _make_thumb(cfg, conn, asset_id, "photo", full, text)
             row = db.get_asset(conn, asset_id, user["id"])
         worker.poke()
-        return asset_dict(row)
+        return row
+
+    @r.post("/api/assets/turn")
+    def turn_photos(body: TurnBody, request: Request):
+        """Turn these photos a quarter, half or three quarters clockwise (on top of any turn they have).
+
+        For the ones Snapshots could not tell were on their side, such as photos with faces. Only the
+        recipe changes, like any edit: the original files stay as they are. A crop is dropped when the
+        photo is turned, as in the editor, because it would no longer frame the same part.
+        """
+        user = current_user(request)
+        done, skipped = [], 0
+        with db.session(cfg.db_path) as conn:
+            ids = db.open_ids(conn, body.ids)
+        for asset_id in ids:
+            try:
+                row = get_row(asset_id, user)
+                if row["kind"] != "photo" or row["locked_by"] is not None:
+                    skipped += 1
+                    continue
+                file_of(row)
+                had = media.parse_edits(row["edits"]) or {}
+                edits = {"rotate": (int(had.get("rotate") or 0) + body.degrees) % 360, "flip": bool(had.get("flip")),
+                         "straighten": had.get("straighten") or 0, "crop": None}
+                store_edits(row, user, media.parse_edits(edits))
+                done.append(asset_id)
+            except HTTPException:
+                skipped += 1
+        return {"turned": done, "skipped": skipped + len(body.ids) - len(ids)}
 
     def _file_change(asset_id: int, request: Request, action):
         """Run apply_edits / restore_file for an administrator, and say what happened as the sentence it is."""

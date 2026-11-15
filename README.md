@@ -48,7 +48,7 @@ Snapshots is a self-hosted photo and video library for Windows. Your originals s
 - **More like this:** in the photo viewer (⋯ menu), see the photos that look most like the one you're on
 - **Search by colour:** each photo's main colours are named, so `red` or `blue sea` finds them, and colours help search by content
 - **Pets:** dogs and cats are found and the same animal is grouped across photos, like People. Name them, join two groups of the same pet, or hide them
-- **Sideways photos** (Clean up): photos that look like they're on their side or upside down are listed, to turn upright with one click
+- **Sideways photos** (Clean up): photos that look like they're on their side or upside down are listed, to turn upright with one click. A photo it missed (photos with faces are never suggested) can be turned by hand: select photos and press **Turn…**, on the web or in the phone app
 - **Screenshots, documents and receipts** are sorted out from your photos (Clean up), and can be left out of All and Photos (Settings). Wrongly sorted? Select it and press **Not a screenshot**
 - **Suggested albums:** smart albums for things many of your photos show (dogs, sunsets, food, snow...), one click to make
 - **Guessed dates:** a file with no date gets one from its GPS time or from the numbered photos beside it (`IMG_1234` between `IMG_1233` and `IMG_1235`), instead of the day it was copied. The photo's details say when a date is a guess

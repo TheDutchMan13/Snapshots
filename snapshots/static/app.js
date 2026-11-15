@@ -1193,6 +1193,7 @@ function updateSelection() {
     if (p.length < chosen().length) flashNote("Videos are left out of culling.");
     cullItems(p);
   }));
+  actions.append(button("Turn…", "btn", () => turnDialog(ids())));
   actions.append(button("Edit details", "btn", () => editDetails(ids())));
   actions.append(button("Export", "btn", () => exportDialog({ ids: ids(), count: n })));
   actions.append(button("Move to Locked", "btn", () => setLocked(ids(), true)));
@@ -2500,6 +2501,32 @@ const CLEANUP_HELP = {
 };
 
 /** Turn photos the way they seem to belong (their suggested turn), as an edit: the files don't change. */
+/** Turn the chosen photos by hand (for the ones Snapshots can't tell are on their side, such as photos with faces). */
+async function turnDialog(ids) {
+  const degrees = await modal({
+    title: `Turn ${plural(ids.length, "photo")} which way?`, ok: null, cancel: "Cancel",
+    build: (body, ctl) => {
+      const list = el("div", "pick-list");
+      for (const [label, deg] of [["Turn right (a quarter clockwise)", 90], ["Turn upside down", 180], ["Turn left (a quarter anticlockwise)", 270]]) {
+        list.append(button(label, "pick", () => ctl.close(deg)));
+      }
+      body.append(list, el("p", "muted", "Your original files stay as they are. You can undo a turn in the photo's editor."));
+    },
+  });
+  if (!degrees) return;
+  let turned = 0, skipped = 0;
+  try {
+    for (let i = 0; i < ids.length; i += 200) {
+      const out = await post("/api/assets/turn", { ids: ids.slice(i, i + 200), degrees });
+      turned += out.turned.length; skipped += out.skipped;
+      for (const id of out.turned) { const it = S.items.find((x) => x.id === id); if (it) { it.turn = null; it.edited = true; } }
+    }
+  } catch (err) { flashNote(err.message); }
+  if (S.route.sideways) removeItems(ids);
+  flashNote(`${plural(turned, "photo")} turned` + (skipped ? `, ${skipped} could not be` : ""));
+  if (turned) render();
+}
+
 async function turnUpright(items) {
   const done = [];
   for (const it of items) {
