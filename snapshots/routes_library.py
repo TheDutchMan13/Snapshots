@@ -570,7 +570,10 @@ def router(ctx) -> APIRouter:
             conn.execute("UPDATE assets SET edits = ?, edit_v = ?, quality_done = 0, clip_done = 0, colors_done = 0,"
                          " turn = NULL, turn_done = 1, caption_done = 0, landmark = NULL WHERE id = ?",
                          (text, edit_v, asset_id))
-            conn.execute("DELETE FROM pet_sightings WHERE asset_id = ?", (asset_id,))
+            # What a person said about a pet in this photo stays; where the animal is in the edited
+            # picture is not known, so it is the whole picture and never the pet's face (pets.py).
+            conn.execute("DELETE FROM pet_sightings WHERE asset_id = ? AND manual = 0", (asset_id,))
+            conn.execute("UPDATE pet_sightings SET x = 0, y = 0, w = 1, h = 1, score = 0 WHERE asset_id = ?", (asset_id,))
             conn.execute("DELETE FROM clip_vectors WHERE asset_id = ?", (asset_id,))
             _make_thumb(cfg, conn, asset_id, "photo", full, text)
             row = db.get_asset(conn, asset_id, user["id"])
@@ -804,6 +807,15 @@ def router(ctx) -> APIRouter:
                     break
                 if state == "gone" and gone is None:
                     gone = row          # (one outside the trash first: see the ORDER BY)
+            if dup is None and gone is None:
+                # The same photo, from before an edit was saved into its file: the old file is kept
+                # beside the item it became (filechange.py), so this is not a new photo.
+                with db.session(cfg.db_path) as conn:
+                    became = filechange.known_old_content(cfg, conn, [digest.hexdigest()])
+                for row in became:
+                    if presence.state(row["path"], row["size"], row["mtime_ns"]) in ("here", "away"):
+                        dup = row
+                        break
             if dup and dup["trashed_at"]:
                 # Uploading something that is in the trash brings it back.
                 with db.session(cfg.db_path) as conn:
@@ -875,6 +887,10 @@ def router(ctx) -> APIRouter:
                 rows = conn.execute(f"SELECT sha1, path, size, mtime_ns FROM assets WHERE locked_by IS NULL"
                                     f" AND missing_since IS NULL{kept} AND sha1 IN ({marks})",
                                     list(wanted)).fetchall()
+                # A photo whose edit was saved into its file has other content now, but it is the same
+                # photo, and the file the phone has is kept beside it (filechange.py): it is here too.
+                rows += [r for r in filechange.known_old_content(cfg, conn, wanted)
+                         if not (body.kept and r["trashed_at"])]
         # The files are looked for with the database closed: a slow drive must not hold anything up.
         counts = ("here",) if body.kept else ("here", "away")
         presence = libraries.Presence(cfg)

@@ -144,7 +144,13 @@ def forget_faces(cfg: Config, conn, asset_id: int) -> None:
 
 
 def delete_asset_row(cfg: Config, conn, asset_id: int) -> None:
-    """Forget an asset: its row, thumbnails and faces. Does not touch the original file."""
+    """Forget an asset: its row, thumbnails and faces. Does not touch the original file.
+
+    Old files kept for it (filechange.py) are not deleted here: they are moved aside, so that they can
+    never show up under a later photo that gets this number. (Emptying the trash deletes them first.)
+    """
+    from . import filechange
+    filechange.detach(cfg, conn, asset_id)
     forget_faces(cfg, conn, asset_id)
     conn.execute("DELETE FROM assets WHERE id = ?", (asset_id,))
     _unlink(cfg.thumb_path(asset_id))
@@ -363,7 +369,10 @@ def store(cfg: Config, conn, p: Prepared, replaces: int | None = None) -> tuple[
         for (owner,) in conn.execute("SELECT id FROM assets WHERE live_video = ?", (asset_id,)).fetchall():
             _unlink(cfg.motion_path(owner))  # a Live Photo's clip changed: its playable copy is stale
         conn.execute("DELETE FROM clip_vectors WHERE asset_id = ?", (asset_id,))
-        conn.execute("DELETE FROM pet_sightings WHERE asset_id = ?", (asset_id,))
+        # What a person said about a pet in this photo stays (pets.py). Where the animal is in the
+        # picture is no longer known, so it is the whole picture, and never the pet's face.
+        conn.execute("DELETE FROM pet_sightings WHERE asset_id = ? AND manual = 0", (asset_id,))
+        conn.execute("UPDATE pet_sightings SET x = 0, y = 0, w = 1, h = 1, score = 0 WHERE asset_id = ?", (asset_id,))
         conn.execute("DELETE FROM not_duplicates WHERE a = ? OR b = ?", (asset_id, asset_id))
         conn.execute(
             """

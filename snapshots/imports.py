@@ -186,6 +186,13 @@ class Finder:
                 ids.append(r["id"])
             elif state == "gone" and gone is None:
                 gone = r["id"]
+        if not ids and gone is None:
+            # The photo from before an edit was saved into its file: it is here, as the item it became.
+            from . import filechange
+            for r in filechange.known_old_content(self.cfg, conn, [sha1]):
+                if r["trashed_at"] is not None or self.presence.state(r["path"], r["size"], r["mtime_ns"]) in ("here", "away"):
+                    ids.append(r["id"])
+                    break
         if not ids and gone is not None:
             self.replaceable[sha1] = gone
         return ids
@@ -247,6 +254,11 @@ def add_file(cfg, conn, folder: Path, name: str, write, expect_sha1: str | None 
         new_id = index_file(cfg, conn, libraries.stored_path(root, target), target, digest.hexdigest(), replaces=replaces)
         conn.commit()
     except BaseException:
+        try:
+            if tmp.exists() and target.stat().st_size == 0:
+                target.unlink()         # only our own empty placeholder: the file never got its name
+        except OSError:
+            pass
         tmp.unlink(missing_ok=True)
         conn.rollback()
         raise

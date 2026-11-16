@@ -1,5 +1,6 @@
 """The web server: JSON API plus the static web interface."""
 
+import logging
 import os
 import re
 import sys
@@ -109,6 +110,12 @@ def require_admin(request: Request) -> dict:
 def create_app(cfg: Config, start_worker: bool = True) -> FastAPI:
     cfg.ensure_dirs()
     db.init(cfg.db_path, cfg.backups_path)
+    try:        # kept old files whose item is gone never stay under its number (filechange.py)
+        from . import filechange
+        with db.session(cfg.db_path) as conn:
+            filechange.detach_orphans(cfg, conn)
+    except Exception:
+        logging.getLogger("snapshots").exception("could not tidy the kept old files")
     worker = Worker(cfg)
     sender = webhooks.Sender(cfg)
     ctx = SimpleNamespace(cfg=cfg, worker=worker, throttle=LoginThrottle(limits={"user:": USER_LIMIT}), pin_throttle=LoginThrottle(limit=5), tickets=Tickets(), pending_totp={},
