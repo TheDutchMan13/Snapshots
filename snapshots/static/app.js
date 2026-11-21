@@ -321,6 +321,87 @@ const ROUTE_TITLES = {
   settings: "Settings",
 };
 
+// Desktop refresh: enhance the existing navigation without changing its routes or actions.
+// These icon paths are static, not derived from a photo, filename, or user input.
+const NAV_GLYPHS = {
+  all: '<rect x="3" y="3" width="8" height="8" rx="2"/><rect x="13" y="3" width="8" height="8" rx="2"/><rect x="3" y="13" width="8" height="8" rx="2"/><rect x="13" y="13" width="8" height="8" rx="2"/>',
+  photos: '<rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="9" cy="9" r="1.5"/><path d="m4 17 5-5 4 4 3-3 4 4"/>',
+  videos: '<rect x="3" y="5" width="18" height="14" rx="3"/><path d="m10 9 5 3-5 3z"/>',
+  favorites: '<path d="M12 20.4S3 15.1 3 9a4.5 4.5 0 0 1 8.9-1 4.5 4.5 0 0 1 9.1 1c0 6.1-9 11.4-9 11.4Z"/>',
+  albums: '<rect x="4" y="7" width="16" height="13" rx="2"/><path d="M7 4h10M9 2h6"/>',
+  people: '<circle cx="12" cy="8" r="3.5"/><path d="M5 20c.8-4.2 3.2-6 7-6s6.2 1.8 7 6"/>',
+  places: '<path d="M19 10c0 5-7 11-7 11S5 15 5 10a7 7 0 1 1 14 0Z"/><circle cx="12" cy="10" r="2.5"/>',
+  map: '<path d="m3 5 6-2 6 2 6-2v16l-6 2-6-2-6 2zM9 3v16m6-14v16"/>',
+  activity: '<path d="M3 12h4l3-7 4 14 3-7h4"/>',
+  calendar: '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M7 3v4m10-4v4M3 10h18"/>',
+  events: '<path d="m12 3 2.4 6.6L21 12l-6.6 2.4L12 21l-2.4-6.6L3 12l6.6-2.4Z"/>',
+  highlights: '<path d="m12 2 2.7 7.3L22 12l-7.3 2.7L12 22l-2.7-7.3L2 12l7.3-2.7Z"/>',
+  review: '<circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 2"/>',
+  pets: '<path d="M7 13c-2 1-3 3-2 5 1 3 4 2 7 1 3 1 6 2 7-1 1-2 0-4-2-5-2-1-3-4-5-4s-3 3-5 4Z"/><ellipse cx="5" cy="8" rx="1.5" ry="2"/><ellipse cx="10" cy="5" rx="1.5" ry="2"/><ellipse cx="16" cy="5" rx="1.5" ry="2"/><ellipse cx="20" cy="8" rx="1.5" ry="2"/>',
+  tags: '<path d="M3 4h10l8 8-9 9-9-9z"/><circle cx="8" cy="9" r="1.5"/>',
+  folders: '<path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/>',
+  cleanup: '<path d="m4 16 7-11 9 6-7 11zM11 5l9 6M7 12l9 6"/>',
+  storage: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 11h18m-14 5h.01M11 16h.01"/>',
+  health: '<path d="M3 12h5l3-6 3 12 3-6h4"/>',
+  archive: '<rect x="3" y="4" width="18" height="5" rx="1"/><path d="M5 9v11h14V9m-10 5h6"/>',
+  locked: '<rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3m-4 5v2"/>',
+  trash: '<path d="M4 6h16M9 6V4h6v2m3 0-1 15H7L6 6m4 4v7m4-7v7"/>',
+  settings: '<circle cx="12" cy="12" r="3"/><path d="m10 2-.5 2.4-2 .9L5.4 4 3 6.5l1.4 2-.8 2L1 11v3l2.6.5.8 2-1.4 2L5.4 21l2.1-1.4 2 .8L10 23h4l.5-2.6 2-.8 2.1 1.4 2.4-2.5-1.4-2 .8-2L23 14v-3l-2.6-.5-.8-2 1.4-2L18.6 4l-2.1 1.3-2-.9L14 2Z"/>',
+};
+function decorateSidebar() {
+  document.querySelectorAll('.side .nav[data-route], .side .nav-toggle').forEach((node) => {
+    if (node.querySelector('.nav-icon')) return;
+    const glyph = node.classList.contains('nav-toggle')
+      ? '<circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/>'
+      : NAV_GLYPHS[node.dataset.route];
+    if (!glyph) return;
+    const icon = document.createElement('span');
+    icon.className = 'nav-icon';
+    icon.setAttribute('aria-hidden', 'true');
+    icon.innerHTML = `<svg viewBox="0 0 24 24">${glyph}</svg>`;
+    node.prepend(icon);
+  });
+}
+decorateSidebar();
+
+const GALLERY_LANDING = {
+  all: ['All your moments', 'Every photo, every story, all in one beautiful place.'],
+  photos: ['Your photography', 'A collection of the moments worth keeping.'],
+  videos: ['Moments in motion', 'Relive the memories that are better in motion.'],
+  favorites: ['Close to your heart', 'The memories you come back to again and again.'],
+};
+function syncGalleryChrome() {
+  const r = S.route;
+  const simple = r && r.view === 'grid' && GALLERY_LANDING[r.name]
+    && !r.memory && !r.album && !r.person && !r.pet && !r.area && !r.event && !r.tag
+    && !S.q;
+  $('gallery-intro').hidden = !simple;
+  $('gallery-nav').hidden = !simple;
+  $('desktop-title').textContent = r ? (r.name === 'all' ? 'All moments' : (ROUTE_TITLES[r.name] || 'Library')) : 'All moments';
+  if (!simple) return;
+  // The counts are the whole library's: only on All, where that is what the page shows.
+  document.querySelector('.gallery-stats').hidden = r.name !== 'all';
+  const [title, description] = GALLERY_LANDING[r.name];
+  $('gallery-title').textContent = title;
+  $('gallery-description').textContent = description;
+  document.querySelectorAll('[data-gallery-route]').forEach((a) => {
+    if (a.dataset.galleryRoute === r.name) a.setAttribute('aria-current', 'page');
+    else a.removeAttribute('aria-current');
+  });
+}
+function syncGalleryStatus(st) {
+  if (!st) return;
+  $('gallery-photo-count').textContent = fmtInt(st.photos || 0);
+  $('gallery-video-count').textContent = fmtInt(st.videos || 0);
+  const path = (st.library_path || '').replace(/[\\/]+$/, '');
+  $('side-library-name').textContent = path ? path.split(/[\\/]/).pop() : 'My library';
+  const card = document.querySelector('.library-card');
+  const scanning = !!(st.scan && st.scan.running);
+  card.classList.toggle('is-scanning', scanning);
+  card.classList.toggle('has-issue', !st.library_ok);
+  $('side-sync-label').textContent = !st.library_ok ? 'Folder unavailable' : scanning ? 'Adding new moments…' : 'Up to date';
+}
+
 /** Thrown by pageApi when the page changed while waiting: the old page's answer is dropped. */
 class Stale extends Error { constructor() { super(""); } }
 window.addEventListener("unhandledrejection", (e) => { if (e.reason instanceof Stale) e.preventDefault(); });
@@ -365,6 +446,7 @@ async function render() {
   if (!keepSearch) { S.q = ""; $("search").value = ""; }
   S.look = S.route.like ? "like" : null;      // More like this: most alike first, no months
   keepSearch = false;
+  syncGalleryChrome();
   if (!S.q) topBar.classList.remove("searching");
   markTab();
   stopSelecting();
@@ -3181,6 +3263,7 @@ function renderStatus() {
   $("account-name").textContent = st.user ? st.user.username : "Account";
   document.querySelectorAll(".admin-only").forEach((e) => { e.hidden = !(st.user && st.user.is_admin); });
   $("st-counts").textContent = `${plural(st.photos, "photo")} · ${plural(st.videos, "video")}`;
+  syncGalleryStatus(st);
   $("st-library").textContent = st.library_path ? `Library: ${st.library_path}` : "";
   const sc = st.scan;
   $("st-scan").textContent = sc.running
@@ -3248,6 +3331,7 @@ $("search").addEventListener("input", (e) => {
   searchTimer = setTimeout(() => {
     S.q = e.target.value.trim();
     S.look = null;
+    syncGalleryChrome();
     // Search looks through everything, except that All, Photos, Videos and Favourites keep their filter.
     if (S.q && !SEARCHABLE.includes(S.route.name)) {
       keepSearch = true;
@@ -6017,6 +6101,14 @@ $("tabbar").addEventListener("click", (e) => {
 $("sheet-backdrop").addEventListener("click", closeSheet);
 side.addEventListener("click", (e) => { if (e.target.closest("a.nav")) closeSheet(); });
 $("account-menu").addEventListener("click", (e) => { if (e.target.closest("button")) closeSheet(); });
+// Windows-friendly search shortcut; the search field still works normally without it.
+document.addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k" && !document.querySelector("dialog[open]")) {
+    e.preventDefault();
+    openSearch();
+    $("search").select();
+  }
+});
 $("search-open").addEventListener("click", openSearch);
 $("search-close").addEventListener("click", closeSearch);
 $("search").addEventListener("keydown", (e) => {
