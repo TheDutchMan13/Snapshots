@@ -336,9 +336,17 @@ def router(ctx) -> APIRouter:
         return {"id": row["id"], "name": row["name"], "species": row["species"], "hidden": bool(row["hidden"]),
                 "photos": row["photos"], "cover": row["cover"], "birthday": row["birthday"]}
 
+    def _shown(conn, row) -> bool:
+        """A pet is shown when it has photos anyone can see. A named pet with no photos at all (they were
+        all moved to another pet) is kept too, so its name and birthday are not lost; one whose photos
+        are only in the locked folder or the trash is not for anyone's eyes."""
+        if row["photos"]:
+            return True
+        return not conn.execute("SELECT 1 FROM pet_sightings WHERE pet_id = ?", (row["id"],)).fetchone()
+
     def get_pet(conn, pet_id: int) -> dict:
         row = conn.execute(_PET_SQL + " WHERE p.id = ? GROUP BY p.id", (pet_id,)).fetchone()
-        if row is None or not row["photos"]:      # only in locked or trashed photos: not for anyone's eyes
+        if row is None or not _shown(conn, row):
             raise HTTPException(404, "No such pet.")
         return _pet_json(row)
 
@@ -350,7 +358,8 @@ def router(ctx) -> APIRouter:
             rows = conn.execute(_PET_SQL + " WHERE p.hidden = ? GROUP BY p.id"
                                 " HAVING p.name IS NOT NULL OR photos >= ? ORDER BY p.name IS NULL, photos DESC",
                                 (int(hidden), pets_mod.MIN_PHOTOS)).fetchall()
-        return {"pets": [_pet_json(r) for r in rows if r["photos"]],
+            shown = [r for r in rows if _shown(conn, r)]
+        return {"pets": [_pet_json(r) for r in shown],
                 "enabled": cfg.find_pets and cfg.smart_search, "state": worker.pets.state}
 
     @r.get("/api/pets/{pet_id}")

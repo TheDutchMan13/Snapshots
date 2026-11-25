@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Upl
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator
 
-from . import __version__, analysis, colors, dates, db, filechange, libraries, linking, media, ranking, smart, sorting, spelling, storage, webhooks
+from . import __version__, analysis, colors, dates, db, filechange, libraries, linking, media, pets as pets_mod, ranking, smart, sorting, spelling, storage, webhooks
 from .app import current_user, require_admin, safe_filename
 from .config import network_warning
 from .scanner import _make_thumb, index_file, sha1_of
@@ -572,8 +572,7 @@ def router(ctx) -> APIRouter:
                          (text, edit_v, asset_id))
             # What a person said about a pet in this photo stays; where the animal is in the edited
             # picture is not known, so it is the whole picture and never the pet's face (pets.py).
-            conn.execute("DELETE FROM pet_sightings WHERE asset_id = ? AND manual = 0", (asset_id,))
-            conn.execute("UPDATE pet_sightings SET x = 0, y = 0, w = 1, h = 1, score = 0 WHERE asset_id = ?", (asset_id,))
+            pets_mod.reset_sightings(cfg, conn, asset_id)
             conn.execute("DELETE FROM clip_vectors WHERE asset_id = ?", (asset_id,))
             _make_thumb(cfg, conn, asset_id, "photo", full, text)
             row = db.get_asset(conn, asset_id, user["id"])
@@ -589,7 +588,7 @@ def router(ctx) -> APIRouter:
         photo is turned, as in the editor, because it would no longer frame the same part.
         """
         user = current_user(request)
-        done, skipped = [], 0
+        done, skipped, versions = [], 0, {}
         with db.session(cfg.db_path) as conn:
             ids = db.open_ids(conn, body.ids)
         for asset_id in ids:
@@ -600,13 +599,17 @@ def router(ctx) -> APIRouter:
                     continue
                 file_of(row)
                 had = media.parse_edits(row["edits"]) or {}
-                edits = {"rotate": (int(had.get("rotate") or 0) + body.degrees) % 360, "flip": bool(had.get("flip")),
+                # A photo is turned first and mirrored after (media.apply_edits), so on a mirrored photo
+                # a turn that looks clockwise is a turn the other way in the recipe.
+                step = -body.degrees if had.get("flip") else body.degrees
+                edits = {"rotate": (int(had.get("rotate") or 0) + step) % 360, "flip": bool(had.get("flip")),
                          "straighten": had.get("straighten") or 0, "crop": None}
-                store_edits(row, user, media.parse_edits(edits))
+                new = store_edits(row, user, media.parse_edits(edits))
                 done.append(asset_id)
+                versions[asset_id] = db.version(new)
             except HTTPException:
                 skipped += 1
-        return {"turned": done, "skipped": skipped + len(body.ids) - len(ids)}
+        return {"turned": done, "skipped": skipped + len(body.ids) - len(ids), "versions": versions}
 
     def _file_change(asset_id: int, request: Request, action):
         """Run apply_edits / restore_file for an administrator, and say what happened as the sentence it is."""

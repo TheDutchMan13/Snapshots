@@ -29,12 +29,13 @@ def test_photos_are_turned_on_top_of_what_they_have_and_originals_stay(tmp_path)
         assert thumb_size(c, a)[1] > thumb_size(c, a)[0]
         assert c.get(f"/api/assets/{a}").json()["edits"]["rotate"] == 90
 
-        # a second turn adds to the first, a crop is dropped, and a flip is kept
+        # a second turn adds to the first, a crop is dropped, and a flip is kept (the turn goes the other way
+        # in the recipe on a mirrored photo: see the mirrored-photo test)
         c.post(f"/api/assets/{b}/edits", json={"edits": {"rotate": 90, "flip": True, "crop": [0, 0, 0.5, 0.5]}})
         assert c.post("/api/assets/turn", json={"ids": [a, b], "degrees": 270}).status_code == 200
         assert c.get(f"/api/assets/{a}").json()["edits"] is None             # a full turn: nothing left to apply
         edits_b = c.get(f"/api/assets/{b}").json()["edits"]
-        assert edits_b["rotate"] == 0 and edits_b["flip"] is True and edits_b["crop"] is None
+        assert edits_b["rotate"] == 180 and edits_b["flip"] is True and edits_b["crop"] is None
 
         assert (root / "a.jpg").read_bytes() == before                       # the file is not touched
 
@@ -84,3 +85,38 @@ def test_a_new_import_is_not_refused_while_the_last_one_is_still_being_recorded(
     assert manager.thread.is_alive() and not manager.snapshot()["running"]
     assert manager.start("immich", lambda m: {"files": 0}, 1, dry_run=True)       # not refused
     worker.release.set()
+
+
+def test_a_turn_looks_the_same_way_on_a_mirrored_photo(tmp_path):
+    """The recipe turns first and mirrors after, so on a mirrored photo the turn is stored the other way."""
+    root = tmp_path / "Photos"
+    img = Image.new("RGB", (640, 480), (255, 255, 255))
+    for x in range(200):
+        for y in range(150):
+            img.putpixel((x, y), (255, 0, 0))           # a red block in the top left corner
+    root.mkdir(parents=True)
+    img.save(root / "a.jpg", quality=95)
+    c, cfg = new_client(tmp_path, root)
+    with c:
+        setup_admin(c)
+        wait_scan(c)
+        a = ids_by_name(c)["a.jpg"]
+
+        def corner():
+            im = Image.open(io.BytesIO(c.get(f"/api/assets/{a}/thumb").content)).convert("RGB")
+            w, h = im.size
+            at = {"top left": (w // 8, h // 8), "top right": (w - w // 8, h // 8),
+                  "bottom left": (w // 8, h - h // 8), "bottom right": (w - w // 8, h - h // 8)}
+            return [k for k, p in at.items() if im.getpixel(p)[1] < 100]
+
+        assert corner() == ["top left"]
+        c.post(f"/api/assets/{a}/edits", json={"edits": {"flip": True}})
+        assert corner() == ["top right"]
+        for expected in ("bottom right", "bottom left", "top left", "top right"):   # clockwise, a quarter at a time
+            r = c.post("/api/assets/turn", json={"ids": [a], "degrees": 90})
+            assert r.status_code == 200 and a in r.json()["turned"] and str(a) in r.json()["versions"]
+            assert corner() == [expected]
+        # Without a mirror, as before.
+        c.post(f"/api/assets/{a}/edits", json={"edits": None})
+        c.post("/api/assets/turn", json={"ids": [a], "degrees": 90})
+        assert corner() == ["top right"]

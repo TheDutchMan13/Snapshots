@@ -2596,17 +2596,22 @@ async function turnDialog(ids) {
     },
   });
   if (!degrees) return;
-  let turned = 0, skipped = 0;
+  const turnedIds = [];
+  let skipped = 0;
   try {
     for (let i = 0; i < ids.length; i += 200) {
       const out = await post("/api/assets/turn", { ids: ids.slice(i, i + 200), degrees });
-      turned += out.turned.length; skipped += out.skipped;
-      for (const id of out.turned) { const it = S.items.find((x) => x.id === id); if (it) { it.turn = null; it.edited = true; } }
+      skipped += out.skipped;
+      for (const id of out.turned) {
+        turnedIds.push(id);
+        // The picture is shown again in place (the page keeps its place, the search and the selection).
+        applyUpdated({ id, v: (out.versions || {})[id], turn: null, edited: true });
+      }
     }
   } catch (err) { flashNote(err.message); }
-  if (S.route.sideways) removeItems(ids);
+  const turned = turnedIds.length;
+  if (S.route.sideways && turned) removeItems(turnedIds);     // only the ones that were turned leave this list
   flashNote(`${plural(turned, "photo")} turned` + (skipped ? `, ${skipped} could not be` : ""));
-  if (turned) render();
 }
 
 async function turnUpright(items) {
@@ -4307,8 +4312,10 @@ $("ed-crop").addEventListener("pointermove", (e) => {
 });
 $("ed-crop").addEventListener("pointerup", () => { edDrag = null; });
 
-$("ed-left").addEventListener("click", () => { ED.rotate = (ED.rotate + 270) % 360; ED.crop = [0, 0, 1, 1]; if (ratioValue()) fitRatio(ratioValue()); drawEditor(); });
-$("ed-right").addEventListener("click", () => { ED.rotate = (ED.rotate + 90) % 360; ED.crop = [0, 0, 1, 1]; if (ratioValue()) fitRatio(ratioValue()); drawEditor(); });
+// A photo is turned first and mirrored after, so on a mirrored photo a turn that looks to the left
+// is a quarter the other way in the recipe.
+$("ed-left").addEventListener("click", () => { ED.rotate = (ED.rotate + (ED.flip ? 90 : 270)) % 360; ED.crop = [0, 0, 1, 1]; if (ratioValue()) fitRatio(ratioValue()); drawEditor(); });
+$("ed-right").addEventListener("click", () => { ED.rotate = (ED.rotate + (ED.flip ? 270 : 90)) % 360; ED.crop = [0, 0, 1, 1]; if (ratioValue()) fitRatio(ratioValue()); drawEditor(); });
 $("ed-flip").addEventListener("click", () => { ED.flip = !ED.flip; $("ed-flip").setAttribute("aria-pressed", String(ED.flip)); drawEditor(); });
 $("ed-angle").addEventListener("input", () => { ED.angle = Number($("ed-angle").value); $("ed-angle-out").textContent = `${ED.angle}°`; drawEditor(); });
 $("ed-angle").addEventListener("dblclick", () => { ED.angle = 0; $("ed-angle").value = 0; $("ed-angle-out").textContent = "0°"; drawEditor(); });
@@ -6103,7 +6110,7 @@ side.addEventListener("click", (e) => { if (e.target.closest("a.nav")) closeShee
 $("account-menu").addEventListener("click", (e) => { if (e.target.closest("button")) closeSheet(); });
 // Windows-friendly search shortcut; the search field still works normally without it.
 document.addEventListener("keydown", (e) => {
-  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k" && !document.querySelector("dialog[open]")) {
+  if ((e.ctrlKey || e.metaKey) && String(e.key || "").toLowerCase() === "k" && !document.querySelector("dialog[open]")) {
     e.preventDefault();
     openSearch();
     $("search").select();

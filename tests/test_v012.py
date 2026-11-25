@@ -516,3 +516,78 @@ def test_a_misidentified_pet_can_be_moved_and_a_missed_one_added(tmp_path, monke
         assert ids["cat0.jpg"] not in {i["id"] for i in c.get("/api/assets", params={"pet": cat}).json()["items"]}
         assert c.post(f"/api/pets/{cat}/add", json={"ids": [999999]}).status_code == 409
         assert c.post("/api/pets/999999/add", json={"ids": [ids["cat0.jpg"]]}).status_code == 404
+
+
+def test_every_photo_can_be_taken_out_of_a_pet_and_a_named_pet_is_not_lost(tmp_path, monkeypatch):
+    root = tmp_path / "Photos"
+    for k in range(3):
+        make_jpeg(root / f"dog{k}.jpg", f"2024:01:0{k + 1} 10:00:00", color=(230, 30, 30))
+    for k in range(3):
+        make_jpeg(root / f"cat{k}.jpg", f"2024:02:0{k + 1} 10:00:00", color=(30, 30, 230))
+    c, cfg = new_client(tmp_path, root, smart_search=True)
+    monkeypatch.setattr(c.app.state.ctx.worker.clip, "load_engine", lambda: AnimalEngine())
+    monkeypatch.setattr(clipsearch.ClipJob, "ready", lambda self: True)
+    with c:
+        setup_admin(c)
+        wait_scan(c)
+        ids = ids_by_name(c)
+
+        def done():
+            with db.session(cfg.db_path) as conn:
+                return conn.execute("SELECT COUNT(*) FROM assets WHERE pets_done = 0 OR clip_done = 0"
+                                    " OR turn_done = 0").fetchone()[0] == 0
+        wait_for(done, timeout=60)
+        by_species = {p["species"]: p["id"] for p in c.get("/api/pets").json()["pets"]}
+        dog, cat = by_species["dog"], by_species["cat"]
+        assert c.patch(f"/api/pets/{dog}", json={"name": "Rex"}).status_code == 200
+
+        # All of a pet's photos taken out at once: it works, and the named pet is still there to open.
+        r = c.post(f"/api/pets/{dog}/remove", json={"ids": [ids[f"dog{k}.jpg"] for k in range(3)]})
+        assert r.status_code == 200 and r.json()["photos"] == 0
+        listed = {p["id"]: p for p in c.get("/api/pets").json()["pets"]}
+        assert listed[dog]["name"] == "Rex" and listed[dog]["photos"] == 0
+        assert c.get(f"/api/pets/{dog}").status_code == 200
+        assert c.get("/api/assets", params={"pet": dog}).json()["items"] == []
+
+        # Photos can be put back, and the pet is whole again.
+        r = c.post(f"/api/pets/{dog}/add", json={"ids": [ids["dog0.jpg"]]})
+        assert r.status_code == 200 and r.json()["photos"] == 1
+
+        # An unnamed pet whose photos all moved away is not offered (there is nothing to show of it).
+        r = c.post(f"/api/pets/{cat}/remove", json={"ids": [ids[f"cat{k}.jpg"] for k in range(3)]})
+        assert r.status_code == 200
+        wait_for(lambda: cat not in {p["id"] for p in c.get("/api/pets").json()["pets"]}, timeout=10)
+
+
+def test_the_face_of_a_pet_is_cut_again_when_a_hand_tagged_photo_is_edited(tmp_path, monkeypatch):
+    root = tmp_path / "Photos"
+    make_jpeg(root / "dog0.jpg", "2024:01:01 10:00:00", color=(230, 30, 30), size=(640, 480))
+    make_jpeg(root / "hidden.jpg", "2024:03:01 10:00:00", color=(30, 200, 30), size=(640, 480))
+    for k in range(2):
+        make_jpeg(root / f"dog{k + 1}.jpg", f"2024:01:0{k + 2} 10:00:00", color=(230, 30, 30))
+    c, cfg = new_client(tmp_path, root, smart_search=True)
+    monkeypatch.setattr(c.app.state.ctx.worker.clip, "load_engine", lambda: AnimalEngine())
+    monkeypatch.setattr(clipsearch.ClipJob, "ready", lambda self: True)
+    with c:
+        setup_admin(c)
+        wait_scan(c)
+        ids = ids_by_name(c)
+
+        def done():
+            with db.session(cfg.db_path) as conn:
+                return conn.execute("SELECT COUNT(*) FROM assets WHERE pets_done = 0 OR clip_done = 0"
+                                    " OR turn_done = 0").fetchone()[0] == 0
+        wait_for(done, timeout=60)
+        dog = c.get("/api/pets").json()["pets"][0]["id"]
+        # Every photo of this pet is by hand, so the "face" is a whole picture.
+        for k in range(3):
+            c.post(f"/api/pets/{dog}/add", json={"ids": [ids[f"dog{k}.jpg"]]})
+        c.post(f"/api/pets/{dog}/add", json={"ids": [ids["hidden.jpg"]]})
+        assert c.get(f"/api/pets/{dog}/thumb").status_code == 200
+        kept = list((cfg.data_dir / "pets").glob("*.jpg"))
+        assert kept
+        for k in range(3):
+            c.post(f"/api/assets/{ids[f'dog{k}.jpg']}/edits", json={"edits": {"rotate": 90}})
+        c.post(f"/api/assets/{ids['hidden.jpg']}/edits", json={"edits": {"rotate": 90}})
+        assert not [p for p in kept if p.exists()]            # cut again from the new pictures when asked
+        assert c.get(f"/api/pets/{dog}/thumb").status_code == 200

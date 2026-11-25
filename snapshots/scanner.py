@@ -23,7 +23,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from . import db, libraries, linking, media, webhooks, xmp
+from . import db, libraries, linking, media, pets, webhooks, xmp
 from .config import Config
 
 log = logging.getLogger("snapshots.scanner")
@@ -371,8 +371,7 @@ def store(cfg: Config, conn, p: Prepared, replaces: int | None = None) -> tuple[
         conn.execute("DELETE FROM clip_vectors WHERE asset_id = ?", (asset_id,))
         # What a person said about a pet in this photo stays (pets.py). Where the animal is in the
         # picture is no longer known, so it is the whole picture, and never the pet's face.
-        conn.execute("DELETE FROM pet_sightings WHERE asset_id = ? AND manual = 0", (asset_id,))
-        conn.execute("UPDATE pet_sightings SET x = 0, y = 0, w = 1, h = 1, score = 0 WHERE asset_id = ?", (asset_id,))
+        pets.reset_sightings(cfg, conn, asset_id)
         conn.execute("DELETE FROM not_duplicates WHERE a = ? OR b = ?", (asset_id, asset_id))
         conn.execute(
             """

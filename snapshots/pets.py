@@ -40,6 +40,22 @@ PARTS = ([(0.0, 0.0, 1.0, 1.0)]
          + [(x, y, 0.4, 0.4) for y in (0.0, 0.3, 0.6) for x in (0.0, 0.3, 0.6)])
 
 
+def reset_sightings(cfg, conn, asset_id: int) -> None:
+    """The picture of a photo changed (a new file, or an edit): what the program found in it is stale.
+
+    What a person said stays (a pet tagged by hand, or "not this pet"), but where the animal is in the new
+    picture is no longer known, so it is the whole picture, and never the pet's face. The small picture
+    kept of such a sighting (the pet's face in lists) is dropped, so it is cut again from the new thumbnail.
+    """
+    conn.execute("DELETE FROM pet_sightings WHERE asset_id = ? AND manual = 0", (asset_id,))
+    for (sighting,) in conn.execute("SELECT id FROM pet_sightings WHERE asset_id = ?", (asset_id,)).fetchall():
+        try:
+            (cfg.data_dir / "pets" / f"{sighting}.jpg").unlink(missing_ok=True)
+        except OSError:
+            pass
+    conn.execute("UPDATE pet_sightings SET x = 0, y = 0, w = 1, h = 1, score = 0 WHERE asset_id = ?", (asset_id,))
+
+
 class Words:
     """The description vectors, made once."""
 
