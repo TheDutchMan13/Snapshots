@@ -3804,13 +3804,14 @@ async function manageUsers() {
             const who = el("div", "who");
             who.append(el("div", null, u.username), el("div", "role", (u.is_admin ? "Administrator" : "Member") + (u.two_step ? " · two-step login" : "")));
             rowEl.append(who);
-            rowEl.append(button("Reset password", "btn small", async () => {
+            const self = S.me && u.id === S.me.id;   // your own password and two-step login: on the Account page
+            if (!self) rowEl.append(button("Reset password", "btn small", async () => {
               const pw = window.prompt(`New password for ${u.username} (8 characters or more):`);
               if (pw == null) return;
               try { await patch(`/api/users/${u.id}`, { password: pw }); ctl.error(""); flashNote(`Password changed for ${u.username}. Their devices and API keys are signed out.`); }
               catch (err) { ctl.error(err.message); }
             }));
-            if (u.two_step) {
+            if (u.two_step && !self) {
               rowEl.append(button("Turn off two-step", "btn small", async () => {
                 if (!window.confirm(`Turn off two-step login for ${u.username}? Use this when they lost their phone and their recovery codes. They can turn it on again.`)) return;
                 try { await patch(`/api/users/${u.id}`, { two_step_off: true }); ctl.error(""); flashNote(`Two-step login is off for ${u.username}`); draw(); }

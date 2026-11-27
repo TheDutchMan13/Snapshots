@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__, db, webhooks
-from .auth import COOKIE, CSRF_HEADER, USER_LIMIT, LoginThrottle, Tickets, user_for_token
+from .auth import COOKIE, CSRF_HEADER, USER_LIMIT, LoginThrottle, Tickets, host_allowed, user_for_token
 from .config import Config
 from .updates import UpdateChecker
 from .worker import Worker
@@ -107,6 +107,63 @@ def require_admin(request: Request) -> dict:
     return user
 
 
+def require_admin_session(request: Request) -> dict:
+    """An administrator signed in with a password (not an API key): for managing accounts, which can
+    reset passwords and so reach everything a key is kept away from."""
+    require_session(request)
+    return require_admin(request)
+
+
+MAX_BODY = 1024 * 1024        # requests other than uploads are small: anything bigger is refused unread
+
+
+class BodyLimit:
+    """Refuses request bodies over MAX_BODY on every address except the upload, also when the size
+    isn't given up front (chunked), so nobody can fill the PC's memory with one huge request."""
+
+    def __init__(self, app, limit: int = MAX_BODY, exempt: tuple = ("/api/upload",)):
+        self.app, self.limit, self.exempt = app, limit, exempt
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or scope.get("path") in self.exempt:
+            return await self.app(scope, receive, send)
+        for name, value in scope.get("headers") or ():
+            if name == b"content-length":
+                try:
+                    too_big = int(value) > self.limit
+                except ValueError:
+                    too_big = True
+                if too_big:
+                    return await self._refuse(send)
+        # Read the body first (it is small, or it is refused), then hand it on as it came.
+        messages, seen = [], 0
+        while True:
+            message = await receive()
+            messages.append(message)
+            if message["type"] != "http.request":
+                break
+            seen += len(message.get("body", b""))
+            if seen > self.limit:
+                return await self._refuse(send)
+            if not message.get("more_body"):
+                break
+
+        async def replay():
+            if messages:
+                return messages.pop(0)
+            return await receive()
+
+        await self.app(scope, replay, send)
+
+    @staticmethod
+    async def _refuse(send):
+        body = b'{"detail":"That request is too big."}'
+        await send({"type": "http.response.start", "status": 413,
+                    "headers": [(b"content-type", b"application/json"), (b"content-length", str(len(body)).encode()),
+                                (b"connection", b"close")]})
+        await send({"type": "http.response.body", "body": body})
+
+
 def create_app(cfg: Config, start_worker: bool = True) -> FastAPI:
     cfg.ensure_dirs()
     db.init(cfg.db_path, cfg.backups_path)
@@ -139,6 +196,13 @@ def create_app(cfg: Config, start_worker: bool = True) -> FastAPI:
     @app.middleware("http")
     async def guard(request: Request, call_next):
         path = request.url.path
+        if not host_allowed(request.headers.get("host"), cfg.allowed_hosts):
+            name = (request.headers.get("host") or "").split(":")[0][:100]
+            logging.getLogger("snapshots").warning("refused a request for %r (not one of this PC's names)", name)
+            return JSONResponse(
+                {"detail": f"Snapshots doesn't answer to the name {name}. If that is your own address for it "
+                           f"(a reverse proxy), add it to allowed_hosts in config.toml, like "
+                           f"allowed_hosts = [\"{name}\"], and restart Snapshots."}, status_code=421)
         if path.startswith("/api/"):
             authz = request.headers.get("authorization", "")
             bearer = authz[7:].strip() if authz.lower().startswith("bearer ") else None
@@ -185,4 +249,5 @@ def create_app(cfg: Config, start_worker: bool = True) -> FastAPI:
         return FileResponse(STATIC_DIR / "login.html", headers={"Cache-Control": "no-cache"})
 
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+    app.add_middleware(BodyLimit)
     return app

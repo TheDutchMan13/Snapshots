@@ -4,20 +4,20 @@ import time
 from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Request, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from . import __version__, auth, db, startup
-from .app import current_user, require_admin, require_session
+from .app import current_user, require_admin, require_admin_session, require_session
 
 
 class Credentials(BaseModel):
-    username: str
-    password: str
+    username: str = Field(max_length=200)
+    password: str = Field(max_length=1024)
 
 
 class CodeBody(BaseModel):
-    ticket: str
-    code: str
+    ticket: str = Field(max_length=200)
+    code: str = Field(max_length=100)
 
 
 class TwoStepConfirm(BaseModel):
@@ -41,6 +41,7 @@ class NewUser(BaseModel):
 
 class UserUpdate(BaseModel):
     password: str | None = None
+    current: str | None = None     # your own password, to change it or turn off your own two-step login here
     is_admin: bool | None = None
     two_step_off: bool = False
     take_locked: bool = False      # move their locked items into the asking administrator's locked folder
@@ -272,7 +273,7 @@ def router(ctx) -> APIRouter:
 
     @r.get("/api/users")
     def list_users(request: Request):
-        require_admin(request)
+        require_admin_session(request)
         with db.session(cfg.db_path) as conn:
             locked = dict(conn.execute("SELECT locked_by, COUNT(*) FROM assets WHERE locked_by IS NOT NULL"
                                        " GROUP BY locked_by").fetchall())
@@ -281,7 +282,7 @@ def router(ctx) -> APIRouter:
 
     @r.post("/api/users", status_code=201)
     def create_user(body: NewUser, request: Request):
-        require_admin(request)
+        require_admin_session(request)
         problem = auth.validate_username(body.username) or auth.validate_new_password(body.password)
         if problem:
             raise HTTPException(400, problem)
@@ -300,11 +301,16 @@ def router(ctx) -> APIRouter:
 
     @r.patch("/api/users/{user_id}")
     def update_user(user_id: int, body: UserUpdate, request: Request):
-        me = require_admin(request)
+        me = require_admin_session(request)
         with db.session(cfg.db_path) as conn:
             row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
             if row is None:
                 raise HTTPException(404, "No such account.")
+            if user_id == me["id"] and (body.password is not None or body.two_step_off):
+                # Your own account: as on the Account page, the current password is needed, so a session left
+                # open somewhere can't lock you out.
+                if not body.current or not auth.verify_password(body.current, row["pw_hash"]):
+                    raise HTTPException(400, "Your current password is not right.")
             if body.password is not None:
                 problem = auth.validate_new_password(body.password)
                 if problem:
@@ -331,7 +337,7 @@ def router(ctx) -> APIRouter:
 
     @r.delete("/api/users/{user_id}")
     def delete_user(user_id: int, request: Request):
-        me = require_admin(request)
+        me = require_admin_session(request)
         if user_id == me["id"]:
             raise HTTPException(400, "You can't delete your own account.")
         with db.session(cfg.db_path) as conn:

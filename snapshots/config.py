@@ -71,6 +71,7 @@ class Config:
     upload_template: str = "Uploads/{year}/{month}"  # where uploads and imported files are filed
     max_upload_gb: float = 20.0            # largest single upload request (one or more files)
     check_updates: bool = True             # now and then ask GitHub whether a newer Snapshots is out
+    allowed_hosts: list = field(default_factory=list)  # more web addresses Snapshots answers to (a reverse proxy's name)
     config_file: Path | None = None  # the file these settings were read from, if any
 
     @property
@@ -260,6 +261,11 @@ def load_config(config_file: str | os.PathLike | None = None, **overrides) -> Co
             if not isinstance(extra, list) or not all(isinstance(x, str) for x in extra):
                 raise ValueError(f"{path}: 'extra_libraries' should be a list of folders")
             cfg.extra_libraries = [Path(x) for x in extra if x.strip()]
+        if "allowed_hosts" in data:
+            hosts = data["allowed_hosts"]
+            if not isinstance(hosts, list) or not all(isinstance(x, str) for x in hosts):
+                raise ValueError(f"{path}: 'allowed_hosts' should be a list of names, like [\"photos.example.com\"]")
+            cfg.allowed_hosts = [x.strip().lower() for x in hosts if x.strip()]
         for key, kind in _FILE_KEYS.items():
             if key in data:
                 try:

@@ -196,11 +196,21 @@ class LoginThrottle:
         self._failures: dict[str, deque] = defaultdict(deque)
         self._lock = threading.Lock()
 
-    def _trim(self, key: str, now: float) -> deque:
-        q = self._failures[key]
+    MAX_KEYS = 20_000       # a guard against someone trying ever new names to fill the memory
+
+    def _trim(self, key: str, now: float) -> deque | None:
+        q = self._failures.get(key)
+        if q is None:
+            return None
         while q and now - q[0] > self.window:
             q.popleft()
+        if not q:
+            del self._failures[key]
+            return None
         return q
+
+    def _limit(self, key: str) -> int:
+        return next((n for prefix, n in self.limits.items() if key.startswith(prefix)), self.limit)
 
     def retry_after(self, *keys: str) -> int:
         """Seconds to wait before trying again (0 = go ahead)."""
@@ -209,16 +219,24 @@ class LoginThrottle:
             waits = []
             for key in keys:
                 q = self._trim(key, now)
-                limit = next((n for prefix, n in self.limits.items() if key.startswith(prefix)), self.limit)
-                if len(q) >= limit:
+                if q is not None and len(q) >= self._limit(key):
                     waits.append(int(self.window - (now - q[0])) + 1)
             return max(waits, default=0)
 
     def failed(self, *keys: str) -> None:
         now = time.time()
         with self._lock:
+            if len(self._failures) >= self.MAX_KEYS:
+                for k in list(self._failures):          # old failures are forgotten first
+                    self._trim(k, now)
             for key in keys:
-                self._trim(key, now).append(now)
+                q = self._trim(key, now)
+                if q is None:
+                    if len(self._failures) >= self.MAX_KEYS:
+                        continue                         # full of fresh failures: the address's count still holds
+                    q = self._failures[key] = deque()
+                if len(q) < self._limit(key):            # a blocked key needs no more entries
+                    q.append(now)
 
     def succeeded(self, *keys: str) -> None:
         with self._lock:
@@ -252,7 +270,7 @@ def is_known_device(conn, token: str | None, username: str) -> bool:
 
 def throttle_keys(known: bool, username: str, device_token: str | None, address: str) -> tuple[str, ...]:
     """Which allowances a login attempt counts against (see the module notes)."""
-    name = username.strip().lower()
+    name = username.strip().lower()[:100]       # names are at most 64 characters; nothing longer is kept
     if known:
         return (f"device:{_token_hash(device_token or '')}:{name}",)
     # A new device is counted per user name *from its address*, so someone guessing from elsewhere can't
@@ -262,6 +280,40 @@ def throttle_keys(known: bool, username: str, device_token: str | None, address:
 
 
 USER_LIMIT = 100   # failures per user name in a window, from all new devices together
+
+
+# ---------------------------------------------------------------- which web addresses Snapshots answers to
+
+def host_allowed(host_header: str | None, extra: list[str] | tuple = ()) -> bool:
+    """Is a request's Host one Snapshots should answer?
+
+    A web page on another site can make the browser on this PC send requests to 127.0.0.1 under the page's
+    own name, after pointing that name at this PC ("DNS rebinding"). Such a request carries the other
+    site's name as its Host, so only names that can't belong to someone else's website are answered:
+    numbers (127.0.0.1, 100.x.y.z, [::1]), names without a dot (localhost, the PC's name, a Tailscale
+    short name), names under .ts.net, .local, .lan, .home.arpa and .internal, and the names listed in
+    allowed_hosts (for a reverse proxy with a name of its own).
+    """
+    import ipaddress
+
+    host = (host_header or "").strip().lower()
+    if not host:
+        return True                      # HTTP/1.0 without a Host: not from a browser
+    if host.startswith("["):             # [::1]:8080
+        host = host[1:host.find("]")] if "]" in host else host[1:]
+    elif host.count(":") == 1:
+        host = host.split(":")[0]
+    host = host.rstrip(".")
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        pass
+    if "." not in host:
+        return True
+    if host.endswith((".ts.net", ".local", ".lan", ".home.arpa", ".internal", ".localhost")):
+        return True
+    return host in {h.lower().rstrip(".") for h in extra}
 
 
 # ---------------------------------------------------------------- two-step login (TOTP)
